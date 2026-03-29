@@ -1,10 +1,10 @@
-l<!DOCTYPE html>
+<!DOCTYPE html>
 
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>NHRC — Water Temperature</title>
+<title>NHRC Water Temperature</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Source+Sans+3:wght@300;400;600;700&display=swap" rel="stylesheet"/>
@@ -163,7 +163,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   </div>
 
   <div id="error-view">
-    <h2>⚠️ No data yet</h2>
+    <h2>No data yet</h2>
     <p>The GitHub Actions workflow hasn't run yet, or encountered an error.<br/><br/>
     Go to your repo → <code>Actions</code> tab → <code>Fetch Govee Temperature</code> → <code>Run workflow</code>.</p>
   </div>
@@ -187,11 +187,11 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   </div>
   <div class="dash-top-btns">
     <div id="status-pill" class="pill pill-ok"><span class="pill-dot"></span><span id="pill-text">Live</span></div>
-    <button class="rb" onclick="loadData()" style="padding:5px 12px;">↻ Refresh</button>
+    <button class="rb" onclick="loadData()" style="padding:5px 12px;">Refresh</button>
   </div>
 </div>
 
-<div id="alert-banner" class="hidden">⚠️ <span id="alert-text"></span></div>
+<div id="alert-banner" class="hidden"><span id="alert-text"></span></div>
 
 <div class="temp-hero">
   <div class="temp-main">
@@ -207,8 +207,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 </div>
 
 <div class="rowing-status-card">
-  <div class="section-label">🚣 Rowing Status — Current Conditions</div>
-  <div id="rule-banner" class="rule-banner green"><span class="rule-icon">✅</span><span id="rule-text">Normal rowing conditions</span></div>
+  <div class="section-label">Rowing Status — Current Conditions</div>
+  <div id="rule-banner" class="rule-banner green"><span id="rule-text">Normal rowing conditions</span></div>
   <div class="tiers-grid" id="tiers-grid"></div>
   <div class="note-text" id="rowing-notes"></div>
 </div>
@@ -228,7 +228,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       <button class="rb" data-d="30">30 days</button>
       <button class="rb" data-d="90">3 months</button>
       <button class="rb" data-d="0">All time</button>
-      <button class="rb rb-csv" onclick="downloadCSV()">⬇ CSV</button>
+      <button class="rb rb-csv" onclick="downloadCSV()">Download CSV</button>
     </div>
   </div>
 
@@ -239,11 +239,18 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   </div>
 
   <div id="chart-single-msg" style="display:none;text-align:center;padding:40px 0;font-size:.82rem;color:var(--muted);"></div>
-  <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
+  <div style="position:relative;">
+    <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
+    <div id="scrubber-line" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(240,180,41,0.6);pointer-events:none;"></div>
+    <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:#162d52;border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
+      <div id="scrubber-temp" style="font-family:'Libre Baskerville',Georgia,serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
+      <div id="scrubber-time" style="font-family:'Source Sans 3',system-ui,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
+    </div>
+  </div>
 </div>
 
 <details id="debug-section">
-  <summary>🛠 Raw API response (debug)</summary>
+  <summary>Raw API response (debug)</summary>
   <pre id="debug-pre"></pre>
 </details>
 ```
@@ -324,9 +331,9 @@ function updateFreshnessWarnings() {
     document.getElementById('warn-gap-text').textContent =
       ` No readings received for ${h}h ${m}m. The sensor, gateway, or GitHub Actions workflow may be offline. Last reading: ${new Date(last.ts).toLocaleString()}.`;
     gapEl.classList.remove('hidden'); staleEl.classList.add('hidden');
-  } else if (ageMs > 20*60000) {
+  } else if (ageMs > 45*60000) {
     document.getElementById('warn-stale-text').textContent =
-      ` Last reading was ${ageMins} minutes ago. GitHub Actions runs every 10 minutes — a short delay is normal.`;
+      ` Last reading was ${ageMins} minutes ago. GitHub Actions typically runs every 30 minutes — if this persists check the Actions tab.`;
     staleEl.classList.remove('hidden'); gapEl.classList.add('hidden');
   } else {
     gapEl.classList.add('hidden'); staleEl.classList.add('hidden');
@@ -338,7 +345,7 @@ function updateInfoBar() {
   const last = state.allHistory[state.allHistory.length-1];
   const ageMs = Date.now() - last.ts;
   const ageMins = Math.round(ageMs/60000);
-  document.getElementById('info-dot').className = ageMs > 20*60000 ? 'dot-warn' : 'dot-live';
+  document.getElementById('info-dot').className = ageMs > 45*60000 ? 'dot-warn' : 'dot-live';
   document.getElementById('info-last').textContent =
     `Last reading: ${new Date(last.ts).toLocaleString()} (${ageMins<2?'just now':ageMins+' min ago'})`;
   document.getElementById('info-count').textContent =
@@ -367,7 +374,7 @@ function renderDashboard(tempC, raw) {
   document.getElementById('data-age').textContent = ageMins<2 ? 'Just now' : `${ageMins} min ago`;
 
   const pill = document.getElementById('status-pill');
-  if (ageMs > 20*60000) { pill.className='pill pill-warn'; document.getElementById('pill-text').textContent='Stale data'; }
+  if (ageMs > 45*60000) { pill.className='pill pill-warn'; document.getElementById('pill-text').textContent='Delayed'; }
   else                  { pill.className='pill pill-ok';   document.getElementById('pill-text').textContent='Live'; }
 
   const now = Date.now();
@@ -382,14 +389,14 @@ function renderDashboard(tempC, raw) {
   if (tempF < state.minAlert) {
     banner.classList.remove('hidden');
     document.getElementById('alert-text').textContent = `Water is ${tempF}°F — below ${state.minAlert}°F.`;
-    document.getElementById('status-text').textContent = '🥶 Cold';
+    document.getElementById('status-text').textContent = 'Cold';
   } else if (tempF > state.maxAlert) {
     banner.classList.remove('hidden');
     document.getElementById('alert-text').textContent = `Water is ${tempF}°F — above ${state.maxAlert}°F.`;
-    document.getElementById('status-text').textContent = '🔥 Hot';
+    document.getElementById('status-text').textContent = 'Hot';
   } else {
     banner.classList.add('hidden');
-    document.getElementById('status-text').textContent = '✅ Normal';
+    document.getElementById('status-text').textContent = 'Normal';
   }
 
   renderRowingStatus(tempF);
@@ -471,14 +478,7 @@ function initChart() {
       },
       plugins:{
         legend:{display:false},
-        tooltip:{
-          backgroundColor:'#162d52', borderColor:'rgba(240,180,41,0.3)', borderWidth:1,
-          titleColor:'#f0b429', bodyColor:'#f4f7fb',
-          callbacks:{
-            title: items => new Date(items[0].parsed.x).toLocaleString(),
-            label: ctx  => ` ${ctx.parsed.y.toFixed(1)}°F`
-          }
-        }
+        tooltip:{ enabled:false }
       }
     }
   });
@@ -527,44 +527,184 @@ function updateChart() {
   renderChartData(getSubset());
 }
 
-/* ── ROWING STATUS ── */
-function getRowingStatus(tempF) {
-  if (tempF < 40) return { level:'red', icon:'🚫', rule:'WINTER ROWING RULES in effect (water < 40°F)',
-    notes:'<strong>Eight Oar Rule:</strong> Quads (4x) and Eights (8+) only. Each rower must be certified by the Captain of Winter Rowing, wear over-the-shoulder auto-inflate life jackets, and have signed a Winter Rowing waiver. Two-boat minimum.',
-    tiers:[
-      {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'no'}]},
-      {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'no'}]},
-      {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'no'},{name:'2x / 4+/-',s:'no'},{name:'4x / 8+',s:'go',note:'Certified only'}]}]};
-  if (tempF <= 50) return { level:'yellow', icon:'⚠️', rule:'FOUR OAR RULE in effect (water 40–50°F)',
-    notes:'<strong>Four Oar Rule:</strong> No singles or pairs for Tier 1 or 2. Tier 3 may row with auto-inflate life jackets.',
-    tiers:[
-      {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'go',note:'w/ launch'}]},
-      {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
-      {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'no'},{name:'2x / 4+/-',s:'go',note:'⚠️ Life jackets'},{name:'4x / 8+',s:'go',note:'⚠️ Life jackets'}]}]};
-  if (tempF <= 60) return { level:'yellow', icon:'🌡️', rule:'COLD WATER restrictions apply (water 51–60°F)',
-    notes:'Buddy Boat strongly advised. Tier 1 restricted to 4+ or larger. Tier 2 may row 2x and above.',
-    tiers:[
-      {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
-      {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
-      {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'go'},{name:'2x / 4+/-',s:'go'},{name:'4x / 8+',s:'go'}]}]};
-  return { level:'green', icon:'✅', rule:'Normal rowing conditions (water > 60°F)',
-    notes:'Buddy Boat advised in Spring and Fall. Carry a cell phone and marine whistle. Wear Hi-Viz tops.',
-    tiers:[
-      {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'go'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
-      {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'go'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
-      {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'go'},{name:'2x / 4+/-',s:'go'},{name:'4x / 8+',s:'go'}]}]};
+/* ── SCRUBBER (Garmin-style crosshair) ── */
+function initScrubber() {
+  const wrap = document.getElementById('chart-wrap');
+  if (!wrap) return;
+
+  function getScrubberData(clientX) {
+    if (!chart) return null;
+    const canvas = wrap.querySelector('canvas');
+    const rect   = canvas.getBoundingClientRect();
+    const x      = clientX - rect.left;
+    if (x < 0 || x > rect.width) return null;
+
+    // Use Chart.js scale to convert pixel -> timestamp
+    const xScale = chart.scales.x;
+    const ts = xScale.getValueForPixel(x);
+    if (ts == null) return null;
+
+    // Find nearest data point
+    const data = chart.data.datasets[0].data;
+    if (!data.length) return null;
+    let closest = null, minDist = Infinity;
+    for (const pt of data) {
+      const d = Math.abs(pt.x - ts);
+      if (d < minDist) { minDist = d; closest = pt; }
+    }
+    return { closest, pixelX: x, canvasWidth: rect.width };
+  }
+
+  function showScrubber(clientX) {
+    const res = getScrubberData(clientX);
+    if (!res || !res.closest) { hideScrubber(); return; }
+    const { closest, pixelX, canvasWidth } = res;
+
+    const line = document.getElementById('scrubber-line');
+    const tip  = document.getElementById('scrubber-tip');
+    line.style.display = 'block';
+    line.style.left    = pixelX + 'px';
+    tip.style.display  = 'block';
+
+    document.getElementById('scrubber-temp').textContent = closest.y.toFixed(1) + '°F';
+    document.getElementById('scrubber-time').textContent =
+      new Date(closest.x).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+
+    // Keep tooltip within canvas bounds
+    const tipW = tip.offsetWidth || 120;
+    const left = pixelX + 10 + tipW > canvasWidth ? pixelX - tipW - 10 : pixelX + 10;
+    tip.style.left = left + 'px';
+  }
+
+  function hideScrubber() {
+    document.getElementById('scrubber-line').style.display = 'none';
+    document.getElementById('scrubber-tip').style.display  = 'none';
+  }
+
+  // Mouse events
+  wrap.addEventListener('mousemove',  e => showScrubber(e.clientX));
+  wrap.addEventListener('mouseleave', hideScrubber);
+
+  // Touch events
+  wrap.addEventListener('touchstart', e => { e.preventDefault(); showScrubber(e.touches[0].clientX); }, {passive:false});
+  wrap.addEventListener('touchmove',  e => { e.preventDefault(); showScrubber(e.touches[0].clientX); }, {passive:false});
+  wrap.addEventListener('touchend',   hideScrubber);
 }
 
+// Init scrubber once chart area is ready
+document.addEventListener('DOMContentLoaded', () => { setTimeout(initScrubber, 500); });
+
+/* ── ROWING STATUS ── */
+
+// Check how many of the last N calendar days all had every reading >= threshold.
+// Returns the count of consecutive days (starting from yesterday going back).
+function consecutiveDaysAbove(threshold, daysToCheck) {
+  const hist = state.allHistory;
+  if (!hist.length) return 0;
+  const now = Date.now();
+  let count = 0;
+  for (let d = 1; d <= daysToCheck; d++) {
+    const dayStart = now - d * 86400000;
+    const dayEnd   = now - (d - 1) * 86400000;
+    const readings = hist.filter(h => h.ts >= dayStart && h.ts < dayEnd);
+    if (!readings.length) break; // gap in history — can't confirm
+    const dayMin = Math.min(...readings.map(h => h.tempF));
+    if (dayMin >= threshold) count++;
+    else break; // streak broken
+  }
+  return count;
+}
+
+function getEffectiveLevel(tempF) {
+  // IMMEDIATE downgrade — cold direction triggers right away
+  if (tempF < 40) return { zone:'winter',    immediate:true };
+  if (tempF <= 50) return { zone:'fourOar',   immediate:true };
+  if (tempF <= 60) return { zone:'coldWater', immediate:true };
+
+  // Current temp > 60 — need 3 consecutive days above 60 to declare Normal
+  const hist = state.allHistory;
+  const histSpanDays = hist.length > 1
+    ? (hist[hist.length-1].ts - hist[0].ts) / 86400000 : 0;
+
+  if (histSpanDays < 3) {
+    // Not enough history to check 3 days
+    return { zone:'coldWater', immediate:false, insufficient:true };
+  }
+
+  const daysAbove60 = consecutiveDaysAbove(60, 3);
+  if (daysAbove60 >= 3) return { zone:'normal', immediate:false };
+
+  // Has history but streak not met yet
+  return { zone:'coldWater', immediate:false, insufficient:false, daysAbove60 };
+}
+
+// Zone definitions — tiers only (rule/notes added per-call below)
+const ZONE_TIERS = {
+  winter: [
+    {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'no'}]},
+    {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'no'}]},
+    {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'no'},{name:'2x / 4+/-',s:'no'},{name:'4x / 8+',s:'go',note:'Certified only'}]},
+  ],
+  fourOar: [
+    {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'go',note:'w/ launch'}]},
+    {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
+    {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'no'},{name:'2x / 4+/-',s:'go',note:'Life jackets req.'},{name:'4x / 8+',s:'go',note:'Life jackets req.'}]},
+  ],
+  coldWater: [
+    {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
+    {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
+    {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'go'},{name:'2x / 4+/-',s:'go'},{name:'4x / 8+',s:'go'}]},
+  ],
+  normal: [
+    {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'go'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
+    {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'go'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
+    {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'go'},{name:'2x / 4+/-',s:'go'},{name:'4x / 8+',s:'go'}]},
+  ],
+};
+
 function renderRowingStatus(tempF) {
-  const s = getRowingStatus(tempF);
+  const eff = getEffectiveLevel(tempF);
   const banner = document.getElementById('rule-banner');
-  banner.className = `rule-banner ${s.level}`;
-  banner.innerHTML = `<span>${s.icon}</span><span>${s.rule}</span>`;
-  document.getElementById('tiers-grid').innerHTML = s.tiers.map(tier=>`
+  const tiers  = ZONE_TIERS[eff.zone];
+  let rule, notes, cssLevel;
+
+  if (eff.zone === 'winter') {
+    cssLevel = 'red';
+    rule  = 'WINTER ROWING in effect (water < 40°F)';
+    notes = '<strong>Eight Oar Rule:</strong> Quads (4x) and Eights (8+) only. Each rower must be certified by the Captain of Winter Rowing, wear over-the-shoulder auto-inflate life jackets, and have signed a Winter Rowing waiver. Two-boat minimum.';
+  } else if (eff.zone === 'fourOar') {
+    cssLevel = 'yellow';
+    rule  = 'FOUR OAR RULE in effect (water 40–50°F)';
+    notes = '<strong>Four Oar Rule:</strong> No singles or pairs for Tier 1 or 2. Tier 3 may row 2x/4+/- with auto-inflate life jackets.';
+  } else if (eff.zone === 'coldWater') {
+    cssLevel = 'yellow';
+    if (eff.insufficient) {
+      rule  = 'COLD WATER caution (water 51–60°F) — insufficient history to declare Normal';
+      notes = 'Current temperature is above 60°F, but <strong>we do not yet have 3 days of data to declare Normal rowing conditions</strong>. Cold Water restrictions remain in effect until 3 consecutive days above 60°F are confirmed. Buddy Boat strongly advised.';
+    } else if (eff.daysAbove60 !== undefined) {
+      const need = 3 - eff.daysAbove60;
+      rule  = 'COLD WATER caution — awaiting 3-day confirmation';
+      notes = `Current temperature is above 60°F, but only <strong>${eff.daysAbove60} of 3 consecutive days</strong> above 60°F confirmed so far. Need ${need} more day${need===1?'':'s'} to declare Normal rowing conditions. Cold Water restrictions remain in effect.`;
+    } else {
+      rule  = 'COLD WATER restrictions apply (water 51–60°F)';
+      notes = 'Buddy Boat strongly advised. Tier 1 restricted to 4+ or larger. Tier 2 may row 2x and above. Tier 3 may row all boats.';
+    }
+  } else {
+    cssLevel = 'green';
+    rule  = 'Normal rowing conditions (water > 60°F, 3-day confirmed)';
+    notes = 'Buddy Boat advised in Spring and Fall. Carry a cell phone and marine whistle. Wear Hi-Viz tops.';
+  }
+
+  banner.className = `rule-banner ${cssLevel}`;
+  banner.innerHTML = `<span>${rule}</span>`;
+
+  document.getElementById('tiers-grid').innerHTML = tiers.map(tier=>`
     <div class="tier-card"><h4>${tier.name}</h4>
     ${tier.boats.map(b=>`<div class="boat-row"><span class="boat-name">${b.name}</span>
-      <span class="boat-status bs-${b.s}">${b.s==='go'?(b.note?'⚠️ Cond.':'✓ Row'):'✗ No'}</span></div>`).join('')}</div>`).join('');
-  document.getElementById('rowing-notes').innerHTML = s.notes;
+      <span class="boat-status bs-${b.s}">${b.s==='go'?(b.note?'! Cond.':'Row'):'No'}</span></div>`).join('')}
+    </div>`).join('');
+
+  document.getElementById('rowing-notes').innerHTML = notes;
 }
 
 function showError() {
