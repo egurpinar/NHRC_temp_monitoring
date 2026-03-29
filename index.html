@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+l<!DOCTYPE html>
 
 <html lang="en">
 <head>
@@ -6,6 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>NHRC — Water Temperature</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Source+Sans+3:wght@300;400;600;700&display=swap" rel="stylesheet"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
@@ -148,7 +149,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     <div class="header-text">
       <h1>New Haven Rowing Club</h1>
       <p>Housatonic River Water Monitor</p>
-      <div class="location">📍 Lake Housatonic, NHRC Boathouse</div>
+      <div class="location">Lake Housatonic, NHRC Boathouse</div>
     </div>
     <div class="header-motto">
       Pulsus Remorum Fit Spiritus Fortis<br/>
@@ -171,11 +172,11 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
 ```
 <div id="warn-gap" class="warn-banner level-danger hidden">
-  <span style="font-size:1rem;flex-shrink:0;margin-top:1px;">🔴</span>
+  <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
   <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
 </div>
 <div id="warn-stale" class="warn-banner level-warn hidden">
-  <span style="font-size:1rem;flex-shrink:0;margin-top:1px;">🟡</span>
+  <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
   <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
 </div>
 
