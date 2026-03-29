@@ -79,14 +79,14 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .temp-meta{font-family:var(--fsans);font-size:.72rem;color:var(--muted);margin-top:5px;}
 .temp-stats{display:flex;gap:20px;flex-wrap:wrap;}
 .temp-stat label{display:block;font-family:var(--fsans);font-size:.63rem;color:var(--muted);letter-spacing:.09em;text-transform:uppercase;margin-bottom:3px;}
-.temp-stat span{font-family:var(--fserif);font-size:1.2rem;color:var(--white);}
+.temp-stat span{font-family:var(--fserif);font-size:1.4rem;font-weight:700;color:var(--white);}
 
 /* ROWING STATUS */
 .rowing-status-card{background:var(--navy2);border:1px solid var(--border);border-radius:16px;padding:22px 20px;margin-bottom:16px;}
 .section-label{font-family:var(--fsans);font-size:.63rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);margin-bottom:10px;}
 .rule-banner{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;margin-bottom:18px;font-family:var(--fsans);font-size:.84rem;font-weight:600;}
 .rule-banner.green{background:rgba(46,125,79,.15);color:#5cc98a;border:1px solid rgba(46,125,79,.3);}
-.rule-banner.yellow{background:rgba(240,180,41,.12);color:var(--gold2);border:1px solid rgba(240,180,41,.25);}
+.rule-banner.yellow{background:rgba(255,209,102,.15);color:#ffd166;border:1px solid rgba(255,209,102,.5);}
 .rule-banner.red{background:rgba(224,62,62,.12);color:#f07070;border:1px solid rgba(224,62,62,.3);}
 .tiers-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
 @media(max-width:560px){.tiers-grid{grid-template-columns:1fr;}}
@@ -457,9 +457,9 @@ function initChart() {
       responsive:true, maintainAspectRatio:false, animation:false,
       scales:{
         x:{ type:'time', time:{displayFormats:{hour:'ha',day:'MMM D',week:'MMM D',month:'MMM YY'}},
-            ticks:{color:'#7a93b4',maxTicksLimit:7,font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
+            ticks:{color:'#b0c4de',maxTicksLimit:7,font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
             grid:{color:'rgba(255,255,255,0.04)'}},
-        y:{ ticks:{color:'#7a93b4',callback:v=>v+'°F',font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
+        y:{ ticks:{color:'#b0c4de',callback:v=>v+'°F',font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
             grid:{color:'rgba(255,255,255,0.04)'}}
       },
       plugins:{
