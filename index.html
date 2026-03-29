@@ -584,46 +584,82 @@ document.addEventListener('DOMContentLoaded', () => { setTimeout(initScrubber, 5
 
 /* ── ROWING STATUS ── */
 
-// Check how many of the last N calendar days all had every reading >= threshold.
-// Returns the count of consecutive days (starting from yesterday going back).
-function consecutiveDaysAbove(threshold, daysToCheck) {
+// Morning window: 5:00 AM – 9:00 AM local time.
+// This avoids solar warming bias and matches when rowers are on the water.
+// With GitHub Actions running every 30-40 min, we may get 3–6 readings per
+// morning window — we only need at least 1 to confirm a day.
+//
+// For each of the 3 days before today (i.e. yesterday, day before, 3 days ago):
+//   - Find all readings in that day's 6–9 AM window
+//   - If NO readings exist in that window → can't confirm → stop counting
+//   - If readings exist → take the MINIMUM (coldest morning reading, most conservative)
+//   - If min >= threshold → day confirmed above threshold
+//   - If min < threshold → streak broken → stop
+// Returns: { confirmed: N, noData: bool }
+//   confirmed = number of consecutive mornings above threshold (0–3)
+//   noData    = true if we couldn't find morning data for one of the days
+
+function checkMorningStreak(threshold) {
   const hist = state.allHistory;
-  if (!hist.length) return 0;
-  const now = Date.now();
-  let count = 0;
-  for (let d = 1; d <= daysToCheck; d++) {
-    const dayStart = now - d * 86400000;
-    const dayEnd   = now - (d - 1) * 86400000;
-    const readings = hist.filter(h => h.ts >= dayStart && h.ts < dayEnd);
-    if (!readings.length) break; // gap in history — can't confirm
-    const dayMin = Math.min(...readings.map(h => h.tempF));
-    if (dayMin >= threshold) count++;
-    else break; // streak broken
+  if (!hist.length) return { confirmed: 0, noData: true };
+
+  let confirmed = 0;
+  let noData    = false;
+
+  for (let daysAgo = 1; daysAgo <= 3; daysAgo++) {
+    // Build 6am–9am window for this calendar day in local time
+    const now       = new Date();
+    const target    = new Date(now);
+    target.setDate(now.getDate() - daysAgo);
+    target.setHours(5, 0, 0, 0);
+    const winStart  = target.getTime();
+    const winEnd    = winStart + 4 * 3600000; // 4-hour window
+
+    const readings  = hist.filter(h => h.ts >= winStart && h.ts < winEnd);
+
+    if (readings.length === 0) {
+      // No data in this morning window — could be a GitHub gap or sensor offline.
+      // We can't confirm this day either way — stop the streak check here.
+      noData = true;
+      break;
+    }
+
+    // Use the minimum morning temperature (most conservative / coldest reading)
+    const morningMin = Math.min(...readings.map(h => h.tempF));
+    if (morningMin >= threshold) {
+      confirmed++;
+    } else {
+      break; // streak broken — morning was too cold
+    }
   }
-  return count;
+
+  return { confirmed, noData };
 }
 
 function getEffectiveLevel(tempF) {
-  // IMMEDIATE downgrade — cold direction triggers right away
-  if (tempF < 40) return { zone:'winter',    immediate:true };
+  // IMMEDIATE downgrade — cold direction triggers right away, no 3-day rule
+  if (tempF < 40)  return { zone:'winter',    immediate:true };
   if (tempF <= 50) return { zone:'fourOar',   immediate:true };
   if (tempF <= 60) return { zone:'coldWater', immediate:true };
 
-  // Current temp > 60 — need 3 consecutive days above 60 to declare Normal
-  const hist = state.allHistory;
+  // Current reading is above 60°F — need 3 consecutive MORNINGS above 60°F
+  // to officially declare Normal rowing conditions
+  const hist         = state.allHistory;
   const histSpanDays = hist.length > 1
     ? (hist[hist.length-1].ts - hist[0].ts) / 86400000 : 0;
 
+  // Need at least 3 days of history to even check
   if (histSpanDays < 3) {
-    // Not enough history to check 3 days
     return { zone:'coldWater', immediate:false, insufficient:true };
   }
 
-  const daysAbove60 = consecutiveDaysAbove(60, 3);
-  if (daysAbove60 >= 3) return { zone:'normal', immediate:false };
+  const { confirmed, noData } = checkMorningStreak(60);
 
-  // Has history but streak not met yet
-  return { zone:'coldWater', immediate:false, insufficient:false, daysAbove60 };
+  if (confirmed >= 3) return { zone:'normal', immediate:false };
+
+  // Streak not met yet — include context for the status message
+  return { zone:'coldWater', immediate:false, insufficient:false,
+           confirmed, noData };
 }
 
 // Zone definitions — tiers only (rule/notes added per-call below)
@@ -669,10 +705,13 @@ function renderRowingStatus(tempF) {
     if (eff.insufficient) {
       rule  = 'COLD WATER caution (water 51–60°F) — insufficient history to declare Normal';
       notes = 'Current temperature is above 60°F, but <strong>we do not yet have 3 days of data to declare Normal rowing conditions</strong>. Cold Water restrictions remain in effect until 3 consecutive days above 60°F are confirmed. Buddy Boat strongly advised.';
-    } else if (eff.daysAbove60 !== undefined) {
-      const need = 3 - eff.daysAbove60;
-      rule  = 'COLD WATER caution — awaiting 3-day confirmation';
-      notes = `Current temperature is above 60°F, but only <strong>${eff.daysAbove60} of 3 consecutive days</strong> above 60°F confirmed so far. Need ${need} more day${need===1?'':'s'} to declare Normal rowing conditions. Cold Water restrictions remain in effect.`;
+    } else if (eff.noData) {
+      rule  = 'COLD WATER caution — morning data gap';
+      notes = 'Temperature is above 60°F but <strong>morning readings (5–9 AM) are missing for one or more of the past 3 days</strong> due to a data gap. Cannot confirm the 3-day morning streak. Cold Water restrictions remain in effect. Check the thermometer at the dock.';
+    } else if (eff.confirmed !== undefined) {
+      const need = 3 - eff.confirmed;
+      rule  = 'COLD WATER caution — awaiting 3-morning confirmation';
+      notes = `Temperature is above 60°F, but only <strong>${eff.confirmed} of 3 consecutive mornings</strong> (5–9 AM) above 60°F confirmed so far. Need ${need} more morning${need===1?'':'s'} to declare Normal rowing conditions. Cold Water restrictions remain in effect.`;
     } else {
       rule  = 'COLD WATER restrictions apply (water 51–60°F)';
       notes = 'Buddy Boat strongly advised. Tier 1 restricted to 4+ or larger. Tier 2 may row 2x and above. Tier 3 may row all boats.';
