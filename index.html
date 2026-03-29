@@ -659,8 +659,10 @@ function getEffectiveLevel(tempF) {
 
   // ── 2. Earned zone from 3-morning streak checks ──────────────────────
   const hist         = state.allHistory;
-  const histSpanDays = hist.length > 1
-    ? (hist[hist.length-1].ts - hist[0].ts) / 86400000 : 0;
+  // Measure from oldest reading to NOW (not oldest to newest)
+  // so that 3 readings from days 3,2,1 ago correctly gives span >= 3
+  const histSpanDays = hist.length > 0
+    ? (Date.now() - hist[0].ts) / 86400000 : 0;
 
   let earned, streakInfo;
 
