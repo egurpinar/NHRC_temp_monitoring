@@ -636,48 +636,68 @@ function checkMorningStreak(threshold) {
 }
 
 function getEffectiveLevel(tempF) {
-  // IMMEDIATE downgrade — going colder always triggers right away
-  if (tempF < 40)  return { zone:'winter',    immediate:true };
-  if (tempF <= 50) return { zone:'fourOar',   immediate:true };
-  if (tempF <= 60) return { zone:'coldWater', immediate:true };
-
-  // Current temp > 60°F — but we must check the full upgrade chain.
-  // Every upward boundary requires 3 consecutive morning readings (5–9 AM)
-  // above that threshold before lifting restrictions.
+  // Two independent calculations — we always take the MORE RESTRICTIVE result.
   //
-  // The chain: Winter (< 40) → Four Oar (40–50) → Cold Water (51–60) → Normal (> 60)
-  // We check from the bottom up — if the mornings haven't cleared 40°F for 3 days
-  // we stay in Winter; if they've cleared 40 but not 50 we stay in Four Oar; etc.
+  // 1. CURRENT TEMP CAP: what the live reading allows at most (immediate downgrade)
+  //    If it's 45°F right now, conditions cannot be better than Four Oar no matter
+  //    what the history says.
+  //
+  // 2. EARNED ZONE: what 3 consecutive morning readings (5–9 AM) have confirmed.
+  //    Even if it's 55°F today, if we haven't had 3 mornings above 40°F we stay
+  //    in Winter Rowing.
+  //
+  // Effective zone = whichever is COLDER of the two.
 
+  const ZONES = ['normal','coldWater','fourOar','winter']; // index = severity (0=best)
+
+  // ── 1. Current temp cap ──────────────────────────────────────────────
+  let tempCap;
+  if      (tempF < 40)  tempCap = 'winter';
+  else if (tempF <= 50) tempCap = 'fourOar';
+  else if (tempF <= 60) tempCap = 'coldWater';
+  else                  tempCap = 'normal';
+
+  // ── 2. Earned zone from 3-morning streak checks ──────────────────────
   const hist         = state.allHistory;
   const histSpanDays = hist.length > 1
     ? (hist[hist.length-1].ts - hist[0].ts) / 86400000 : 0;
 
+  let earned, streakInfo;
+
   if (histSpanDays < 3) {
-    // Not enough history at all — stay conservative at Winter Rowing
-    return { zone:'winter', immediate:false, insufficient:true };
+    earned     = 'winter';
+    streakInfo = { insufficient: true };
+  } else {
+    const s40 = checkMorningStreak(40);
+    if (s40.confirmed < 3) {
+      earned     = 'winter';
+      streakInfo = { confirmed: s40.confirmed, noData: s40.noData, threshold: 40 };
+    } else {
+      const s50 = checkMorningStreak(50);
+      if (s50.confirmed < 3) {
+        earned     = 'fourOar';
+        streakInfo = { confirmed: s50.confirmed, noData: s50.noData, threshold: 50 };
+      } else {
+        const s60 = checkMorningStreak(60);
+        if (s60.confirmed < 3) {
+          earned     = 'coldWater';
+          streakInfo = { confirmed: s60.confirmed, noData: s60.noData, threshold: 60 };
+        } else {
+          earned     = 'normal';
+          streakInfo = {};
+        }
+      }
+    }
   }
 
-  // Check each threshold from coldest to warmest
-  const streak40 = checkMorningStreak(40);
-  if (streak40.confirmed < 3) {
-    return { zone:'winter', immediate:false, insufficient:false,
-             confirmed: streak40.confirmed, noData: streak40.noData, threshold: 40 };
-  }
+  // ── 3. Take the more restrictive (higher index = colder) ─────────────
+  const effectiveZone = ZONES.indexOf(tempCap) > ZONES.indexOf(earned)
+    ? tempCap   // current temp is colder → immediate downgrade wins
+    : earned;   // morning streak hasn't earned a warmer zone yet
 
-  const streak50 = checkMorningStreak(50);
-  if (streak50.confirmed < 3) {
-    return { zone:'fourOar', immediate:false, insufficient:false,
-             confirmed: streak50.confirmed, noData: streak50.noData, threshold: 50 };
-  }
+  const immediate = ZONES.indexOf(tempCap) > ZONES.indexOf(earned);
 
-  const streak60 = checkMorningStreak(60);
-  if (streak60.confirmed < 3) {
-    return { zone:'coldWater', immediate:false, insufficient:false,
-             confirmed: streak60.confirmed, noData: streak60.noData, threshold: 60 };
-  }
-
-  return { zone:'normal', immediate:false };
+  return { zone: effectiveZone, immediate, ...streakInfo };
 }
 
 // Zone definitions — tiers only (rule/notes added per-call below)
