@@ -391,36 +391,24 @@ async function loadData() {
 }
 
 // ── Extract temperature from Govee response ────────────────────────────────
-// Govee's bff-app API nests devices inside different possible shapes.
-// This function tries multiple known paths.
+// lastDeviceData is a JSON *string* — must be parsed first.
+// tem value is in units of 1/100 °C  e.g. 2086 = 20.86 °C
+function parseLastDeviceData(device) {
+  try {
+    const raw = device?.deviceExt?.lastDeviceData;
+    if (!raw) return null;
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch(e) { return null; }
+}
+
 function extractTemp(raw) {
   try {
-    // Path 1: data.devices[] array
-    const devices = raw?.data?.devices || raw?.devices || raw?.data || [];
-    const arr = Array.isArray(devices) ? devices : Object.values(devices);
-
-    for (const device of arr) {
-      // Try deviceExt.lastDeviceData or sku-based temp fields
-      const props = device?.deviceExt?.deviceSettings ||
-                    device?.deviceExt?.lastDeviceData ||
-                    device?.lastDeviceData ||
-                    device?.deviceData ||
-                    null;
-
-      if (props) {
-        // temperature can come as tempCurrent, temperature, tem, temp
-        const keys = ['tempCurrent','temperature','tem','temp','currentTemp'];
-        for (const k of keys) {
-          if (typeof props[k] === 'number') return props[k];
-          if (typeof props[k] === 'string' && !isNaN(parseFloat(props[k])))
-            return parseFloat(props[k]);
-        }
-      }
-
-      // Sometimes it's directly on the device object
-      const directKeys = ['tempCurrent','temperature','tem','temp'];
-      for (const k of directKeys) {
-        if (typeof device[k] === 'number') return device[k];
+    const devices = raw?.data?.devices || raw?.devices || [];
+    for (const device of devices) {
+      const data = parseLastDeviceData(device);
+      if (data && typeof data.tem === 'number') {
+        // tem is in 1/100 °C — return as °C float
+        return data.tem / 100;
       }
     }
   } catch(e) {
@@ -431,18 +419,11 @@ function extractTemp(raw) {
 
 function extractHumidity(raw) {
   try {
-    const devices = raw?.data?.devices || raw?.devices || raw?.data || [];
-    const arr = Array.isArray(devices) ? devices : Object.values(devices);
-    for (const device of arr) {
-      const props = device?.deviceExt?.deviceSettings ||
-                    device?.deviceExt?.lastDeviceData ||
-                    device?.lastDeviceData ||
-                    device?.deviceData || null;
-      if (props) {
-        const keys = ['humidity','hum','humidityCurrent'];
-        for (const k of keys) {
-          if (typeof props[k] === 'number') return props[k];
-        }
+    const devices = raw?.data?.devices || raw?.devices || [];
+    for (const device of devices) {
+      const data = parseLastDeviceData(device);
+      if (data && typeof data.hum === 'number' && data.hum > 0) {
+        return data.hum / 100; // also in 1/100 units
       }
     }
   } catch(e) {}
@@ -451,9 +432,8 @@ function extractHumidity(raw) {
 
 function extractDeviceName(raw) {
   try {
-    const devices = raw?.data?.devices || raw?.devices || raw?.data || [];
-    const arr = Array.isArray(devices) ? devices : Object.values(devices);
-    for (const d of arr) {
+    const devices = raw?.data?.devices || raw?.devices || [];
+    for (const d of devices) {
       if (d.deviceName || d.name) return d.deviceName || d.name;
     }
   } catch(e) {}
@@ -462,9 +442,8 @@ function extractDeviceName(raw) {
 
 // ── Render ─────────────────────────────────────────────────────────────────
 function renderDashboard(tempRaw, raw) {
-  // Govee returns temp in tenths of a degree Celsius sometimes (e.g. 285 = 28.5°C)
-  // Detect by checking if value > 200 (unrealistic °C or °F for water)
-  let tempC = tempRaw > 200 ? tempRaw / 100 : tempRaw;
+  // extractTemp now returns °C directly (already divided by 100)
+  let tempC = tempRaw;
   let tempF  = Math.round((tempC * 9/5 + 32) * 10) / 10;
 
   const hum  = extractHumidity(raw);
