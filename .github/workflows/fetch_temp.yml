@@ -2,8 +2,8 @@ name: Fetch Govee Temperature
 
 on:
   schedule:
-    - cron: '*/10 * * * *'   # every 10 minutes
-  workflow_dispatch:           # allow manual trigger from GitHub UI
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
 
 jobs:
   fetch:
@@ -11,7 +11,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
-      contents: write          # needed to commit data.json back to repo
+      contents: write
 
     steps:
       - name: Checkout repo
@@ -23,6 +23,7 @@ jobs:
           GOVEE_CLIENT_ID: ${{ secrets.GOVEE_CLIENT_ID }}
         run: |
           TIMESTAMP=$(date +%s%3N)
+          FETCHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
           RESPONSE=$(curl -s 'https://app2.govee.com/bff-app/v1/device/list' \
             -H "Authorization: Bearer $GOVEE_TOKEN" \
@@ -41,17 +42,40 @@ jobs:
 
           echo "Raw response: $RESPONSE"
 
-          # Write the full response + a timestamp into data.json
+          # Save data.json (current snapshot for the hero display)
           echo "$RESPONSE" | jq \
-            --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-            '. + {fetchedAt: $ts}' > data.json || echo '{"error":"failed to parse response","fetchedAt":"'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"}' > data.json
+            --arg ts "$FETCHED_AT" \
+            '. + {fetchedAt: $ts}' > data.json || echo '{"error":"parse_failed","fetchedAt":"'$FETCHED_AT'"}' > data.json
 
-          cat data.json
+          # Extract tempC (tem field / 100) and tempF for history
+          TEM=$(echo "$RESPONSE" | jq -r '
+            .data.devices[]?.deviceExt.lastDeviceData
+            | if type == "string" then fromjson else . end
+            | .tem // empty' 2>/dev/null | head -1)
 
-      - name: Commit data.json
+          if [ -n "$TEM" ] && [ "$TEM" != "null" ]; then
+            TEMP_C=$(echo "scale=2; $TEM / 100" | bc)
+            TEMP_F=$(echo "scale=1; $TEMP_C * 9 / 5 + 32" | bc)
+
+            NEW_ENTRY="{\"ts\":\"$FETCHED_AT\",\"tempC\":$TEMP_C,\"tempF\":$TEMP_F}"
+            echo "New entry: $NEW_ENTRY"
+
+            # Append to history.json (create if missing, keep last 52560 entries = ~1 year at 10min)
+            if [ -f history.json ]; then
+              jq --argjson entry "$NEW_ENTRY" '. + [$entry] | .[-52560:]' history.json > history_tmp.json && mv history_tmp.json history.json
+            else
+              echo "[$NEW_ENTRY]" > history.json
+            fi
+          else
+            echo "Could not extract temperature — skipping history update"
+          fi
+
+          echo "history.json entries: $(jq length history.json 2>/dev/null || echo 0)"
+
+      - name: Commit files
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data.json
+          git add data.json history.json
           git diff --cached --quiet || git commit -m "chore: update temperature data"
           git push
