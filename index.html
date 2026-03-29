@@ -54,7 +54,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
 /* WARN BANNERS */
 .warn-banner{display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;}
-.warn-banner.hidden{display:none!important;}
 .warn-banner.level-warn{background:rgba(224,123,32,.12);border:1px solid rgba(224,123,32,.35);color:#f0a450;}
 .warn-banner.level-danger{background:rgba(224,62,62,.1);border:1px solid rgba(224,62,62,.35);color:#f07070;}
 .warn-banner strong{display:block;margin-bottom:2px;}
@@ -169,11 +168,11 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   <div id="dashboard">
 
 ```
-<div id="warn-gap" class="warn-banner level-danger hidden">
+<div id="warn-gap" class="warn-banner level-danger" style="display:none;">
   <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
   <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
 </div>
-<div id="warn-stale" class="warn-banner level-warn hidden">
+<div id="warn-stale" class="warn-banner level-warn" style="display:none;">
   <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
   <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
 </div>
@@ -189,7 +188,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   </div>
 </div>
 
-<div id="alert-banner" style="display:none;background:rgba(224,62,62,.1);border:1px solid rgba(224,62,62,.4);border-radius:12px;padding:12px 16px;margin-bottom:18px;font-size:.82rem;color:#f07070;align-items:center;gap:10px;"><span id="alert-text"></span></div>
 
 <div class="temp-hero">
   <div class="temp-main">
@@ -261,7 +259,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 const state = {
   allHistory: [],
   currentRange: 1,
-  minAlert: 40, maxAlert: 90,
 };
 let chart = null;
 
@@ -328,13 +325,13 @@ function updateFreshnessWarnings() {
     const h = Math.floor(ageHrs), m = Math.round((ageHrs-h)*60);
     document.getElementById('warn-gap-text').textContent =
       ` No readings received for ${h}h ${m}m. The sensor, gateway, or GitHub Actions workflow may be offline. Last reading: ${new Date(last.ts).toLocaleString()}.`;
-    gapEl.classList.remove('hidden'); staleEl.classList.add('hidden');
+    gapEl.style.display='flex'; staleEl.style.display='none';
   } else if (ageMs > 45*60000) {
     document.getElementById('warn-stale-text').textContent =
       ` Last reading was ${ageMins} minutes ago. GitHub Actions typically runs every 30 minutes — if this persists check the Actions tab.`;
-    staleEl.classList.remove('hidden'); gapEl.classList.add('hidden');
+    staleEl.style.display='flex'; gapEl.style.display='none';
   } else {
-    gapEl.classList.add('hidden'); staleEl.classList.add('hidden');
+    gapEl.style.display='none'; staleEl.style.display='none';
   }
 }
 
@@ -382,20 +379,7 @@ function renderDashboard(tempC, raw) {
   document.getElementById('max-val').textContent = `${Math.max(...vals).toFixed(1)}°F`;
   document.getElementById('avg-val').textContent = `${(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1)}°F`;
 
-  // alert banner (temp out of range notification only)
-  const banner = document.getElementById('alert-banner');
-  if (tempF < state.minAlert) {
-    banner.style.display='flex';
-    document.getElementById('alert-text').textContent = `Water is ${tempF}°F — below ${state.minAlert}°F.`;
-    document.getElementById('status-text').textContent = 'Cold';
-  } else if (tempF > state.maxAlert) {
-    banner.style.display='flex';
-    document.getElementById('alert-text').textContent = `Water is ${tempF}°F — above ${state.maxAlert}°F.`;
-    document.getElementById('status-text').textContent = 'Hot';
-  } else {
-    banner.style.display='none';
-    document.getElementById('status-text').textContent = 'Normal';
-  }
+  document.getElementById('status-text').textContent = 'Normal';
 
   renderRowingStatus(tempF);
 }
