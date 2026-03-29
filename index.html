@@ -3,8 +3,9 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>NHRC — Water Temperature</title>
+<title>NHRC Water Temperature</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
 <link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Source+Sans+3:wght@300;400;600;700&display=swap" rel="stylesheet"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
@@ -52,7 +53,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
 /* WARN BANNERS */
 .warn-banner{display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;}
-.warn-banner.hidden{display:none!important;}
 .warn-banner.level-warn{background:rgba(224,123,32,.12);border:1px solid rgba(224,123,32,.35);color:#f0a450;}
 .warn-banner.level-danger{background:rgba(224,62,62,.1);border:1px solid rgba(224,62,62,.35);color:#f07070;}
 .warn-banner strong{display:block;margin-bottom:2px;}
@@ -69,8 +69,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .dash-top-btns{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
 
 /* ALERT BANNER */
-#alert-banner{background:rgba(224,62,62,.1);border:1px solid rgba(224,62,62,.4);border-radius:12px;padding:12px 16px;margin-bottom:18px;font-size:.82rem;color:#f07070;display:flex;align-items:center;gap:10px;}
-#alert-banner.hidden{display:none!important;}
+
 
 /* HERO TEMP */
 .temp-hero{background:var(--navy2);border:1px solid var(--border);border-radius:16px;padding:24px 22px;display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:20px;position:relative;overflow:hidden;}
@@ -129,9 +128,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 @media(min-width:600px){.chart-wrap{height:230px;}}
 
 /* DEBUG */
-#debug-section{background:var(--navy2);border:1px solid var(--border);border-radius:12px;padding:16px;}
-#debug-section summary{cursor:pointer;font-family:var(--fsans);font-size:.73rem;color:var(--muted);font-weight:600;}
-#debug-pre{margin-top:10px;font-size:.68rem;color:var(--muted);white-space:pre-wrap;word-break:break-all;max-height:220px;overflow-y:auto;line-height:1.6;}
 
 /* TOAST */
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--navy2);border:1px solid var(--border);border-radius:10px;padding:10px 18px;font-family:var(--fsans);font-size:.8rem;color:var(--white);transition:transform .3s ease;z-index:100;white-space:nowrap;}
@@ -146,7 +142,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     <div class="header-text">
       <h1>New Haven Rowing Club</h1>
       <p>Housatonic River Water Monitor</p>
-      <div class="location">📍 Lake Housatonic, NHRC Boathouse</div>
+      <div class="location">Lake Housatonic, NHRC Boathouse</div>
     </div>
     <div class="header-motto">
       Pulsus Remorum Fit Spiritus Fortis<br/>
@@ -160,19 +156,25 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   </div>
 
   <div id="error-view">
-    <h2>⚠️ No data yet</h2>
+    <h2>No data yet</h2>
     <p>The GitHub Actions workflow hasn't run yet, or encountered an error.<br/><br/>
     Go to your repo → <code>Actions</code> tab → <code>Fetch Govee Temperature</code> → <code>Run workflow</code>.</p>
   </div>
 
   <div id="dashboard">
 
-    <div id="warn-gap" class="warn-banner level-danger hidden">
-      <span style="font-size:1rem;flex-shrink:0;margin-top:1px;">🔴</span>
+    <div style="display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;background:rgba(26,111,181,.1);border:1px solid rgba(26,111,181,.3);color:#5ba4e0;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#5ba4e0;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong style="display:block;margin-bottom:2px;">Beta — data may not be accurate</strong>This website is in beta. Temperature readings are provided for guidance only. Please verify against the thermometer on the side of the dock at the boathouse before making rowing decisions.</div>
+    </div>
+
+
+    <div id="warn-gap" class="warn-banner level-danger" style="display:none;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
       <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
     </div>
-    <div id="warn-stale" class="warn-banner level-warn hidden">
-      <span style="font-size:1rem;flex-shrink:0;margin-top:1px;">🟡</span>
+    <div id="warn-stale" class="warn-banner level-warn" style="display:none;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
       <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
     </div>
 
@@ -183,11 +185,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       </div>
       <div class="dash-top-btns">
         <div id="status-pill" class="pill pill-ok"><span class="pill-dot"></span><span id="pill-text">Live</span></div>
-        <button class="rb" onclick="loadData()" style="padding:5px 12px;">↻ Refresh</button>
+        <button class="rb" onclick="loadData()" style="padding:5px 12px;">Refresh</button>
       </div>
     </div>
 
-    <div id="alert-banner" class="hidden">⚠️ <span id="alert-text"></span></div>
 
     <div class="temp-hero">
       <div class="temp-main">
@@ -203,8 +204,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     </div>
 
     <div class="rowing-status-card">
-      <div class="section-label">🚣 Rowing Status — Current Conditions</div>
-      <div id="rule-banner" class="rule-banner green"><span class="rule-icon">✅</span><span id="rule-text">Normal rowing conditions</span></div>
+      <div class="section-label">Rowing Status — Current Conditions</div>
+      <div id="rule-banner" class="rule-banner green"><span id="rule-text">Normal rowing conditions</span></div>
       <div class="tiers-grid" id="tiers-grid"></div>
       <div class="note-text" id="rowing-notes"></div>
     </div>
@@ -224,7 +225,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
           <button class="rb" data-d="30">30 days</button>
           <button class="rb" data-d="90">3 months</button>
           <button class="rb" data-d="0">All time</button>
-          <button class="rb rb-csv" onclick="downloadCSV()">⬇ CSV</button>
+          <button class="rb rb-csv" onclick="downloadCSV()">Download CSV</button>
         </div>
       </div>
 
@@ -234,16 +235,18 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         <span id="info-count">— readings</span>
       </div>
 
-      <div id="chart-single-msg" style="display:none;text-align:center;padding:40px 0;font-size:.82rem;color:var(--muted);">
-        Only 1 reading so far — more data will appear as readings come in every 10 minutes.
+      <div id="chart-single-msg" style="display:none;text-align:center;padding:40px 0;font-size:.82rem;color:var(--muted);"></div>
+      <div style="position:relative;">
+        <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
+        <div id="scrubber-line" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(240,180,41,0.6);pointer-events:none;"></div>
+        <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:#162d52;border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
+          <div id="scrubber-temp" style="font-family:'Libre Baskerville',Georgia,serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
+          <div id="scrubber-time" style="font-family:'Source Sans 3',system-ui,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
+        </div>
       </div>
-      <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
     </div>
 
-    <details id="debug-section">
-      <summary>🛠 Raw API response (debug)</summary>
-      <pre id="debug-pre"></pre>
-    </details>
+
 
   </div>
 </div>
@@ -253,7 +256,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 const state = {
   allHistory: [],
   currentRange: 1,
-  minAlert: 40, maxAlert: 90,
 };
 let chart = null;
 
@@ -267,7 +269,6 @@ async function loadData() {
     const res = await fetch(`data.json?_=${Date.now()}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const raw = await res.json();
-    document.getElementById('debug-pre').textContent = JSON.stringify(raw, null, 2);
     if (raw.error) { showError(); return; }
     const tempC = extractTemp(raw);
     if (tempC === null) { showError(); return; }
@@ -309,9 +310,17 @@ function extractDeviceName(raw) {
 }
 
 function updateFreshnessWarnings() {
-  if (!state.allHistory.length) return;
-  const last = state.allHistory[state.allHistory.length-1];
-  const ageMs = Date.now() - last.ts;
+  // Use the most recent timestamp we have — prefer data.json's fetchedAt
+  // (always current) over history.json's last entry (may be from old home testing)
+  let bestTs = state.lastFetchedAt ? state.lastFetchedAt.getTime() : null;
+  if (state.allHistory.length) {
+    const histTs = state.allHistory[state.allHistory.length-1].ts;
+    // Only use history timestamp if it is MORE recent than data.json timestamp
+    if (bestTs === null || histTs > bestTs) bestTs = histTs;
+  }
+  if (!bestTs) return;
+
+  const ageMs  = Date.now() - bestTs;
   const ageHrs = ageMs / 3600000;
   const ageMins = Math.round(ageMs / 60000);
   const gapEl   = document.getElementById('warn-gap');
@@ -319,14 +328,14 @@ function updateFreshnessWarnings() {
   if (ageHrs >= 6) {
     const h = Math.floor(ageHrs), m = Math.round((ageHrs-h)*60);
     document.getElementById('warn-gap-text').textContent =
-      ` No readings received for ${h}h ${m}m. The sensor, gateway, or GitHub Actions workflow may be offline. Last reading: ${new Date(last.ts).toLocaleString()}.`;
-    gapEl.classList.remove('hidden'); staleEl.classList.add('hidden');
-  } else if (ageMs > 20*60000) {
+      ` No readings received for ${h}h ${m}m. The sensor, gateway, or GitHub Actions workflow may be offline. Last reading: ${new Date(bestTs).toLocaleString()}.`;
+    gapEl.style.display='flex'; staleEl.style.display='none';
+  } else if (ageMs > 45*60000) {
     document.getElementById('warn-stale-text').textContent =
-      ` Last reading was ${ageMins} minutes ago. GitHub Actions runs every 10 minutes — a short delay is normal.`;
-    staleEl.classList.remove('hidden'); gapEl.classList.add('hidden');
+      ` Last reading was ${ageMins} minutes ago. GitHub Actions typically runs every 30 minutes — if this persists check the Actions tab.`;
+    staleEl.style.display='flex'; gapEl.style.display='none';
   } else {
-    gapEl.classList.add('hidden'); staleEl.classList.add('hidden');
+    gapEl.style.display='none'; staleEl.style.display='none';
   }
 }
 
@@ -335,7 +344,7 @@ function updateInfoBar() {
   const last = state.allHistory[state.allHistory.length-1];
   const ageMs = Date.now() - last.ts;
   const ageMins = Math.round(ageMs/60000);
-  document.getElementById('info-dot').className = ageMs > 20*60000 ? 'dot-warn' : 'dot-live';
+  document.getElementById('info-dot').className = ageMs > 45*60000 ? 'dot-warn' : 'dot-live';
   document.getElementById('info-last').textContent =
     `Last reading: ${new Date(last.ts).toLocaleString()} (${ageMins<2?'just now':ageMins+' min ago'})`;
   document.getElementById('info-count').textContent =
@@ -349,6 +358,7 @@ function renderDashboard(tempC, raw) {
   const hum       = extractHumidity(raw);
   const name      = extractDeviceName(raw);
   const fetchedAt = raw.fetchedAt ? new Date(raw.fetchedAt) : new Date();
+  state.lastFetchedAt = fetchedAt;
 
   document.getElementById('loading').style.display    = 'none';
   document.getElementById('error-view').style.display = 'none';
@@ -364,7 +374,7 @@ function renderDashboard(tempC, raw) {
   document.getElementById('data-age').textContent = ageMins<2 ? 'Just now' : `${ageMins} min ago`;
 
   const pill = document.getElementById('status-pill');
-  if (ageMs > 20*60000) { pill.className='pill pill-warn'; document.getElementById('pill-text').textContent='Stale data'; }
+  if (ageMs > 45*60000) { pill.className='pill pill-warn'; document.getElementById('pill-text').textContent='Delayed'; }
   else                  { pill.className='pill pill-ok';   document.getElementById('pill-text').textContent='Live'; }
 
   const now = Date.now();
@@ -374,22 +384,10 @@ function renderDashboard(tempC, raw) {
   document.getElementById('max-val').textContent = `${Math.max(...vals).toFixed(1)}°F`;
   document.getElementById('avg-val').textContent = `${(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1)}°F`;
 
-  // alert banner (temp out of range notification only)
-  const banner = document.getElementById('alert-banner');
-  if (tempF < state.minAlert) {
-    banner.classList.remove('hidden');
-    document.getElementById('alert-text').textContent = `Water is ${tempF}°F — below ${state.minAlert}°F.`;
-    document.getElementById('status-text').textContent = '🥶 Cold';
-  } else if (tempF > state.maxAlert) {
-    banner.classList.remove('hidden');
-    document.getElementById('alert-text').textContent = `Water is ${tempF}°F — above ${state.maxAlert}°F.`;
-    document.getElementById('status-text').textContent = '🔥 Hot';
-  } else {
-    banner.classList.add('hidden');
-    document.getElementById('status-text').textContent = '✅ Normal';
-  }
+  document.getElementById('status-text').textContent = 'Normal';
 
   renderRowingStatus(tempF);
+  updateFreshnessWarnings();
 }
 
 /* ── RANGE BUTTONS ── */
@@ -468,34 +466,20 @@ function initChart() {
       },
       plugins:{
         legend:{display:false},
-        tooltip:{
-          backgroundColor:'#162d52', borderColor:'rgba(240,180,41,0.3)', borderWidth:1,
-          titleColor:'#f0b429', bodyColor:'#f4f7fb',
-          callbacks:{
-            title: items => new Date(items[0].parsed.x).toLocaleString(),
-            label: ctx  => ` ${ctx.parsed.y.toFixed(1)}°F`
-          }
-        }
+        tooltip:{ enabled:false }
       }
     }
   });
 }
 
 function renderChartData(subset) {
-  const singleMsg  = document.getElementById('chart-single-msg');
-  const chartWrap  = document.getElementById('chart-wrap');
+  const singleMsg = document.getElementById('chart-single-msg');
+  const chartWrap = document.getElementById('chart-wrap');
 
-  // With 0 or 1 point the time-axis has no span — show a friendly message instead
-  if (subset.length <= 1) {
+  if (subset.length === 0) {
     singleMsg.style.display = 'block';
     chartWrap.style.display = 'none';
-    if (subset.length === 1) {
-      const pt = subset[0];
-      singleMsg.innerHTML =
-        `<strong style="color:var(--gold);font-size:1rem;">${pt.tempF.toFixed(1)}°F</strong><br/>` +
-        `Recorded at ${new Date(pt.ts).toLocaleString()}<br/>` +
-        `<span style="margin-top:6px;display:block;">More data points will appear as readings come in every 10 minutes.</span>`;
-    }
+    singleMsg.innerHTML = `<span>No data collected yet.</span>`;
     return;
   }
 
@@ -503,9 +487,26 @@ function renderChartData(subset) {
   chartWrap.style.display = 'block';
 
   if (!chart) initChart();
-  const days = (subset[subset.length-1].ts - subset[0].ts) / 86400000;
-  const unit = days<=1?'hour':days<=14?'day':days<=90?'week':'month';
-  chart.options.scales.x.time.unit = unit;
+
+  const now = Date.now();
+
+  // For preset ranges: fix x-axis to the full window so data fills in from right
+  if (state.currentRange > 0) {
+    const windowMs = state.currentRange * 86400000;
+    const xMin = now - windowMs;
+    chart.options.scales.x.min = xMin;
+    chart.options.scales.x.max = now;
+    // Pick tick unit based on selected range, not data span
+    const d = state.currentRange;
+    chart.options.scales.x.time.unit = d<=1?'hour':d<=14?'day':d<=90?'week':'month';
+  } else {
+    // All time — let Chart.js auto-fit to the data
+    chart.options.scales.x.min = undefined;
+    chart.options.scales.x.max = undefined;
+    const days = subset.length > 1 ? (subset[subset.length-1].ts - subset[0].ts) / 86400000 : 1;
+    chart.options.scales.x.time.unit = days<=1?'hour':days<=14?'day':days<=90?'week':'month';
+  }
+
   chart.data.datasets[0].data = subset.map(h=>({x:h.ts,y:h.tempF}));
   chart.update('none');
 }
@@ -514,44 +515,184 @@ function updateChart() {
   renderChartData(getSubset());
 }
 
-/* ── ROWING STATUS ── */
-function getRowingStatus(tempF) {
-  if (tempF < 40) return { level:'red', icon:'🚫', rule:'WINTER ROWING RULES in effect (water < 40°F)',
-    notes:'<strong>Eight Oar Rule:</strong> Quads (4x) and Eights (8+) only. Each rower must be certified by the Captain of Winter Rowing, wear over-the-shoulder auto-inflate life jackets, and have signed a Winter Rowing waiver. Two-boat minimum.',
-    tiers:[
-      {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'no'}]},
-      {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'no'}]},
-      {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'no'},{name:'2x / 4+/-',s:'no'},{name:'4x / 8+',s:'go',note:'Certified only'}]}]};
-  if (tempF <= 50) return { level:'yellow', icon:'⚠️', rule:'FOUR OAR RULE in effect (water 40–50°F)',
-    notes:'<strong>Four Oar Rule:</strong> No singles or pairs for Tier 1 or 2. Tier 3 may row with auto-inflate life jackets.',
-    tiers:[
-      {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'go',note:'w/ launch'}]},
-      {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
-      {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'no'},{name:'2x / 4+/-',s:'go',note:'⚠️ Life jackets'},{name:'4x / 8+',s:'go',note:'⚠️ Life jackets'}]}]};
-  if (tempF <= 60) return { level:'yellow', icon:'🌡️', rule:'COLD WATER restrictions apply (water 51–60°F)',
-    notes:'Buddy Boat strongly advised. Tier 1 restricted to 4+ or larger. Tier 2 may row 2x and above.',
-    tiers:[
-      {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
-      {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
-      {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'go'},{name:'2x / 4+/-',s:'go'},{name:'4x / 8+',s:'go'}]}]};
-  return { level:'green', icon:'✅', rule:'Normal rowing conditions (water > 60°F)',
-    notes:'Buddy Boat advised in Spring and Fall. Carry a cell phone and marine whistle. Wear Hi-Viz tops.',
-    tiers:[
-      {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'go'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
-      {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'go'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
-      {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'go'},{name:'2x / 4+/-',s:'go'},{name:'4x / 8+',s:'go'}]}]};
+/* ── SCRUBBER (Garmin-style crosshair) ── */
+function initScrubber() {
+  const wrap = document.getElementById('chart-wrap');
+  if (!wrap) return;
+
+  function getScrubberData(clientX) {
+    if (!chart) return null;
+    const canvas = wrap.querySelector('canvas');
+    const rect   = canvas.getBoundingClientRect();
+    const x      = clientX - rect.left;
+    if (x < 0 || x > rect.width) return null;
+
+    // Use Chart.js scale to convert pixel -> timestamp
+    const xScale = chart.scales.x;
+    const ts = xScale.getValueForPixel(x);
+    if (ts == null) return null;
+
+    // Find nearest data point
+    const data = chart.data.datasets[0].data;
+    if (!data.length) return null;
+    let closest = null, minDist = Infinity;
+    for (const pt of data) {
+      const d = Math.abs(pt.x - ts);
+      if (d < minDist) { minDist = d; closest = pt; }
+    }
+    return { closest, pixelX: x, canvasWidth: rect.width };
+  }
+
+  function showScrubber(clientX) {
+    const res = getScrubberData(clientX);
+    if (!res || !res.closest) { hideScrubber(); return; }
+    const { closest, pixelX, canvasWidth } = res;
+
+    const line = document.getElementById('scrubber-line');
+    const tip  = document.getElementById('scrubber-tip');
+    line.style.display = 'block';
+    line.style.left    = pixelX + 'px';
+    tip.style.display  = 'block';
+
+    document.getElementById('scrubber-temp').textContent = closest.y.toFixed(1) + '°F';
+    document.getElementById('scrubber-time').textContent =
+      new Date(closest.x).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+
+    // Keep tooltip within canvas bounds
+    const tipW = tip.offsetWidth || 120;
+    const left = pixelX + 10 + tipW > canvasWidth ? pixelX - tipW - 10 : pixelX + 10;
+    tip.style.left = left + 'px';
+  }
+
+  function hideScrubber() {
+    document.getElementById('scrubber-line').style.display = 'none';
+    document.getElementById('scrubber-tip').style.display  = 'none';
+  }
+
+  // Mouse events
+  wrap.addEventListener('mousemove',  e => showScrubber(e.clientX));
+  wrap.addEventListener('mouseleave', hideScrubber);
+
+  // Touch events
+  wrap.addEventListener('touchstart', e => { e.preventDefault(); showScrubber(e.touches[0].clientX); }, {passive:false});
+  wrap.addEventListener('touchmove',  e => { e.preventDefault(); showScrubber(e.touches[0].clientX); }, {passive:false});
+  wrap.addEventListener('touchend',   hideScrubber);
 }
 
+// Init scrubber once chart area is ready
+document.addEventListener('DOMContentLoaded', () => { setTimeout(initScrubber, 500); });
+
+/* ── ROWING STATUS ── */
+
+// Check how many of the last N calendar days all had every reading >= threshold.
+// Returns the count of consecutive days (starting from yesterday going back).
+function consecutiveDaysAbove(threshold, daysToCheck) {
+  const hist = state.allHistory;
+  if (!hist.length) return 0;
+  const now = Date.now();
+  let count = 0;
+  for (let d = 1; d <= daysToCheck; d++) {
+    const dayStart = now - d * 86400000;
+    const dayEnd   = now - (d - 1) * 86400000;
+    const readings = hist.filter(h => h.ts >= dayStart && h.ts < dayEnd);
+    if (!readings.length) break; // gap in history — can't confirm
+    const dayMin = Math.min(...readings.map(h => h.tempF));
+    if (dayMin >= threshold) count++;
+    else break; // streak broken
+  }
+  return count;
+}
+
+function getEffectiveLevel(tempF) {
+  // IMMEDIATE downgrade — cold direction triggers right away
+  if (tempF < 40) return { zone:'winter',    immediate:true };
+  if (tempF <= 50) return { zone:'fourOar',   immediate:true };
+  if (tempF <= 60) return { zone:'coldWater', immediate:true };
+
+  // Current temp > 60 — need 3 consecutive days above 60 to declare Normal
+  const hist = state.allHistory;
+  const histSpanDays = hist.length > 1
+    ? (hist[hist.length-1].ts - hist[0].ts) / 86400000 : 0;
+
+  if (histSpanDays < 3) {
+    // Not enough history to check 3 days
+    return { zone:'coldWater', immediate:false, insufficient:true };
+  }
+
+  const daysAbove60 = consecutiveDaysAbove(60, 3);
+  if (daysAbove60 >= 3) return { zone:'normal', immediate:false };
+
+  // Has history but streak not met yet
+  return { zone:'coldWater', immediate:false, insufficient:false, daysAbove60 };
+}
+
+// Zone definitions — tiers only (rule/notes added per-call below)
+const ZONE_TIERS = {
+  winter: [
+    {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'no'}]},
+    {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'no'}]},
+    {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'no'},{name:'2x / 4+/-',s:'no'},{name:'4x / 8+',s:'go',note:'Certified only'}]},
+  ],
+  fourOar: [
+    {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'no'},{name:'4x / 8+',s:'go',note:'w/ launch'}]},
+    {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
+    {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'no'},{name:'2x / 4+/-',s:'go',note:'Life jackets req.'},{name:'4x / 8+',s:'go',note:'Life jackets req.'}]},
+  ],
+  coldWater: [
+    {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'no'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
+    {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'no'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
+    {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'go'},{name:'2x / 4+/-',s:'go'},{name:'4x / 8+',s:'go'}]},
+  ],
+  normal: [
+    {name:'Tier 1 — Novice',       boats:[{name:'1x / 2-',s:'go'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
+    {name:'Tier 2 — Intermediate', boats:[{name:'1x / 2-',s:'go'},{name:'2x',s:'go'},{name:'4+ / 4-',s:'go'},{name:'4x / 8+',s:'go'}]},
+    {name:'Tier 3 — Senior',       boats:[{name:'1x / 2-',s:'go'},{name:'2x / 4+/-',s:'go'},{name:'4x / 8+',s:'go'}]},
+  ],
+};
+
 function renderRowingStatus(tempF) {
-  const s = getRowingStatus(tempF);
+  const eff = getEffectiveLevel(tempF);
   const banner = document.getElementById('rule-banner');
-  banner.className = `rule-banner ${s.level}`;
-  banner.innerHTML = `<span>${s.icon}</span><span>${s.rule}</span>`;
-  document.getElementById('tiers-grid').innerHTML = s.tiers.map(tier=>`
+  const tiers  = ZONE_TIERS[eff.zone];
+  let rule, notes, cssLevel;
+
+  if (eff.zone === 'winter') {
+    cssLevel = 'red';
+    rule  = 'WINTER ROWING in effect (water < 40°F)';
+    notes = '<strong>Eight Oar Rule:</strong> Quads (4x) and Eights (8+) only. Each rower must be certified by the Captain of Winter Rowing, wear over-the-shoulder auto-inflate life jackets, and have signed a Winter Rowing waiver. Two-boat minimum.';
+  } else if (eff.zone === 'fourOar') {
+    cssLevel = 'yellow';
+    rule  = 'FOUR OAR RULE in effect (water 40–50°F)';
+    notes = '<strong>Four Oar Rule:</strong> No singles or pairs for Tier 1 or 2. Tier 3 may row 2x/4+/- with auto-inflate life jackets.';
+  } else if (eff.zone === 'coldWater') {
+    cssLevel = 'yellow';
+    if (eff.insufficient) {
+      rule  = 'COLD WATER caution (water 51–60°F) — insufficient history to declare Normal';
+      notes = 'Current temperature is above 60°F, but <strong>we do not yet have 3 days of data to declare Normal rowing conditions</strong>. Cold Water restrictions remain in effect until 3 consecutive days above 60°F are confirmed. Buddy Boat strongly advised.';
+    } else if (eff.daysAbove60 !== undefined) {
+      const need = 3 - eff.daysAbove60;
+      rule  = 'COLD WATER caution — awaiting 3-day confirmation';
+      notes = `Current temperature is above 60°F, but only <strong>${eff.daysAbove60} of 3 consecutive days</strong> above 60°F confirmed so far. Need ${need} more day${need===1?'':'s'} to declare Normal rowing conditions. Cold Water restrictions remain in effect.`;
+    } else {
+      rule  = 'COLD WATER restrictions apply (water 51–60°F)';
+      notes = 'Buddy Boat strongly advised. Tier 1 restricted to 4+ or larger. Tier 2 may row 2x and above. Tier 3 may row all boats.';
+    }
+  } else {
+    cssLevel = 'green';
+    rule  = 'Normal rowing conditions (water > 60°F, 3-day confirmed)';
+    notes = 'Buddy Boat advised in Spring and Fall. Carry a cell phone and marine whistle. Wear Hi-Viz tops.';
+  }
+
+  banner.className = `rule-banner ${cssLevel}`;
+  banner.innerHTML = `<span>${rule}</span>`;
+
+  document.getElementById('tiers-grid').innerHTML = tiers.map(tier=>`
     <div class="tier-card"><h4>${tier.name}</h4>
     ${tier.boats.map(b=>`<div class="boat-row"><span class="boat-name">${b.name}</span>
-      <span class="boat-status bs-${b.s}">${b.s==='go'?(b.note?'⚠️ Cond.':'✓ Row'):'✗ No'}</span></div>`).join('')}</div>`).join('');
-  document.getElementById('rowing-notes').innerHTML = s.notes;
+      <span class="boat-status bs-${b.s}">${b.s==='go'?(b.note?'! Cond.':'Row'):'No'}</span></div>`).join('')}
+    </div>`).join('');
+
+  document.getElementById('rowing-notes').innerHTML = notes;
 }
 
 function showError() {
