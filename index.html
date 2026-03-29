@@ -4,9 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>NHRC Water Temperature</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
-<link href="https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Source+Sans+3:wght@300;400;600;700&display=swap" rel="stylesheet"/>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js"></script>
@@ -18,8 +16,8 @@
   --white:#f4f7fb;--muted:#7a93b4;
   --border:rgba(240,180,41,0.2);
   --danger:#e03e3e;--warn:#e07b20;
-  --fserif:'Libre Baskerville',Georgia,serif;
-  --fsans:'Source Sans 3',system-ui,sans-serif;
+  --fserif:'Helvetica Neue',Helvetica,Arial,sans-serif;
+  --fsans:'Helvetica Neue',Helvetica,Arial,sans-serif;
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--navy);color:var(--white);font-family:var(--fsans);min-height:100vh;font-size:16px;}
@@ -76,7 +74,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .temp-hero::after{content:'';position:absolute;top:-30px;right:-30px;width:140px;height:140px;background:radial-gradient(circle,rgba(240,180,41,.07),transparent 70%);border-radius:50%;}
 .temp-main{}
 .temp-value{font-family:var(--fserif);font-size:clamp(3rem,10vw,4.5rem);font-weight:700;line-height:1;color:var(--white);}
-.temp-value .unit{font-family:var(--fserif);font-size:clamp(1.2rem,3vw,1.6rem);color:var(--gold);}
+.temp-value .unit{font-family:var(--fserif);font-size:clamp(3rem,10vw,4.5rem);font-weight:700;color:var(--white);}
 .temp-celsius{font-family:var(--fserif);font-size:clamp(.9rem,2.5vw,1.1rem);color:var(--muted);margin-top:4px;}
 .temp-meta{font-family:var(--fsans);font-size:.72rem;color:var(--muted);margin-top:5px;}
 .temp-stats{display:flex;gap:20px;flex-wrap:wrap;}
@@ -240,8 +238,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
         <div id="scrubber-line" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(240,180,41,0.6);pointer-events:none;"></div>
         <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:#162d52;border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
-          <div id="scrubber-temp" style="font-family:'Libre Baskerville',Georgia,serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
-          <div id="scrubber-time" style="font-family:'Source Sans 3',system-ui,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
+          <div id="scrubber-temp" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
+          <div id="scrubber-time" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
         </div>
       </div>
     </div>
@@ -459,9 +457,9 @@ function initChart() {
       responsive:true, maintainAspectRatio:false, animation:false,
       scales:{
         x:{ type:'time', time:{displayFormats:{hour:'ha',day:'MMM D',week:'MMM D',month:'MMM YY'}},
-            ticks:{color:'#7a93b4',maxTicksLimit:7,font:{family:"'Source Sans 3',system-ui,sans-serif",size:11}},
+            ticks:{color:'#7a93b4',maxTicksLimit:7,font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
             grid:{color:'rgba(255,255,255,0.04)'}},
-        y:{ ticks:{color:'#7a93b4',callback:v=>v+'°F',font:{family:"'Source Sans 3',system-ui,sans-serif",size:11}},
+        y:{ ticks:{color:'#7a93b4',callback:v=>v+'°F',font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
             grid:{color:'rgba(255,255,255,0.04)'}}
       },
       plugins:{
