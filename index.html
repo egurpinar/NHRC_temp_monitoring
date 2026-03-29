@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AquaWatch — Pool Temperature</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:      #060d1a;
+    --surface: #0b1628;
+    --card:    #0f1f38;
+    --border:  rgba(0,210,200,0.15);
+    --accent:  #00d2c8;
+    --accent2: #0088ff;
+    --warn:    #ff8c42;
+    --danger:  #ff4466;
+    --text:    #c8e0f4;
+    --muted:   #4a6a8a;
+    --fh: 'Syne', sans-serif;
+    --fm: 'DM Mono', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--fm); min-height: 100vh; overflow-x: hidden;
+  }
+  body::before {
+    content: ''; position: fixed; inset: 0; z-index: 0;
+    background:
+      radial-gradient(ellipse 80% 50% at 50% -10%, rgba(0,136,255,0.12), transparent 70%),
+      radial-gradient(ellipse 60% 40% at 80% 110%, rgba(0,210,200,0.08), transparent 60%);
+    pointer-events: none;
+  }
+  #app { position: relative; z-index: 1; max-width: 860px; margin: 0 auto; padding: 40px 20px 80px; }
+
+  /* header */
+  .header { display: flex; align-items: center; gap: 14px; margin-bottom: 48px; }
+  .header-icon {
+    width: 44px; height: 44px;
+    background: linear-gradient(135deg, var(--accent2), var(--accent));
+    border-radius: 12px; display: grid; place-items: center; font-size: 22px;
+    box-shadow: 0 0 24px rgba(0,210,200,0.3);
+  }
+  .header h1 {
+    font-family: var(--fh); font-size: 1.6rem; font-weight: 800; letter-spacing: -0.02em;
+    background: linear-gradient(90deg, #fff 0%, var(--accent) 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .header p { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+
+  /* loading */
+  #loading {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; min-height: 300px; gap: 16px;
+  }
+  .spinner {
+    width: 40px; height: 40px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* error */
+  #error-view {
+    display: none;
+    background: rgba(255,68,102,0.08); border: 1px solid rgba(255,68,102,0.3);
+    border-radius: 16px; padding: 32px; text-align: center;
+  }
+  #error-view h2 { font-family: var(--fh); color: var(--danger); margin-bottom: 10px; }
+  #error-view p  { font-size: 0.82rem; color: var(--muted); line-height: 1.7; }
+  #error-view code {
+    background: rgba(0,0,0,0.3); color: var(--accent);
+    padding: 2px 7px; border-radius: 5px; font-size: 0.78em;
+  }
+
+  /* dashboard */
+  #dashboard { display: none; animation: fadeUp 0.5s ease both; }
+  @keyframes fadeUp { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:none } }
+
+  .dash-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 28px; flex-wrap: wrap; gap: 12px;
+  }
+  .dash-header h2 { font-family: var(--fh); font-size: 1.2rem; font-weight: 800; color: #fff; }
+  .dash-header p  { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: 999px; font-size: 0.72rem;
+  }
+  .pill-ok   { background: rgba(0,210,200,0.12); color: var(--accent); }
+  .pill-warn { background: rgba(255,140,66,0.12); color: var(--warn); }
+  .pill-err  { background: rgba(255,68,102,0.12); color: var(--danger); }
+  .pill-dot  { width:6px; height:6px; border-radius:50%; background:currentColor; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* alert banner */
+  #alert-banner {
+    background: rgba(255,68,102,0.1); border: 1px solid rgba(255,68,102,0.4);
+    border-radius: 12px; padding: 14px 18px; margin-bottom: 20px;
+    font-size: 0.82rem; color: var(--danger);
+    display: flex; align-items: center; gap: 10px;
+  }
+  #alert-banner.hidden { display: none !important; }
+
+  /* hero temp */
+  .temp-hero {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 20px; padding: 36px 32px;
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 20px; flex-wrap: wrap; gap: 24px;
+    position: relative; overflow: hidden;
+  }
+  .temp-hero::before {
+    content: ''; position: absolute; top:-40px; right:-40px;
+    width:180px; height:180px;
+    background: radial-gradient(circle, rgba(0,210,200,0.1), transparent 70%);
+    border-radius: 50%;
+  }
+  .temp-value {
+    font-family: var(--fh); font-size: 5rem; font-weight: 800;
+    line-height: 1; color: #fff; position: relative;
+  }
+  .temp-value sup { font-size: 1.8rem; vertical-align: super; color: var(--accent); }
+  .temp-meta { font-size: 0.75rem; color: var(--muted); margin-top: 8px; }
+  .temp-stats { display: flex; gap: 24px; flex-wrap: wrap; }
+  .temp-stat label {
+    display: block; font-size: 0.68rem; color: var(--muted);
+    letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px;
+  }
+  .temp-stat span { font-family: var(--fh); font-size: 1.3rem; font-weight: 700; color: #fff; }
+
+  /* cards */
+  .cards-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px;
+  }
+  @media(max-width:540px){ .cards-row{ grid-template-columns:1fr; } }
+  .mini-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 14px; padding: 20px;
+  }
+  .mini-card label {
+    font-size: 0.68rem; color: var(--muted); letter-spacing: 0.08em;
+    text-transform: uppercase; display: block; margin-bottom: 8px;
+  }
+  .mini-card span { font-family: var(--fh); font-size: 1.6rem; font-weight: 700; color: #fff; }
+
+  /* chart */
+  .chart-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 24px; margin-bottom: 20px;
+  }
+  .chart-card h3 {
+    font-family: var(--fh); font-size: 0.85rem; font-weight: 700;
+    color: #fff; margin-bottom: 18px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .chart-wrap { height: 200px; }
+
+  /* alert settings */
+  .alert-settings {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 24px;
+  }
+  .alert-settings h3 {
+    font-family: var(--fh); font-size: 0.85rem; font-weight: 700;
+    color: #fff; margin-bottom: 16px;
+  }
+  .range-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end; }
+  .input-wrap { flex: 1; min-width: 150px; }
+  .input-wrap label {
+    display: block; font-size: 0.72rem; color: var(--muted);
+    margin-bottom: 6px; letter-spacing: 0.05em;
+  }
+  input[type="number"], select {
+    width: 100%; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; color: #fff; font-family: var(--fm); font-size: 0.85rem;
+    padding: 11px 14px; outline: none; transition: border-color 0.2s;
+  }
+  input:focus, select:focus { border-color: var(--accent); }
+  select option { background: var(--surface); }
+
+  .btn {
+    padding: 11px 22px; border-radius: 10px; border: none; cursor: pointer;
+    font-family: var(--fh); font-size: 0.85rem; font-weight: 700;
+    letter-spacing: 0.02em; transition: all 0.2s;
+  }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent2), var(--accent)); color: #000;
+    box-shadow: 0 4px 20px rgba(0,210,200,0.25);
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 28px rgba(0,210,200,0.4); }
+  .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* raw debug */
+  #debug-section {
+    margin-top: 20px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 20px;
+  }
+  #debug-section summary {
+    cursor: pointer; font-size: 0.78rem; color: var(--muted);
+    font-family: var(--fh); font-weight: 700; letter-spacing: 0.05em;
+  }
+  #debug-pre {
+    margin-top: 14px; font-size: 0.72rem; color: var(--muted);
+    white-space: pre-wrap; word-break: break-all; max-height: 300px;
+    overflow-y: auto; line-height: 1.6;
+  }
+
+  /* toast */
+  #toast {
+    position: fixed; bottom: 28px; left: 50%;
+    transform: translateX(-50%) translateY(80px);
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 12px 22px;
+    font-size: 0.8rem; color: var(--text);
+    transition: transform 0.3s ease; z-index: 100; white-space: nowrap;
+  }
+  #toast.show { transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <div class="header">
+    <div class="header-icon">🌊</div>
+    <div>
+      <h1>AquaWatch</h1>
+      <p>Pool Temperature Monitor</p>
+    </div>
+  </div>
+
+  <!-- loading -->
+  <div id="loading">
+    <div class="spinner"></div>
+    <p style="font-size:0.8rem; color:var(--muted);">Loading temperature data…</p>
+  </div>
+
+  <!-- error -->
+  <div id="error-view">
+    <h2>⚠️ No data yet</h2>
+    <p>
+      The GitHub Actions workflow hasn't run yet, or encountered an error.<br/><br/>
+      Go to your repo → <code>Actions</code> tab → find <code>Fetch Govee Temperature</code>
+      → click <code>Run workflow</code> to trigger it manually.
+    </p>
+  </div>
+
+  <!-- dashboard -->
+  <div id="dashboard">
+
+    <div class="dash-header">
+      <div>
+        <h2 id="device-name">Pool Temperature</h2>
+        <p id="last-updated">—</p>
+      </div>
+      <div id="status-pill" class="pill pill-ok">
+        <span class="pill-dot"></span> <span id="pill-text">Live</span>
+      </div>
+    </div>
+
+    <!-- alert banner -->
+    <div id="alert-banner" class="hidden">
+      ⚠️ <span id="alert-text"></span>
+    </div>
+
+    <!-- hero -->
+    <div class="temp-hero">
+      <div>
+        <div class="temp-value" id="current-temp">--<sup>°F</sup></div>
+        <div class="temp-meta" id="temp-humidity">—</div>
+      </div>
+      <div class="temp-stats">
+        <div class="temp-stat">
+          <label>Min (session)</label>
+          <span id="min-val">--</span>
+        </div>
+        <div class="temp-stat">
+          <label>Max (session)</label>
+          <span id="max-val">--</span>
+        </div>
+        <div class="temp-stat">
+          <label>Avg (session)</label>
+          <span id="avg-val">--</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- mini cards -->
+    <div class="cards-row">
+      <div class="mini-card">
+        <label>Status</label>
+        <span id="status-text">—</span>
+      </div>
+      <div class="mini-card">
+        <label>Data Age</label>
+        <span id="data-age">—</span>
+      </div>
+    </div>
+
+    <!-- chart -->
+    <div class="chart-card">
+      <h3>
+        Temperature History
+        <span style="font-size:0.7rem;color:var(--muted);font-weight:400;">Session readings</span>
+      </h3>
+      <div class="chart-wrap">
+        <canvas id="temp-chart"></canvas>
+      </div>
+    </div>
+
+    <!-- alert settings -->
+    <div class="alert-settings">
+      <h3>🔔 Alert Thresholds</h3>
+      <div class="range-row">
+        <div class="input-wrap">
+          <label>Min °F (alert below)</label>
+          <input type="number" id="min-alert" value="65" />
+        </div>
+        <div class="input-wrap">
+          <label>Max °F (alert above)</label>
+          <input type="number" id="max-alert" value="90" />
+        </div>
+        <button class="btn btn-ghost" onclick="saveAlerts()">Update</button>
+      </div>
+    </div>
+
+    <!-- raw debug -->
+    <details id="debug-section">
+      <summary>🛠 Raw API response (debug)</summary>
+      <pre id="debug-pre"></pre>
+    </details>
+
+  </div><!-- end dashboard -->
+
+</div><!-- end app -->
+<div id="toast"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+const state = {
+  history: [],
+  minAlert: parseFloat(localStorage.getItem('minAlert') || '65'),
+  maxAlert: parseFloat(localStorage.getItem('maxAlert') || '90'),
+};
+
+let chart = null;
+
+// ── Boot ───────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('min-alert').value = state.minAlert;
+  document.getElementById('max-alert').value = state.maxAlert;
+  loadData();
+  setInterval(loadData, 60_000); // re-check data.json every 60s
+});
+
+// ── Load data.json ─────────────────────────────────────────────────────────
+async function loadData() {
+  try {
+    const res = await fetch(`data.json?_=${Date.now()}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const raw = await res.json();
+
+    document.getElementById('debug-pre').textContent =
+      JSON.stringify(raw, null, 2);
+
+    // Check for error state
+    if (raw.error) {
+      showError();
+      return;
+    }
+
+    const temp = extractTemp(raw);
+    if (temp === null) {
+      showError();
+      return;
+    }
+
+    renderDashboard(temp, raw);
+
+  } catch (e) {
+    console.error(e);
+    showError();
+  }
+}
+
+// ── Extract temperature from Govee response ────────────────────────────────
+// Govee's bff-app API nests devices inside different possible shapes.
+// This function tries multiple known paths.
+function extractTemp(raw) {
+  try {
+    // Path 1: data.devices[] array
+    const devices = raw?.data?.devices || raw?.devices || raw?.data || [];
+    const arr = Array.isArray(devices) ? devices : Object.values(devices);
+
+    for (const device of arr) {
+      // Try deviceExt.lastDeviceData or sku-based temp fields
+      const props = device?.deviceExt?.deviceSettings ||
+                    device?.deviceExt?.lastDeviceData ||
+                    device?.lastDeviceData ||
+                    device?.deviceData ||
+                    null;
+
+      if (props) {
+        // temperature can come as tempCurrent, temperature, tem, temp
+        const keys = ['tempCurrent','temperature','tem','temp','currentTemp'];
+        for (const k of keys) {
+          if (typeof props[k] === 'number') return props[k];
+          if (typeof props[k] === 'string' && !isNaN(parseFloat(props[k])))
+            return parseFloat(props[k]);
+        }
+      }
+
+      // Sometimes it's directly on the device object
+      const directKeys = ['tempCurrent','temperature','tem','temp'];
+      for (const k of directKeys) {
+        if (typeof device[k] === 'number') return device[k];
+      }
+    }
+  } catch(e) {
+    console.error('Extract error', e);
+  }
+  return null;
+}
+
+function extractHumidity(raw) {
+  try {
+    const devices = raw?.data?.devices || raw?.devices || raw?.data || [];
+    const arr = Array.isArray(devices) ? devices : Object.values(devices);
+    for (const device of arr) {
+      const props = device?.deviceExt?.deviceSettings ||
+                    device?.deviceExt?.lastDeviceData ||
+                    device?.lastDeviceData ||
+                    device?.deviceData || null;
+      if (props) {
+        const keys = ['humidity','hum','humidityCurrent'];
+        for (const k of keys) {
+          if (typeof props[k] === 'number') return props[k];
+        }
+      }
+    }
+  } catch(e) {}
+  return null;
+}
+
+function extractDeviceName(raw) {
+  try {
+    const devices = raw?.data?.devices || raw?.devices || raw?.data || [];
+    const arr = Array.isArray(devices) ? devices : Object.values(devices);
+    for (const d of arr) {
+      if (d.deviceName || d.name) return d.deviceName || d.name;
+    }
+  } catch(e) {}
+  return 'Pool Temperature';
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function renderDashboard(tempRaw, raw) {
+  // Govee returns temp in tenths of a degree Celsius sometimes (e.g. 285 = 28.5°C)
+  // Detect by checking if value > 200 (unrealistic °C or °F for water)
+  let tempC = tempRaw > 200 ? tempRaw / 100 : tempRaw;
+  let tempF  = Math.round((tempC * 9/5 + 32) * 10) / 10;
+
+  const hum  = extractHumidity(raw);
+  const name = extractDeviceName(raw);
+  const fetchedAt = raw.fetchedAt ? new Date(raw.fetchedAt) : new Date();
+
+  // push to history
+  state.history.push({ t: tempF, ts: fetchedAt });
+  if (state.history.length > 144) state.history.shift();
+
+  // ── elements ──
+  document.getElementById('loading').style.display    = 'none';
+  document.getElementById('error-view').style.display = 'none';
+  document.getElementById('dashboard').style.display  = 'block';
+
+  document.getElementById('device-name').textContent = name;
+  document.getElementById('current-temp').innerHTML  = `${tempF}<sup>°F</sup>`;
+  document.getElementById('temp-humidity').textContent =
+    hum !== null ? `${tempC.toFixed(1)}°C  ·  Humidity ${hum}%` : `${tempC.toFixed(1)}°C`;
+
+  // data age
+  const ageMs  = Date.now() - fetchedAt.getTime();
+  const ageMins = Math.round(ageMs / 60000);
+  document.getElementById('last-updated').textContent =
+    `Last fetched: ${fetchedAt.toLocaleTimeString()}`;
+  document.getElementById('data-age').textContent =
+    ageMins < 2 ? 'Just now' : `${ageMins} min ago`;
+
+  // status
+  const stale = ageMs > 20 * 60 * 1000; // >20 min = stale
+  const pill  = document.getElementById('status-pill');
+  const pillT = document.getElementById('pill-text');
+  if (stale) {
+    pill.className = 'pill pill-warn';
+    pillT.textContent = 'Stale data';
+  } else {
+    pill.className = 'pill pill-ok';
+    pillT.textContent = 'Live';
+  }
+
+  // min / max / avg
+  const vals = state.history.map(h => h.t);
+  document.getElementById('min-val').textContent = `${Math.min(...vals).toFixed(1)}°`;
+  document.getElementById('max-val').textContent = `${Math.max(...vals).toFixed(1)}°`;
+  document.getElementById('avg-val').textContent =
+    `${(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1)}°`;
+
+  // alerts
+  const banner = document.getElementById('alert-banner');
+  if (tempF < state.minAlert) {
+    banner.classList.remove('hidden');
+    document.getElementById('alert-text').textContent =
+      `🥶 Water is too cold! ${tempF}°F is below your minimum of ${state.minAlert}°F.`;
+    document.getElementById('status-text').textContent = '🥶 Too Cold';
+  } else if (tempF > state.maxAlert) {
+    banner.classList.remove('hidden');
+    document.getElementById('alert-text').textContent =
+      `🔥 Water is too hot! ${tempF}°F is above your maximum of ${state.maxAlert}°F.`;
+    document.getElementById('status-text').textContent = '🔥 Too Hot';
+  } else {
+    banner.classList.add('hidden');
+    document.getElementById('status-text').textContent = '✅ Normal';
+  }
+
+  updateChart();
+}
+
+// ── Chart ──────────────────────────────────────────────────────────────────
+function initChart() {
+  const ctx = document.getElementById('temp-chart').getContext('2d');
+  const gradient = ctx.createLinearGradient(0, 0, 0, 200);
+  gradient.addColorStop(0, 'rgba(0,210,200,0.25)');
+  gradient.addColorStop(1, 'rgba(0,210,200,0.0)');
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Temp °F',
+        data: [],
+        borderColor: '#00d2c8',
+        backgroundColor: gradient,
+        borderWidth: 2,
+        pointRadius: 3,
+        pointBackgroundColor: '#00d2c8',
+        fill: true, tension: 0.4,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#0f1f38',
+          borderColor: 'rgba(0,210,200,0.3)', borderWidth: 1,
+          titleColor: '#00d2c8', bodyColor: '#c8e0f4',
+          callbacks: { label: ctx => ` ${ctx.parsed.y}°F` }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#4a6a8a', font: { family: 'DM Mono', size: 10 }, maxTicksLimit: 8 },
+          grid: { color: 'rgba(255,255,255,0.04)' }
+        },
+        y: {
+          ticks: { color: '#4a6a8a', font: { family: 'DM Mono', size: 10 },
+                   callback: v => `${v}°` },
+          grid: { color: 'rgba(255,255,255,0.04)' }
+        }
+      }
+    }
+  });
+}
+
+function updateChart() {
+  if (!chart) initChart();
+  chart.data.labels = state.history.map(h =>
+    new Date(h.ts).toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' }));
+  chart.data.datasets[0].data = state.history.map(h => h.t);
+  chart.update('none');
+}
+
+// ── Alerts ─────────────────────────────────────────────────────────────────
+function saveAlerts() {
+  state.minAlert = parseFloat(document.getElementById('min-alert').value) || 65;
+  state.maxAlert = parseFloat(document.getElementById('max-alert').value) || 90;
+  localStorage.setItem('minAlert', state.minAlert);
+  localStorage.setItem('maxAlert', state.maxAlert);
+  showToast('Alert thresholds saved!');
+  loadData();
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function showError() {
+  document.getElementById('loading').style.display    = 'none';
+  document.getElementById('dashboard').style.display  = 'none';
+  document.getElementById('error-view').style.display = 'block';
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+</script>
+</body>
+</html>
