@@ -168,7 +168,12 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   <div id="dashboard">
 
 ```
-<div id="warn-gap" class="warn-banner level-danger" style="display:none;">
+<div style="display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;background:rgba(26,111,181,.1);border:1px solid rgba(26,111,181,.3);color:#5ba4e0;">
+  <span style="width:10px;height:10px;border-radius:50%;background:#5ba4e0;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+  <div><strong style="display:block;margin-bottom:2px;">Beta — data may not be accurate</strong>This website is in beta. Temperature readings are provided for guidance only. Please verify against the thermometer on the side of the dock at the boathouse before making rowing decisions.</div>
+</div>
+
+
   <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
   <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
 </div>
