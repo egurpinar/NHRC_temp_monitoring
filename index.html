@@ -1,4 +1,5 @@
 <!DOCTYPE html>
+
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
@@ -30,22 +31,22 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 #app{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:28px 16px 60px;}
 
 /* HEADER */
-.header{display:flex;align-items:center;gap:16px;margin-bottom:32px;padding-bottom:22px;border-bottom:1px solid var(--border);flex-wrap:wrap;}
+.header{display:flex;align-items:center;gap:16px;margin-bottom:32px;padding-bottom:22px;border-bottom:1px solid var(–border);flex-wrap:wrap;}
 .header img{width:68px;height:68px;object-fit:contain;filter:drop-shadow(0 2px 10px rgba(240,180,41,.3));flex-shrink:0;}
-.header-text h1{font-family:var(--fserif);font-size:clamp(1.1rem,3.5vw,1.45rem);font-weight:700;color:var(--gold);}
-.header-text p{font-size:0.75rem;color:var(--muted);margin-top:3px;letter-spacing:.04em;text-transform:uppercase;}
-.header-text .location{font-size:0.73rem;color:var(--muted);margin-top:2px;font-style:italic;}
-.header-motto{margin-left:auto;text-align:right;font-family:var(--fserif);font-style:italic;font-size:.75rem;color:var(--muted);line-height:1.5;display:none;}
+.header-text h1{font-family:var(–fserif);font-size:clamp(1.1rem,3.5vw,1.45rem);font-weight:700;color:var(–gold);}
+.header-text p{font-size:0.75rem;color:var(–muted);margin-top:3px;letter-spacing:.04em;text-transform:uppercase;}
+.header-text .location{font-size:0.73rem;color:var(–muted);margin-top:2px;font-style:italic;}
+.header-motto{margin-left:auto;text-align:right;font-family:var(–fserif);font-style:italic;font-size:.75rem;color:var(–muted);line-height:1.5;display:none;}
 @media(min-width:600px){.header-motto{display:block;}}
 
 /* LOADING / ERROR */
 #loading{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:260px;gap:16px;}
-.spinner{width:38px;height:38px;border:3px solid var(--border);border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite;}
+.spinner{width:38px;height:38px;border:3px solid var(–border);border-top-color:var(–gold);border-radius:50%;animation:spin .8s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg);}}
 #error-view{display:none;background:rgba(224,62,62,.08);border:1px solid rgba(224,62,62,.3);border-radius:14px;padding:28px;text-align:center;}
-#error-view h2{font-family:var(--fserif);color:var(--danger);margin-bottom:10px;}
-#error-view p{font-size:.85rem;color:var(--muted);line-height:1.7;}
-#error-view code{background:rgba(0,0,0,.3);color:var(--gold);padding:2px 6px;border-radius:4px;font-size:.8em;}
+#error-view h2{font-family:var(–fserif);color:var(–danger);margin-bottom:10px;}
+#error-view p{font-size:.85rem;color:var(–muted);line-height:1.7;}
+#error-view code{background:rgba(0,0,0,.3);color:var(–gold);padding:2px 6px;border-radius:4px;font-size:.8em;}
 
 /* DASHBOARD */
 #dashboard{display:none;animation:fadeUp .4s ease both;}
@@ -59,8 +60,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
 /* DASH TOP */
 .dash-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;}
-.dash-top h2{font-family:var(--fserif);font-size:1rem;color:var(--white);font-weight:400;}
-.dash-top .dash-sub{font-size:.72rem;color:var(--muted);margin-top:2px;}
+.dash-top h2{font-family:var(–fserif);font-size:1rem;color:var(–white);font-weight:400;}
+.dash-top .dash-sub{font-size:.72rem;color:var(–muted);margin-top:2px;}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.72rem;font-weight:600;}
 .pill-ok{background:rgba(46,125,79,.18);color:#5cc98a;border:1px solid rgba(46,125,79,.3);}
 .pill-warn{background:rgba(224,123,32,.18);color:#f0a450;border:1px solid rgba(224,123,32,.3);}
@@ -70,57 +71,56 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
 /* ALERT BANNER */
 
-
 /* HERO TEMP */
-.temp-hero{background:var(--navy2);border:1px solid var(--border);border-radius:16px;padding:24px 22px;display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:20px;position:relative;overflow:hidden;}
-.temp-hero::after{content:'';position:absolute;top:-30px;right:-30px;width:140px;height:140px;background:radial-gradient(circle,rgba(240,180,41,.07),transparent 70%);border-radius:50%;}
+.temp-hero{background:var(–navy2);border:1px solid var(–border);border-radius:16px;padding:24px 22px;display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:20px;position:relative;overflow:hidden;}
+.temp-hero::after{content:’’;position:absolute;top:-30px;right:-30px;width:140px;height:140px;background:radial-gradient(circle,rgba(240,180,41,.07),transparent 70%);border-radius:50%;}
 .temp-main{}
-.temp-value{font-family:var(--fserif);font-size:clamp(3rem,10vw,4.5rem);font-weight:700;line-height:1;color:var(--white);}
-.temp-value .unit{font-family:var(--fserif);font-size:clamp(1.2rem,3vw,1.6rem);color:var(--gold);}
-.temp-celsius{font-family:var(--fserif);font-size:clamp(.9rem,2.5vw,1.1rem);color:var(--muted);margin-top:4px;}
-.temp-meta{font-family:var(--fsans);font-size:.72rem;color:var(--muted);margin-top:5px;}
+.temp-value{font-family:var(–fserif);font-size:clamp(3rem,10vw,4.5rem);font-weight:700;line-height:1;color:var(–white);}
+.temp-value .unit{font-family:var(–fserif);font-size:clamp(1.2rem,3vw,1.6rem);color:var(–gold);}
+.temp-celsius{font-family:var(–fserif);font-size:clamp(.9rem,2.5vw,1.1rem);color:var(–muted);margin-top:4px;}
+.temp-meta{font-family:var(–fsans);font-size:.72rem;color:var(–muted);margin-top:5px;}
 .temp-stats{display:flex;gap:20px;flex-wrap:wrap;}
-.temp-stat label{display:block;font-family:var(--fsans);font-size:.63rem;color:var(--muted);letter-spacing:.09em;text-transform:uppercase;margin-bottom:3px;}
-.temp-stat span{font-family:var(--fserif);font-size:1.2rem;color:var(--white);}
+.temp-stat label{display:block;font-family:var(–fsans);font-size:.63rem;color:var(–muted);letter-spacing:.09em;text-transform:uppercase;margin-bottom:3px;}
+.temp-stat span{font-family:var(–fserif);font-size:1.2rem;color:var(–white);}
 
 /* ROWING STATUS */
-.rowing-status-card{background:var(--navy2);border:1px solid var(--border);border-radius:16px;padding:22px 20px;margin-bottom:16px;}
-.section-label{font-family:var(--fsans);font-size:.63rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);margin-bottom:10px;}
-.rule-banner{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;margin-bottom:18px;font-family:var(--fsans);font-size:.84rem;font-weight:600;}
+.rowing-status-card{background:var(–navy2);border:1px solid var(–border);border-radius:16px;padding:22px 20px;margin-bottom:16px;}
+.section-label{font-family:var(–fsans);font-size:.63rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(–gold);margin-bottom:10px;}
+.rule-banner{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;margin-bottom:18px;font-family:var(–fsans);font-size:.84rem;font-weight:600;}
 .rule-banner.green{background:rgba(46,125,79,.15);color:#5cc98a;border:1px solid rgba(46,125,79,.3);}
-.rule-banner.yellow{background:rgba(240,180,41,.12);color:var(--gold2);border:1px solid rgba(240,180,41,.25);}
+.rule-banner.yellow{background:rgba(240,180,41,.12);color:var(–gold2);border:1px solid rgba(240,180,41,.25);}
 .rule-banner.red{background:rgba(224,62,62,.12);color:#f07070;border:1px solid rgba(224,62,62,.3);}
 .tiers-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
 @media(max-width:560px){.tiers-grid{grid-template-columns:1fr;}}
-.tier-card{background:var(--navy3);border-radius:10px;padding:12px 14px;border:1px solid rgba(255,255,255,.06);}
-.tier-card h4{font-family:var(--fsans);font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--gold);margin-bottom:9px;}
-.boat-row{display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.05);font-family:var(--fsans);font-size:.76rem;}
+.tier-card{background:var(–navy3);border-radius:10px;padding:12px 14px;border:1px solid rgba(255,255,255,.06);}
+.tier-card h4{font-family:var(–fsans);font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(–gold);margin-bottom:9px;}
+.boat-row{display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.05);font-family:var(–fsans);font-size:.76rem;}
 .boat-row:last-child{border-bottom:none;}
 .boat-status{font-size:.66rem;font-weight:700;padding:2px 7px;border-radius:999px;}
 .bs-go{background:rgba(46,125,79,.2);color:#5cc98a;}
 .bs-no{background:rgba(224,62,62,.15);color:#f07070;}
-.note-text{font-family:var(--fsans);font-size:.72rem;color:var(--muted);margin-top:12px;line-height:1.6;padding-top:10px;border-top:1px solid rgba(255,255,255,.06);}
+.note-text{font-family:var(–fsans);font-size:.72rem;color:var(–muted);margin-top:12px;line-height:1.6;padding-top:10px;border-top:1px solid rgba(255,255,255,.06);}
 
 /* MINI CARDS */
 .cards-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
 @media(max-width:400px){.cards-row{grid-template-columns:1fr;}}
-.mini-card{background:var(--navy2);border:1px solid var(--border);border-radius:12px;padding:16px 18px;}
-.mini-card label{font-family:var(--fsans);font-size:.63rem;color:var(--muted);letter-spacing:.09em;text-transform:uppercase;display:block;margin-bottom:6px;}
-.mini-card span{font-family:var(--fserif);font-size:1.4rem;color:var(--white);}
+.mini-card{background:var(–navy2);border:1px solid var(–border);border-radius:12px;padding:16px 18px;}
+.mini-card label{font-family:var(–fsans);font-size:.63rem;color:var(–muted);letter-spacing:.09em;text-transform:uppercase;display:block;margin-bottom:6px;}
+.mini-card span{font-family:var(–fserif);font-size:1.4rem;color:var(–white);}
 
 /* HISTORY CHART CARD */
-.chart-card{background:var(--navy2);border:1px solid var(--border);border-radius:14px;padding:18px 16px;margin-bottom:16px;}
+.chart-card{background:var(–navy2);border:1px solid var(–border);border-radius:14px;padding:18px 16px;margin-bottom:16px;}
 .chart-card-header{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px;}
-.chart-card-header h3{font-family:var(--fserif);font-size:.9rem;font-weight:700;color:var(--white);}
+.chart-card-header h3{font-family:var(–fserif);font-size:.9rem;font-weight:700;color:var(–white);}
 .range-btns{display:flex;gap:5px;flex-wrap:wrap;}
-.rb{padding:5px 10px;border-radius:7px;border:1px solid rgba(122,147,180,.3);background:transparent;font-family:var(--fsans);font-size:.72rem;cursor:pointer;color:var(--muted);transition:all .15s;white-space:nowrap;}
-.rb:hover{border-color:var(--gold);color:var(--gold);}
-.rb.active{background:rgba(240,180,41,.15);color:var(--gold);border-color:rgba(240,180,41,.4);}
+.rb{padding:5px 10px;border-radius:7px;border:1px solid rgba(122,147,180,.3);background:transparent;font-family:var(–fsans);font-size:.72rem;cursor:pointer;color:var(–muted);transition:all .15s;white-space:nowrap;}
+.rb:hover{border-color:var(–gold);color:var(–gold);}
+.rb.active{background:rgba(240,180,41,.15);color:var(–gold);border-color:rgba(240,180,41,.4);}
 .rb-csv{background:rgba(46,125,79,.15)!important;color:#5cc98a!important;border-color:rgba(46,125,79,.4)!important;}
 .rb-csv:hover{background:rgba(46,125,79,.25)!important;}
 
 /* INFO BAR */
-.data-info-bar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;padding:8px 12px;background:rgba(255,255,255,.04);border-radius:8px;margin-bottom:10px;font-family:var(--fsans);font-size:.7rem;color:var(--muted);}
+.data-info-bar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;padding:8px 12px;background:rgba(255,255,255,.04);border-radius:8px;margin-bottom:10px;font-family:var(–fsans);font-size:.7rem;color:var(–muted);}
 .dot-live{width:6px;height:6px;border-radius:50%;background:#5cc98a;display:inline-block;animation:pulse 2s infinite;}
 .dot-warn{width:6px;height:6px;border-radius:50%;background:#f0a450;display:inline-block;}
 
@@ -128,11 +128,15 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 @media(min-width:600px){.chart-wrap{height:230px;}}
 
 /* DEBUG */
+#debug-section{background:var(–navy2);border:1px solid var(–border);border-radius:12px;padding:16px;}
+#debug-section summary{cursor:pointer;font-family:var(–fsans);font-size:.73rem;color:var(–muted);font-weight:600;}
+#debug-pre{margin-top:10px;font-size:.68rem;color:var(–muted);white-space:pre-wrap;word-break:break-all;max-height:220px;overflow-y:auto;line-height:1.6;}
 
 /* TOAST */
-#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--navy2);border:1px solid var(--border);border-radius:10px;padding:10px 18px;font-family:var(--fsans);font-size:.8rem;color:var(--white);transition:transform .3s ease;z-index:100;white-space:nowrap;}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:var(–navy2);border:1px solid var(–border);border-radius:10px;padding:10px 18px;font-family:var(–fsans);font-size:.8rem;color:var(–white);transition:transform .3s ease;z-index:100;white-space:nowrap;}
 #toast.show{transform:translateX(-50%) translateY(0);}
 </style>
+
 </head>
 <body>
 <div id="app">
@@ -163,90 +167,94 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
   <div id="dashboard">
 
-    <div style="display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;background:rgba(26,111,181,.1);border:1px solid rgba(26,111,181,.3);color:#5ba4e0;">
-      <span style="width:10px;height:10px;border-radius:50%;background:#5ba4e0;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-      <div><strong style="display:block;margin-bottom:2px;">Beta — data may not be accurate</strong>This website is in beta. Temperature readings are provided for guidance only. Please verify against the thermometer on the side of the dock at the boathouse before making rowing decisions.</div>
+```
+<div style="display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;background:rgba(26,111,181,.1);border:1px solid rgba(26,111,181,.3);color:#5ba4e0;">
+  <span style="width:10px;height:10px;border-radius:50%;background:#5ba4e0;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+  <div><strong style="display:block;margin-bottom:2px;">Beta — data may not be accurate</strong>This website is in beta. Temperature readings are provided for guidance only. Please verify against the thermometer on the side of the dock at the boathouse before making rowing decisions.</div>
+</div>
+
+
+  <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+  <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
+</div>
+<div id="warn-stale" class="warn-banner level-warn" style="display:none;">
+  <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+  <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
+</div>
+
+<div class="dash-top">
+  <div>
+    <h2 id="device-name">Water Temperature</h2>
+    <div class="dash-sub" id="last-updated">—</div>
+  </div>
+  <div class="dash-top-btns">
+    <div id="status-pill" class="pill pill-ok"><span class="pill-dot"></span><span id="pill-text">Live</span></div>
+    <button class="rb" onclick="loadData()" style="padding:5px 12px;">Refresh</button>
+  </div>
+</div>
+
+
+<div class="temp-hero">
+  <div class="temp-main">
+    <div class="temp-value"><span id="current-f">--</span><span class="unit">°F</span></div>
+    <div class="temp-celsius" id="current-c">-- °C</div>
+    <div class="temp-meta" id="temp-meta">—</div>
+  </div>
+  <div class="temp-stats">
+    <div class="temp-stat"><label>Min (24h)</label><span id="min-val">--</span></div>
+    <div class="temp-stat"><label>Max (24h)</label><span id="max-val">--</span></div>
+    <div class="temp-stat"><label>Avg (24h)</label><span id="avg-val">--</span></div>
+  </div>
+</div>
+
+<div class="rowing-status-card">
+  <div class="section-label">Rowing Status — Current Conditions</div>
+  <div id="rule-banner" class="rule-banner green"><span id="rule-text">Normal rowing conditions</span></div>
+  <div class="tiers-grid" id="tiers-grid"></div>
+  <div class="note-text" id="rowing-notes"></div>
+</div>
+
+<div class="cards-row">
+  <div class="mini-card"><label>Status</label><span id="status-text">—</span></div>
+  <div class="mini-card"><label>Data Age</label><span id="data-age">—</span></div>
+</div>
+
+<!-- HISTORY CHART -->
+<div class="chart-card">
+  <div class="chart-card-header">
+    <h3>Temperature History</h3>
+    <div class="range-btns" id="range-btns">
+      <button class="rb active" data-d="1">24h</button>
+      <button class="rb" data-d="7">7 days</button>
+      <button class="rb" data-d="30">30 days</button>
+      <button class="rb" data-d="90">3 months</button>
+      <button class="rb" data-d="0">All time</button>
+      <button class="rb rb-csv" onclick="downloadCSV()">Download CSV</button>
     </div>
+  </div>
 
+  <div class="data-info-bar">
+    <span style="display:flex;align-items:center;gap:5px;"><span id="info-dot" class="dot-live"></span><span id="info-last">Loading…</span></span>
+    <span style="display:none;" id="info-interval">Updated every 10 min</span>
+    <span id="info-count">— readings</span>
+  </div>
 
-    <div id="warn-gap" class="warn-banner level-danger" style="display:none;">
-      <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-      <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
+  <div id="chart-single-msg" style="display:none;text-align:center;padding:40px 0;font-size:.82rem;color:var(--muted);"></div>
+  <div style="position:relative;">
+    <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
+    <div id="scrubber-line" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(240,180,41,0.6);pointer-events:none;"></div>
+    <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:#162d52;border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
+      <div id="scrubber-temp" style="font-family:'Libre Baskerville',Georgia,serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
+      <div id="scrubber-time" style="font-family:'Source Sans 3',system-ui,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
     </div>
-    <div id="warn-stale" class="warn-banner level-warn" style="display:none;">
-      <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-      <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
-    </div>
+  </div>
+</div>
 
-    <div class="dash-top">
-      <div>
-        <h2 id="device-name">Water Temperature</h2>
-        <div class="dash-sub" id="last-updated">—</div>
-      </div>
-      <div class="dash-top-btns">
-        <div id="status-pill" class="pill pill-ok"><span class="pill-dot"></span><span id="pill-text">Live</span></div>
-        <button class="rb" onclick="loadData()" style="padding:5px 12px;">Refresh</button>
-      </div>
-    </div>
-
-
-    <div class="temp-hero">
-      <div class="temp-main">
-        <div class="temp-value"><span id="current-f">--</span><span class="unit">°F</span></div>
-        <div class="temp-celsius" id="current-c">-- °C</div>
-        <div class="temp-meta" id="temp-meta">—</div>
-      </div>
-      <div class="temp-stats">
-        <div class="temp-stat"><label>Min (24h)</label><span id="min-val">--</span></div>
-        <div class="temp-stat"><label>Max (24h)</label><span id="max-val">--</span></div>
-        <div class="temp-stat"><label>Avg (24h)</label><span id="avg-val">--</span></div>
-      </div>
-    </div>
-
-    <div class="rowing-status-card">
-      <div class="section-label">Rowing Status — Current Conditions</div>
-      <div id="rule-banner" class="rule-banner green"><span id="rule-text">Normal rowing conditions</span></div>
-      <div class="tiers-grid" id="tiers-grid"></div>
-      <div class="note-text" id="rowing-notes"></div>
-    </div>
-
-    <div class="cards-row">
-      <div class="mini-card"><label>Status</label><span id="status-text">—</span></div>
-      <div class="mini-card"><label>Data Age</label><span id="data-age">—</span></div>
-    </div>
-
-    <!-- HISTORY CHART -->
-    <div class="chart-card">
-      <div class="chart-card-header">
-        <h3>Temperature History</h3>
-        <div class="range-btns" id="range-btns">
-          <button class="rb active" data-d="1">24h</button>
-          <button class="rb" data-d="7">7 days</button>
-          <button class="rb" data-d="30">30 days</button>
-          <button class="rb" data-d="90">3 months</button>
-          <button class="rb" data-d="0">All time</button>
-          <button class="rb rb-csv" onclick="downloadCSV()">Download CSV</button>
-        </div>
-      </div>
-
-      <div class="data-info-bar">
-        <span style="display:flex;align-items:center;gap:5px;"><span id="info-dot" class="dot-live"></span><span id="info-last">Loading…</span></span>
-        <span style="display:none;" id="info-interval">Updated every 10 min</span>
-        <span id="info-count">— readings</span>
-      </div>
-
-      <div id="chart-single-msg" style="display:none;text-align:center;padding:40px 0;font-size:.82rem;color:var(--muted);"></div>
-      <div style="position:relative;">
-        <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
-        <div id="scrubber-line" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(240,180,41,0.6);pointer-events:none;"></div>
-        <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:#162d52;border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
-          <div id="scrubber-temp" style="font-family:'Libre Baskerville',Georgia,serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
-          <div id="scrubber-time" style="font-family:'Source Sans 3',system-ui,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
-        </div>
-      </div>
-    </div>
-
-
+<details id="debug-section">
+  <summary>Raw API response (debug)</summary>
+  <pre id="debug-pre"></pre>
+</details>
+```
 
   </div>
 </div>
@@ -269,6 +277,7 @@ async function loadData() {
     const res = await fetch(`data.json?_=${Date.now()}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const raw = await res.json();
+    document.getElementById('debug-pre').textContent = JSON.stringify(raw, null, 2);
     if (raw.error) { showError(); return; }
     const tempC = extractTemp(raw);
     if (tempC === null) { showError(); return; }
@@ -310,17 +319,9 @@ function extractDeviceName(raw) {
 }
 
 function updateFreshnessWarnings() {
-  // Use the most recent timestamp we have — prefer data.json's fetchedAt
-  // (always current) over history.json's last entry (may be from old home testing)
-  let bestTs = state.lastFetchedAt ? state.lastFetchedAt.getTime() : null;
-  if (state.allHistory.length) {
-    const histTs = state.allHistory[state.allHistory.length-1].ts;
-    // Only use history timestamp if it is MORE recent than data.json timestamp
-    if (bestTs === null || histTs > bestTs) bestTs = histTs;
-  }
-  if (!bestTs) return;
-
-  const ageMs  = Date.now() - bestTs;
+  if (!state.allHistory.length) return;
+  const last = state.allHistory[state.allHistory.length-1];
+  const ageMs = Date.now() - last.ts;
   const ageHrs = ageMs / 3600000;
   const ageMins = Math.round(ageMs / 60000);
   const gapEl   = document.getElementById('warn-gap');
@@ -328,7 +329,7 @@ function updateFreshnessWarnings() {
   if (ageHrs >= 6) {
     const h = Math.floor(ageHrs), m = Math.round((ageHrs-h)*60);
     document.getElementById('warn-gap-text').textContent =
-      ` No readings received for ${h}h ${m}m. The sensor, gateway, or GitHub Actions workflow may be offline. Last reading: ${new Date(bestTs).toLocaleString()}.`;
+      ` No readings received for ${h}h ${m}m. The sensor, gateway, or GitHub Actions workflow may be offline. Last reading: ${new Date(last.ts).toLocaleString()}.`;
     gapEl.style.display='flex'; staleEl.style.display='none';
   } else if (ageMs > 45*60000) {
     document.getElementById('warn-stale-text').textContent =
@@ -358,7 +359,6 @@ function renderDashboard(tempC, raw) {
   const hum       = extractHumidity(raw);
   const name      = extractDeviceName(raw);
   const fetchedAt = raw.fetchedAt ? new Date(raw.fetchedAt) : new Date();
-  state.lastFetchedAt = fetchedAt;
 
   document.getElementById('loading').style.display    = 'none';
   document.getElementById('error-view').style.display = 'none';
@@ -387,7 +387,6 @@ function renderDashboard(tempC, raw) {
   document.getElementById('status-text').textContent = 'Normal';
 
   renderRowingStatus(tempF);
-  updateFreshnessWarnings();
 }
 
 /* ── RANGE BUTTONS ── */
@@ -706,5 +705,6 @@ function showToast(msg) {
   setTimeout(()=>t.classList.remove('show'), 2500);
 }
 </script>
+
 </body>
 </html>
