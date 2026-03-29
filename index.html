@@ -308,7 +308,18 @@ async function loadHistory() {
     updateChart();
     updateInfoBar();
     updateFreshnessWarnings();
+    updateStats();
   } catch(e) { console.error('history.json:', e); }
+}
+
+function updateStats() {
+  const now  = Date.now();
+  const day  = state.allHistory.filter(h => h.ts >= now - 86400000);
+  if (!day.length) return; // no history yet — leave showing current reading
+  const vals = day.map(h => h.tempF);
+  document.getElementById('min-val').textContent = `${Math.min(...vals).toFixed(1)}°F`;
+  document.getElementById('max-val').textContent = `${Math.max(...vals).toFixed(1)}°F`;
+  document.getElementById('avg-val').textContent = `${(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1)}°F`;
 }
 
 function parseLastDeviceData(device) {
@@ -395,12 +406,7 @@ function renderDashboard(tempC, raw) {
   if (ageMs > 45*60000) { pill.className='pill pill-warn'; document.getElementById('pill-text').textContent='Delayed'; }
   else                  { pill.className='pill pill-ok';   document.getElementById('pill-text').textContent='Live'; }
 
-  const now = Date.now();
-  const day = state.allHistory.filter(h => h.ts >= now-86400000);
-  const vals = day.length ? day.map(h=>h.tempF) : [tempF];
-  document.getElementById('min-val').textContent = `${Math.min(...vals).toFixed(1)}°F`;
-  document.getElementById('max-val').textContent = `${Math.max(...vals).toFixed(1)}°F`;
-  document.getElementById('avg-val').textContent = `${(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1)}°F`;
+  updateStats();
 
   document.getElementById('status-text').textContent = 'Normal';
 
