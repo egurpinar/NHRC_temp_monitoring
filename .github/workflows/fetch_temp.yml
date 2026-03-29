@@ -60,9 +60,9 @@ jobs:
             NEW_ENTRY="{\"ts\":\"$FETCHED_AT\",\"tempC\":$TEMP_C,\"tempF\":$TEMP_F}"
             echo "New entry: $NEW_ENTRY"
 
-            # Append to history.json (create if missing, keep last 52560 entries = ~1 year at 10min)
+            # Append to history.json (create if missing, keep last 525600 entries = ~10 years at 10min)
             if [ -f history.json ]; then
-              jq --argjson entry "$NEW_ENTRY" '. + [$entry] | .[-52560:]' history.json > history_tmp.json && mv history_tmp.json history.json
+              jq --argjson entry "$NEW_ENTRY" '. + [$entry] | .[-525600:]' history.json > history_tmp.json && mv history_tmp.json history.json
             else
               echo "[$NEW_ENTRY]" > history.json
             fi
