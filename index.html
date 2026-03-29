@@ -636,29 +636,48 @@ function checkMorningStreak(threshold) {
 }
 
 function getEffectiveLevel(tempF) {
-  // IMMEDIATE downgrade — cold direction triggers right away, no 3-day rule
+  // IMMEDIATE downgrade — going colder always triggers right away
   if (tempF < 40)  return { zone:'winter',    immediate:true };
   if (tempF <= 50) return { zone:'fourOar',   immediate:true };
   if (tempF <= 60) return { zone:'coldWater', immediate:true };
 
-  // Current reading is above 60°F — need 3 consecutive MORNINGS above 60°F
-  // to officially declare Normal rowing conditions
+  // Current temp > 60°F — but we must check the full upgrade chain.
+  // Every upward boundary requires 3 consecutive morning readings (5–9 AM)
+  // above that threshold before lifting restrictions.
+  //
+  // The chain: Winter (< 40) → Four Oar (40–50) → Cold Water (51–60) → Normal (> 60)
+  // We check from the bottom up — if the mornings haven't cleared 40°F for 3 days
+  // we stay in Winter; if they've cleared 40 but not 50 we stay in Four Oar; etc.
+
   const hist         = state.allHistory;
   const histSpanDays = hist.length > 1
     ? (hist[hist.length-1].ts - hist[0].ts) / 86400000 : 0;
 
-  // Need at least 3 days of history to even check
   if (histSpanDays < 3) {
-    return { zone:'coldWater', immediate:false, insufficient:true };
+    // Not enough history at all — stay conservative at Winter Rowing
+    return { zone:'winter', immediate:false, insufficient:true };
   }
 
-  const { confirmed, noData } = checkMorningStreak(60);
+  // Check each threshold from coldest to warmest
+  const streak40 = checkMorningStreak(40);
+  if (streak40.confirmed < 3) {
+    return { zone:'winter', immediate:false, insufficient:false,
+             confirmed: streak40.confirmed, noData: streak40.noData, threshold: 40 };
+  }
 
-  if (confirmed >= 3) return { zone:'normal', immediate:false };
+  const streak50 = checkMorningStreak(50);
+  if (streak50.confirmed < 3) {
+    return { zone:'fourOar', immediate:false, insufficient:false,
+             confirmed: streak50.confirmed, noData: streak50.noData, threshold: 50 };
+  }
 
-  // Streak not met yet — include context for the status message
-  return { zone:'coldWater', immediate:false, insufficient:false,
-           confirmed, noData };
+  const streak60 = checkMorningStreak(60);
+  if (streak60.confirmed < 3) {
+    return { zone:'coldWater', immediate:false, insufficient:false,
+             confirmed: streak60.confirmed, noData: streak60.noData, threshold: 60 };
+  }
+
+  return { zone:'normal', immediate:false };
 }
 
 // Zone definitions — tiers only (rule/notes added per-call below)
@@ -691,29 +710,48 @@ function renderRowingStatus(tempF) {
   const tiers  = ZONE_TIERS[eff.zone];
   let rule, notes, cssLevel;
 
+  // Helper to build the "awaiting" message for any zone
+  function awaitingMsg(zone, eff) {
+    const thr  = eff.threshold;
+    const need = 3 - (eff.confirmed || 0);
+    const thrLabel = thr === 40 ? '40°F (exit Winter Rowing)' :
+                     thr === 50 ? '50°F (exit Four Oar Rule)' :
+                                  '60°F (Normal conditions)';
+    if (eff.insufficient) {
+      return `Winter Rowing restrictions remain in effect. Current temp is above threshold but <strong>less than 3 days of morning data</strong> (5–9 AM) have been collected. Cannot confirm the 3-day morning streak yet.`;
+    }
+    if (eff.noData) {
+      return `Winter Rowing restrictions remain in effect. <strong>Morning readings (5–9 AM) are missing for one or more days</strong> due to a data gap. Cannot confirm the 3-day streak. Check the thermometer at the dock.`;
+    }
+    return `Restrictions remain in effect. Current morning temperatures are above ${thrLabel}, but only <strong>${eff.confirmed} of 3 consecutive mornings</strong> (5–9 AM) confirmed so far. Need ${need} more morning${need===1?'':'s'}.`;
+  }
+
   if (eff.zone === 'winter') {
     cssLevel = 'red';
-    rule  = 'WINTER ROWING in effect (water < 40°F)';
-    notes = '<strong>Eight Oar Rule:</strong> Quads (4x) and Eights (8+) only. Each rower must be certified by the Captain of Winter Rowing, wear over-the-shoulder auto-inflate life jackets, and have signed a Winter Rowing waiver. Two-boat minimum.';
+    if (eff.immediate) {
+      rule  = 'WINTER ROWING in effect (water < 40°F)';
+      notes = '<strong>Eight Oar Rule:</strong> Quads (4x) and Eights (8+) only. Each rower must be certified by the Captain of Winter Rowing, wear over-the-shoulder auto-inflate life jackets, and have signed a Winter Rowing waiver. Two-boat minimum.';
+    } else {
+      rule  = 'WINTER ROWING — awaiting 3-morning confirmation to lift';
+      notes = awaitingMsg('winter', eff) + ' <strong>Eight Oar Rule remains in effect.</strong>';
+    }
   } else if (eff.zone === 'fourOar') {
     cssLevel = 'yellow';
-    rule  = 'FOUR OAR RULE in effect (water 40–50°F)';
-    notes = '<strong>Four Oar Rule:</strong> No singles or pairs for Tier 1 or 2. Tier 3 may row 2x/4+/- with auto-inflate life jackets.';
+    if (eff.immediate) {
+      rule  = 'FOUR OAR RULE in effect (water 40–50°F)';
+      notes = '<strong>Four Oar Rule:</strong> No singles or pairs for Tier 1 or 2. Tier 3 may row 2x/4+/- with auto-inflate life jackets.';
+    } else {
+      rule  = 'FOUR OAR RULE — awaiting 3-morning confirmation to lift';
+      notes = awaitingMsg('fourOar', eff) + ' Four Oar restrictions remain in effect.';
+    }
   } else if (eff.zone === 'coldWater') {
     cssLevel = 'yellow';
-    if (eff.insufficient) {
-      rule  = 'COLD WATER caution (water 51–60°F) — insufficient history to declare Normal';
-      notes = 'Current temperature is above 60°F, but <strong>we do not yet have 3 days of data to declare Normal rowing conditions</strong>. Cold Water restrictions remain in effect until 3 consecutive days above 60°F are confirmed. Buddy Boat strongly advised.';
-    } else if (eff.noData) {
-      rule  = 'COLD WATER caution — morning data gap';
-      notes = 'Temperature is above 60°F but <strong>morning readings (5–9 AM) are missing for one or more of the past 3 days</strong> due to a data gap. Cannot confirm the 3-day morning streak. Cold Water restrictions remain in effect. Check the thermometer at the dock.';
-    } else if (eff.confirmed !== undefined) {
-      const need = 3 - eff.confirmed;
-      rule  = 'COLD WATER caution — awaiting 3-morning confirmation';
-      notes = `Temperature is above 60°F, but only <strong>${eff.confirmed} of 3 consecutive mornings</strong> (5–9 AM) above 60°F confirmed so far. Need ${need} more morning${need===1?'':'s'} to declare Normal rowing conditions. Cold Water restrictions remain in effect.`;
-    } else {
+    if (eff.immediate) {
       rule  = 'COLD WATER restrictions apply (water 51–60°F)';
       notes = 'Buddy Boat strongly advised. Tier 1 restricted to 4+ or larger. Tier 2 may row 2x and above. Tier 3 may row all boats.';
+    } else {
+      rule  = 'COLD WATER — awaiting 3-morning confirmation for Normal';
+      notes = awaitingMsg('coldWater', eff);
     }
   } else {
     cssLevel = 'green';
