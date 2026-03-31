@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
@@ -7,11 +6,8 @@
 <title>NHRC Water Temperature</title>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js"></script>
-
 <style>
 :root{
   --navy:#0d1f3c;--navy2:#162d52;--navy3:#1e3d6e;
@@ -135,7 +131,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--navy2);border:1px solid var(--border);border-radius:10px;padding:10px 18px;font-family:var(--fsans);font-size:.8rem;color:var(--white);transition:transform .3s ease;z-index:100;white-space:nowrap;}
 #toast.show{transform:translateX(-50%) translateY(0);}
 </style>
-
 </head>
 <body>
 <div id="app">
@@ -176,95 +171,94 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
   <div id="dashboard">
 
-```
-<div style="display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;background:rgba(26,111,181,.1);border:1px solid rgba(26,111,181,.3);color:#5ba4e0;">
-  <span style="width:10px;height:10px;border-radius:50%;background:#5ba4e0;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-  <div><strong style="display:block;margin-bottom:2px;">Beta — data may not be accurate</strong>This website is in beta. Temperature readings are provided for guidance only. Please verify against the thermometer on the side of the dock at the boathouse before making rowing decisions.</div>
-</div>
-
-
-<div id="warn-gap" class="warn-banner level-danger" style="display:none;">
-  <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-  <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
-</div>
-<div id="warn-stale" class="warn-banner level-warn" style="display:none;">
-  <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-  <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
-</div>
-
-<div class="dash-top">
-  <div>
-    <h2 id="device-name">Water Temperature</h2>
-    <div class="dash-sub" id="last-updated">—</div>
-  </div>
-  <div class="dash-top-btns">
-    <div id="status-pill" class="pill pill-ok"><span class="pill-dot"></span><span id="pill-text">Live</span></div>
-    <button class="rb" onclick="loadData()" style="padding:5px 12px;">Refresh</button>
-  </div>
-</div>
-
-
-<div class="temp-hero">
-  <div class="temp-main">
-    <div class="temp-value"><span id="current-f">--</span><span class="unit">°F</span></div>
-    <div class="temp-celsius" id="current-c">-- °C</div>
-    <div class="temp-meta" id="temp-meta">—</div>
-  </div>
-  <div class="temp-stats">
-    <div class="temp-stat"><label>Min (24h)</label><span id="min-val">--</span></div>
-    <div class="temp-stat"><label>Max (24h)</label><span id="max-val">--</span></div>
-    <div class="temp-stat"><label>Avg (24h)</label><span id="avg-val">--</span></div>
-  </div>
-</div>
-
-<div class="rowing-status-card">
-  <div class="section-label">Rowing Status — Current Conditions</div>
-  <div id="rule-banner" class="rule-banner green"><span id="rule-text">Normal rowing conditions</span></div>
-  <div class="tiers-grid" id="tiers-grid"></div>
-  <div class="note-text" id="rowing-notes"></div>
-</div>
-
-<div class="cards-row">
-  <div class="mini-card"><label>Status</label><span id="status-text">—</span></div>
-  <div class="mini-card"><label>Data Age</label><span id="data-age">—</span></div>
-</div>
-
-<!-- HISTORY CHART -->
-<div class="chart-card">
-  <div class="chart-card-header">
-    <h3>Temperature History</h3>
-    <div class="range-btns" id="range-btns">
-      <button class="rb active" data-d="1">24h</button>
-      <button class="rb" data-d="7">7 days</button>
-      <button class="rb" data-d="30">30 days</button>
-      <button class="rb" data-d="90">3 months</button>
-      <button class="rb" data-d="0">All time</button>
-      <button class="rb rb-csv" onclick="downloadCSV()">Download CSV</button>
+    <div style="display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;background:rgba(26,111,181,.1);border:1px solid rgba(26,111,181,.3);color:#5ba4e0;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#5ba4e0;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong style="display:block;margin-bottom:2px;">Beta — data may not be accurate</strong>This website is in beta. Temperature readings are provided for guidance only. Please verify against the thermometer on the side of the dock at the boathouse before making rowing decisions.</div>
     </div>
-  </div>
 
-  <div class="data-info-bar">
-    <span style="display:flex;align-items:center;gap:5px;"><span id="info-dot" class="dot-live"></span><span id="info-last">Loading…</span></span>
-    <span style="display:none;" id="info-interval">Updated every 10 min</span>
-    <span id="info-count">— readings</span>
-  </div>
 
-  <div id="chart-single-msg" style="display:none;text-align:center;padding:40px 0;font-size:.82rem;color:var(--muted);"></div>
-  <div style="position:relative;">
-    <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
-    <div id="scrubber-line" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(240,180,41,0.6);pointer-events:none;"></div>
-    <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:#162d52;border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
-      <div id="scrubber-temp" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
-      <div id="scrubber-time" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
+    <div id="warn-gap" class="warn-banner level-danger" style="display:none;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
     </div>
-  </div>
-</div>
-```
+    <div id="warn-stale" class="warn-banner level-warn" style="display:none;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
+    </div>
+
+    <div class="dash-top">
+      <div>
+        <h2 id="device-name">Water Temperature</h2>
+        <div class="dash-sub" id="last-updated">—</div>
+      </div>
+      <div class="dash-top-btns">
+        <div id="status-pill" class="pill pill-ok"><span class="pill-dot"></span><span id="pill-text">Live</span></div>
+        <button class="rb" onclick="loadData()" style="padding:5px 12px;">Refresh</button>
+      </div>
+    </div>
+
+
+    <div class="temp-hero">
+      <div class="temp-main">
+        <div class="temp-value"><span id="current-f">--</span><span class="unit">°F</span></div>
+        <div class="temp-celsius" id="current-c">-- °C</div>
+        <div class="temp-meta" id="temp-meta">—</div>
+      </div>
+      <div class="temp-stats">
+        <div class="temp-stat"><label>Min (24h)</label><span id="min-val">--</span></div>
+        <div class="temp-stat"><label>Max (24h)</label><span id="max-val">--</span></div>
+        <div class="temp-stat"><label>Avg (24h)</label><span id="avg-val">--</span></div>
+      </div>
+    </div>
+
+    <div class="rowing-status-card">
+      <div class="section-label">Rowing Status — Current Conditions</div>
+      <div id="rule-banner" class="rule-banner green"><span id="rule-text">Normal rowing conditions</span></div>
+      <div class="tiers-grid" id="tiers-grid"></div>
+      <div class="note-text" id="rowing-notes"></div>
+    </div>
+
+    <div class="cards-row">
+      <div class="mini-card"><label>Status</label><span id="status-text">—</span></div>
+      <div class="mini-card"><label>Data Age</label><span id="data-age">—</span></div>
+    </div>
+
+    <!-- HISTORY CHART -->
+    <div class="chart-card">
+      <div class="chart-card-header">
+        <h3>Temperature History</h3>
+        <div class="range-btns" id="range-btns">
+          <button class="rb active" data-d="1">24h</button>
+          <button class="rb" data-d="7">7 days</button>
+          <button class="rb" data-d="30">30 days</button>
+          <button class="rb" data-d="90">3 months</button>
+          <button class="rb" data-d="0">All time</button>
+          <button class="rb rb-csv" onclick="downloadCSV()">Download CSV</button>
+        </div>
+      </div>
+
+      <div class="data-info-bar">
+        <span style="display:flex;align-items:center;gap:5px;"><span id="info-dot" class="dot-live"></span><span id="info-last">Loading…</span></span>
+        <span style="display:none;" id="info-interval">Updated every 10 min</span>
+        <span id="info-count">— readings</span>
+      </div>
+
+      <div id="chart-single-msg" style="display:none;text-align:center;padding:40px 0;font-size:.82rem;color:var(--muted);"></div>
+      <div style="position:relative;">
+        <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
+        <div id="scrubber-line" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(240,180,41,0.6);pointer-events:none;"></div>
+        <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:#162d52;border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
+          <div id="scrubber-temp" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
+          <div id="scrubber-time" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
+        </div>
+      </div>
+    </div>
+
+
 
   </div>
 
   <!-- FOOTER -->
-
   <div style="margin-top:40px;padding-top:20px;border-top:1px solid rgba(255,209,102,0.15);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;">
     <a href="https://github.com/egurpinar/NHRC_temp_monitoring" target="_blank" style="display:inline-flex;align-items:center;gap:8px;text-decoration:none;color:var(--muted);font-size:0.72rem;">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
@@ -280,6 +274,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 const state = {
   allHistory: [],
   currentRange: 1,
+  lastFetchedAt: null,
+  lastTempF: null,
 };
 let chart = null;
 
@@ -296,7 +292,11 @@ async function loadData() {
     if (raw.error) { showError(); return; }
     const tempC = extractTemp(raw);
     if (tempC === null) { showError(); return; }
-    loadHistory();
+    // Await history BEFORE rendering so rowing status always has full history.
+    // This is the key fix — previously loadHistory() was fire-and-forget, meaning
+    // renderDashboard ran immediately on empty state.allHistory, causing Winter
+    // Rowing to show on first load even when 3 morning streaks were confirmed.
+    await loadHistory();
     renderDashboard(tempC, raw);
   } catch(e) { console.error(e); showError(); }
 }
@@ -315,6 +315,10 @@ async function loadHistory() {
     updateInfoBar();
     updateFreshnessWarnings();
     updateStats();
+    // Re-render rowing status now that history is available.
+    // This covers the case where loadHistory is called independently
+    // (e.g. future background refreshes) after renderDashboard already ran.
+    if (state.lastTempF !== null) renderRowingStatus(state.lastTempF);
   } catch(e) { console.error('history.json:', e); }
 }
 
@@ -395,6 +399,7 @@ function renderDashboard(tempC, raw) {
   const fetchedAt = raw.fetchedAt ? new Date(raw.fetchedAt) : new Date();
   state.lastFetchedAt = fetchedAt;
 
+  state.lastTempF = tempF; // store for re-render after async history load
   document.getElementById('loading').style.display    = 'none';
   document.getElementById('error-view').style.display = 'none';
   document.getElementById('dashboard').style.display  = 'block';
@@ -862,6 +867,5 @@ function showToast(msg) {
   setTimeout(()=>t.classList.remove('show'), 2500);
 }
 </script>
-
 </body>
 </html>
