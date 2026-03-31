@@ -718,15 +718,13 @@ function getEffectiveLevel(tempF) {
   else                  tempCap = 'normal';
 
   // ── 2. Earned zone from 3-morning streak checks ──────────────────────
-  const hist         = state.allHistory;
-  // Measure from oldest reading to NOW (not oldest to newest)
-  // so that 3 readings from days 3,2,1 ago correctly gives span >= 3
-  const histSpanDays = hist.length > 0
-    ? (Date.now() - hist[0].ts) / 86400000 : 0;
+  const hist = state.allHistory;
 
+  // No histSpanDays guard — let checkMorningStreak handle missing days naturally.
+  // If any morning window has no data it returns noData:true and the streak stops.
   let earned, streakInfo;
 
-  if (histSpanDays < 3) {
+  if (!hist.length) {
     earned     = 'winter';
     streakInfo = { insufficient: true };
   } else {
