@@ -241,11 +241,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   <div class="note-text" id="rowing-notes"></div>
 </div>
 
-<div class="cards-row">
-  <div class="mini-card"><label>Status</label><span id="status-text">—</span></div>
-  <div class="mini-card"><label>Data Age</label><span id="data-age">—</span></div>
-</div>
-
 <!-- WEATHER CARD -->
 <div class="weather-card">
   <div class="section-label">Current Weather — Oxford, CT</div>
@@ -289,6 +284,17 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   </div>
 
   <!-- FOOTER -->
+
+  <div style="background:var(--navy2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="font-size:.63rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);">Status</span>
+      <span id="status-text" style="font-family:var(--fserif);font-size:1rem;color:var(--white);">—</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span style="font-size:.63rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);">Last updated</span>
+      <span id="data-age" style="font-family:var(--fserif);font-size:1rem;color:var(--white);">—</span>
+    </div>
+  </div>
 
   <div style="margin-top:40px;padding-top:20px;border-top:1px solid rgba(255,209,102,0.15);">
     <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;">
@@ -541,7 +547,7 @@ function initChart() {
         x:{ type:'time', time:{displayFormats:{hour:'ha',day:'MMM D',week:'MMM D',month:'MMM YY'}},
             ticks:{color:'#b0c4de',maxTicksLimit:7,font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
             grid:{color:'rgba(255,255,255,0.04)'}},
-        y:{ ticks:{color:'#b0c4de',callback:v=>v+'°F',font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
+        y:{ ticks:{color:'#b0c4de',callback:v=>Number.isInteger(v)?v+'°F':v.toFixed(1)+'°F',font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
             grid:{color:'rgba(255,255,255,0.04)'}}
       },
       plugins:{
@@ -967,7 +973,15 @@ async function loadWeather() {
         <div class="wstat"><div class="wk">Wind</div><div class="wv">${windMph}<span class="wu">mph</span></div><div class="wd">${dir} direction</div></div>
         <div class="wstat"><div class="wk">Gusts</div><div class="wv">${gustMph}<span class="wu">mph</span></div><div class="wd">Peak gust</div></div>
         <div class="wstat"><div class="wk">Precip</div><div class="wv">${precip}<span class="wu">in</span></div><div class="wd">Current hour</div></div>
-      </div>`;
+      </div>
+      <div style="margin-top:10px;text-align:right;">
+        <a href="https://forecast.weather.gov/MapClick.php?CityName=Oxford&state=CT&site=OKX&textField1=41.4370&textField2=-73.1190"
+           target="_blank"
+           style="font-size:.7rem;color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:4px;">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          More weather info — NWS Oxford, CT
+        </a>
+      </div>\`;
   } catch(e) {
     document.getElementById('weather-content').innerHTML =
       '<div style="font-size:.78rem;color:#f07070;padding:8px 0;">Could not load weather data.</div>';
