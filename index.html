@@ -678,61 +678,76 @@ document.addEventListener('DOMContentLoaded', () => { setTimeout(initScrubber, 5
 //   confirmed = number of consecutive mornings above threshold (0–3)
 //   noData    = true if we couldn't find morning data for one of the days
 
+// Helper: get UTC ms for a given NY calendar date at a specific hour:minute
+function nyWindowBound(y, m, d, hour, minute) {
+  // Find offset by checking what hour it is in NY at noon UTC on that date
+  const noonUTC = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  const nyHourAtNoon = parseInt(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: 'numeric', hour12: false
+  }).format(noonUTC), 10);
+  const offsetHours = nyHourAtNoon - 12; // e.g. EDT=-4, EST=-5
+  // Convert NY local hour to UTC: utcHour = localHour - offsetHours
+  return Date.UTC(y, m - 1, d, hour - offsetHours, minute, 0);
+}
+
 function checkMorningStreak(threshold) {
-  const hist = state.allHistory;
+  // Morning window: 5:00 AM – 9:30 AM America/New_York (hardcoded for Oxford, CT boathouse)
+  // Checks daysAgo = 0 (today), 1 (yesterday), 2 (day before).
+  //
+  // IMPORTANT: history.json can lag behind data.json by up to 30 min due to GitHub Pages
+  // CDN caching. To avoid missing today's morning reading, we supplement the history
+  // with the current live reading (state.lastTempF / state.lastFetchedAt) from data.json.
+  //
+  // noData handling: if a morning window has no data at all we stop the streak (can't
+  // confirm). But we do NOT stop if a window exists in history — only if it's genuinely
+  // empty after supplementing with the live reading.
+
+  const hist = state.allHistory.slice(); // copy so we can supplement without mutation
+
+  // Supplement with live reading from data.json if not already in history
+  if (state.lastTempF !== null && state.lastFetchedAt !== null) {
+    const liveTs = state.lastFetchedAt.getTime();
+    const alreadyInHistory = hist.some(h => Math.abs(h.ts - liveTs) < 5 * 60000); // within 5 min
+    if (!alreadyInHistory) {
+      hist.push({ ts: liveTs, tempF: state.lastTempF });
+    }
+  }
+
   if (!hist.length) return { confirmed: 0, noData: true };
+
+  const now = new Date();
+
+  // Get today's date in New York
+  const nyTodayStr = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(now);
+  const [y, m, d] = nyTodayStr.split('-').map(Number);
 
   let confirmed = 0;
   let noData    = false;
 
   for (let daysAgo = 0; daysAgo <= 2; daysAgo++) {
-    // Build 5 AM – 9 AM window in America/New_York time (hardcoded, not browser local time).
-    // The boathouse is in Oxford, CT — always use New York timezone regardless of
-    // where the viewer's browser is located. This also correctly handles EST/EDT
-    // transitions automatically via the Intl API.
-    //
-    // Strategy: find what date it is in New York right now, go back daysAgo days,
-    // then find the UTC equivalent of 5:00 AM and 9:00 AM on that NY calendar date.
-    // We determine the NY UTC offset by checking what hour it is in NY at noon UTC
-    // on that day (noon is safely away from any DST transition hour).
+    // Build the target NY calendar date by subtracting daysAgo from today
+    const targetNoon = new Date(Date.UTC(y, m - 1, d - daysAgo, 12, 0, 0));
+    const ty = targetNoon.getUTCFullYear();
+    const tm = targetNoon.getUTCMonth() + 1;
+    const td = targetNoon.getUTCDate();
 
-    const now = new Date();
+    const winStart = nyWindowBound(ty, tm, td, 5,  0);  // 5:00 AM NY
+    const winEnd   = nyWindowBound(ty, tm, td, 9, 30);  // 9:30 AM NY
 
-    // Get today's date string in New York (YYYY-MM-DD via en-CA locale)
-    const nyTodayStr = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/New_York',
-      year: 'numeric', month: '2-digit', day: '2-digit'
-    }).format(now);
-
-    // Parse and subtract daysAgo
-    const [y, m, d] = nyTodayStr.split('-').map(Number);
-    const targetUTCNoon = new Date(Date.UTC(y, m - 1, d - daysAgo, 12, 0, 0));
-    const ty = targetUTCNoon.getUTCFullYear();
-    const tm = targetUTCNoon.getUTCMonth() + 1;
-    const td = targetUTCNoon.getUTCDate();
-
-    // Find the NY hour at noon UTC on the target date to determine the offset
-    // e.g. EDT = UTC-4 → noon UTC = 8 AM NY → offset = 8 - 12 = -4
-    const nyHourAtNoon = parseInt(new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York',
-      hour: 'numeric', hour12: false
-    }).format(targetUTCNoon), 10);
-    const offsetHours = nyHourAtNoon - 12; // e.g. -4 for EDT, -5 for EST
-
-    // 5 AM NY in UTC = 5 - offsetHours (e.g. EDT: 5-(-4)=9, EST: 5-(-5)=10)
-    const winStart = Date.UTC(ty, tm - 1, td, 5 - offsetHours, 0, 0);
-    const winEnd   = Date.UTC(ty, tm - 1, td, 9 - offsetHours, 30, 0); // 4.5-hour window (5:00-9:30 AM)
-
-    const readings  = hist.filter(h => h.ts >= winStart && h.ts < winEnd);
+    const readings = hist.filter(h => h.ts >= winStart && h.ts < winEnd);
 
     if (readings.length === 0) {
-      // No data in this morning window — could be a GitHub gap or sensor offline.
-      // We can't confirm this day either way — stop the streak check here.
+      // No data in this morning window — GitHub gap or sensor offline.
+      // For daysAgo=0 (today) this is expected early in the morning — treat as
+      // noData so we don't falsely break a good streak from previous days.
       noData = true;
       break;
     }
 
-    // Use the minimum morning temperature (most conservative / coldest reading)
+    // Use the minimum morning temperature (most conservative)
     const morningMin = Math.min(...readings.map(h => h.tempF));
     if (morningMin >= threshold) {
       confirmed++;
