@@ -337,11 +337,10 @@ async function loadData() {
     if (raw.error) { showError(); return; }
     const tempC = extractTemp(raw);
     if (tempC === null) { showError(); return; }
-    // Await history BEFORE rendering so rowing status always has full history.
-    // This is the key fix — previously loadHistory() was fire-and-forget, meaning
-    // renderDashboard ran immediately on empty state.allHistory, causing Winter
-    // Rowing to show on first load even when 3 morning streaks were confirmed.
-    await loadHistory();
+    // Await history BEFORE rendering so rowing status has full history available.
+    // Wrapped in its own try/catch so any history.json error (404, parse, timeout)
+    // never blocks or crashes the main temperature display.
+    try { await loadHistory(); } catch(e) { console.warn('loadHistory failed:', e); }
     renderDashboard(tempC, raw);
   } catch(e) { console.error(e); showError(); }
 }
@@ -724,8 +723,9 @@ function checkMorningStreak(threshold) {
   }).format(now);
   const [y, m, d] = nyTodayStr.split('-').map(Number);
 
-  let confirmed = 0;
-  let noData    = false;
+  let confirmed     = 0;
+  let noData        = false;
+  const confirmedDays = []; // [{date, time, tempF, tempFRounded}] for display
 
   for (let daysAgo = 0; daysAgo <= 2; daysAgo++) {
     // Build the target NY calendar date by subtracting daysAgo from today
@@ -747,16 +747,25 @@ function checkMorningStreak(threshold) {
       break;
     }
 
-    // Use the minimum morning temperature (most conservative)
-    const morningMin = Math.min(...readings.map(h => h.tempF));
-    if (morningMin >= threshold) {
+    // Use the maximum morning temperature. Round to nearest 0.5°F before comparing
+    // to account for sensor sensitivity (e.g. 49.9°F rounds to 50.0°F and qualifies).
+    const morningMax = Math.max(...readings.map(h => h.tempF));
+    const morningMaxRounded = Math.round(morningMax * 2) / 2;
+    const peakReading = readings.reduce((a, b) => b.tempF > a.tempF ? b : a);
+    if (morningMaxRounded >= threshold) {
+      confirmedDays.push({
+        date:  new Date(peakReading.ts).toLocaleDateString('en-US', {timeZone:'America/New_York', weekday:'short', month:'short', day:'numeric'}),
+        time:  new Date(peakReading.ts).toLocaleTimeString('en-US', {timeZone:'America/New_York', hour:'2-digit', minute:'2-digit'}),
+        tempF: morningMax,
+        tempFRounded: morningMaxRounded,
+      });
       confirmed++;
     } else {
       break; // streak broken — morning was too cold
     }
   }
 
-  return { confirmed, noData };
+  return { confirmed, noData, confirmedDays };
 }
 
 function getEffectiveLevel(tempF) {
@@ -795,17 +804,17 @@ function getEffectiveLevel(tempF) {
     const s40 = checkMorningStreak(40);
     if (s40.confirmed < 3) {
       earned     = 'winter';
-      streakInfo = { confirmed: s40.confirmed, noData: s40.noData, threshold: 40 };
+      streakInfo = { confirmed: s40.confirmed, noData: s40.noData, threshold: 40, confirmedDays: s40.confirmedDays };
     } else {
       const s50 = checkMorningStreak(50);
       if (s50.confirmed < 3) {
         earned     = 'fourOar';
-        streakInfo = { confirmed: s50.confirmed, noData: s50.noData, threshold: 50 };
+        streakInfo = { confirmed: s50.confirmed, noData: s50.noData, threshold: 50, confirmedDays: s50.confirmedDays };
       } else {
         const s60 = checkMorningStreak(60);
         if (s60.confirmed < 3) {
           earned     = 'coldWater';
-          streakInfo = { confirmed: s60.confirmed, noData: s60.noData, threshold: 60 };
+          streakInfo = { confirmed: s60.confirmed, noData: s60.noData, threshold: 60, confirmedDays: s60.confirmedDays };
         } else {
           earned     = 'normal';
           streakInfo = {};
@@ -862,12 +871,24 @@ function renderRowingStatus(tempF) {
                      thr === 50 ? '50°F (exit Four Oar Rule)' :
                                   '60°F (Normal conditions)';
     if (eff.insufficient) {
-      return `Winter Rowing restrictions remain in effect. Current temp is above threshold but <strong>less than 3 days of morning data</strong> (5–9 AM) have been collected. Cannot confirm the 3-day morning streak yet.`;
+      return `Winter Rowing restrictions remain in effect. Current temp is above threshold but <strong>less than 3 days of morning data</strong> (5–9 AM) have been collected. Cannot confirm the 3-day morning streak (5–9:30 AM EDT) yet.`;
     }
     if (eff.noData) {
-      return `Winter Rowing restrictions remain in effect. <strong>Morning readings (5–9 AM) are missing for one or more days</strong> due to a data gap. Cannot confirm the 3-day streak. Check the thermometer at the dock.`;
+      return `Winter Rowing restrictions remain in effect. <strong>Morning readings (5–9:30 AM EDT) are missing for one or more days</strong> due to a data gap. Cannot confirm the 3-day streak. Check the thermometer at the dock.`;
     }
-    return `Restrictions remain in effect. Current morning temperatures are above ${thrLabel}, but only <strong>${eff.confirmed} of 3 consecutive mornings</strong> (5–9:30 AM) confirmed so far. Need ${need} more morning${need===1?'':'s'}.`;
+    const daysList = (eff.confirmedDays && eff.confirmedDays.length)
+      ? `<div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.08);padding-top:10px;">
+           <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Qualifying mornings — 5–9:30 AM EDT, peak reading rounded to 0.5°F</div>
+           ${eff.confirmedDays.map(d =>
+             `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:0.78rem;">
+               <span style="color:var(--white);">${d.date}</span>
+               <span style="color:var(--muted);">${d.time} EDT</span>
+               <span style="color:#5cc98a;font-weight:700;">${d.tempF.toFixed(1)}°F</span>
+             </div>`
+           ).join('')}
+         </div>`
+      : '';
+    return `Restrictions remain in effect. Current morning temperatures are above ${thrLabel}, but only <strong>${eff.confirmed} of 3 consecutive mornings</strong> (5–9:30 AM) confirmed so far. Need ${need} more morning${need===1?'':'s'}.${daysList}`;
   }
 
   if (eff.zone === 'winter') {
