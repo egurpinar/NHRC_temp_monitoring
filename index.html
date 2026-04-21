@@ -229,7 +229,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 </div>
 <div id="warn-offline" class="warn-banner level-danger" style="display:none;">
   <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-  <div><strong>Sensor offline</strong> The Govee sensor is currently offline. The temperature shown is the last known reading and may not reflect current conditions. Check the sensor battery and hub connection at the boathouse.</div>
+  <div><strong>Sensor may be offline</strong> No new readings received in over 3 hours. The temperature shown is the last known reading. Check the sensor battery and hub connection at the boathouse.</div>
 </div>
 
 <div class="dash-top">
@@ -507,9 +507,12 @@ function renderDashboard(tempC, raw) {
   document.getElementById('current-f').textContent    = tempF;
   document.getElementById('current-c').textContent    = `${tempCDisp} °C`;
   document.getElementById('temp-meta').textContent    = hum!==null ? `Humidity ${hum.toFixed(0)}%` : 'Lake Housatonic, NHRC Boathouse';
-  // Signal offline status on the hero temperature
+  // Signal stale data on the hero temperature (> 3 hours)
   const heroEl = document.getElementById('current-f');
-  if (heroEl) heroEl.style.color = (isOnline === false) ? '#f07070' : 'var(--white)';
+  if (heroEl) {
+    const ageHrs = (Date.now() - fetchedAt.getTime()) / 3600000;
+    heroEl.style.color = (ageHrs > 3) ? '#f07070' : 'var(--white)';
+  }
   document.getElementById('last-updated').textContent = `Updated: ${fetchedAt.toLocaleString()}`;
 
   const ageMs   = Date.now() - fetchedAt.getTime();
@@ -526,10 +529,12 @@ function renderDashboard(tempC, raw) {
 
   renderRowingStatus(tempF);
   updateFreshnessWarnings();
-  // Show/hide offline banner based on Govee online field
+  // Show/hide offline banner based on data age (3 hour threshold)
+  // More reliable than Govee's online field which can lag after reconnection
   const offlineEl = document.getElementById('warn-offline');
   if (offlineEl) {
-    offlineEl.style.display = (isOnline === false) ? 'flex' : 'none';
+    const ageHrs = (Date.now() - fetchedAt.getTime()) / 3600000;
+    offlineEl.style.display = (ageHrs > 3) ? 'flex' : 'none';
   }
 }
 
