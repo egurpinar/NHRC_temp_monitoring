@@ -227,6 +227,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
   <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
 </div>
+<div id="warn-offline" class="warn-banner level-danger" style="display:none;">
+  <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+  <div><strong>Sensor offline</strong> The Govee sensor is currently offline. The temperature shown is the last known reading and may not reflect current conditions. Check the sensor battery and hub connection at the boathouse.</div>
+</div>
 
 <div class="dash-top">
   <div>
@@ -354,6 +358,7 @@ const state = {
   currentRange: 1,
   lastFetchedAt: null,
   lastTempF: null,
+  sensorOnline: null, // true/false/null(unknown)
   riverLevel: null,   // current stage in feet (from NOAA)
   riverObserved: [],  // [{ts, ft}] observed readings
   riverForecast: [],  // [{ts, ft}] NOAA forecast readings
@@ -423,6 +428,16 @@ function extractTemp(raw) {
   try { for (const d of (raw?.data?.devices||[])) { const dt=parseLastDeviceData(d); if(dt&&typeof dt.tem==='number') return dt.tem/100; } } catch(e){}
   return null;
 }
+function extractOnlineStatus(raw) {
+  try {
+    for (const d of (raw?.data?.devices||[])) {
+      const dt = parseLastDeviceData(d);
+      if (dt && typeof dt.online === 'boolean') return dt.online;
+    }
+  } catch(e) {}
+  return null; // unknown
+}
+
 function extractHumidity(raw) {
   try { for (const d of (raw?.data?.devices||[])) { const dt=parseLastDeviceData(d); if(dt&&typeof dt.hum==='number'&&dt.hum>0) return dt.hum/100; } } catch(e){}
   return null;
@@ -477,7 +492,9 @@ function updateInfoBar() {
 function renderDashboard(tempC, raw) {
   const tempF     = Math.round((tempC*9/5+32)*10)/10;
   const tempCDisp = Math.round(tempC*10)/10;
-  const hum       = extractHumidity(raw);
+  const hum        = extractHumidity(raw);
+  const isOnline   = extractOnlineStatus(raw);
+  state.sensorOnline = isOnline;
   const name      = extractDeviceName(raw);
   const fetchedAt = raw.fetchedAt ? new Date(raw.fetchedAt) : new Date();
   state.lastFetchedAt = fetchedAt;
@@ -490,6 +507,9 @@ function renderDashboard(tempC, raw) {
   document.getElementById('current-f').textContent    = tempF;
   document.getElementById('current-c').textContent    = `${tempCDisp} °C`;
   document.getElementById('temp-meta').textContent    = hum!==null ? `Humidity ${hum.toFixed(0)}%` : 'Lake Housatonic, NHRC Boathouse';
+  // Signal offline status on the hero temperature
+  const heroEl = document.getElementById('current-f');
+  if (heroEl) heroEl.style.color = (isOnline === false) ? '#f07070' : 'var(--white)';
   document.getElementById('last-updated').textContent = `Updated: ${fetchedAt.toLocaleString()}`;
 
   const ageMs   = Date.now() - fetchedAt.getTime();
@@ -506,6 +526,11 @@ function renderDashboard(tempC, raw) {
 
   renderRowingStatus(tempF);
   updateFreshnessWarnings();
+  // Show/hide offline banner based on Govee online field
+  const offlineEl = document.getElementById('warn-offline');
+  if (offlineEl) {
+    offlineEl.style.display = (isOnline === false) ? 'flex' : 'none';
+  }
 }
 
 /* ── RANGE BUTTONS ── */
