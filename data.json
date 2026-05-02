@@ -16,7 +16,7 @@
         "pactCode": null,
         "deviceExt": {
           "deviceSettings": "{\"deviceType\":0,\"pushState\":true,\"temMin\":0,\"sno\":0,\"temWarning\":true,\"gatewayVersionSoft\":\"1.00.22\",\"fahOpen\":true,\"powerSaveModeState\":false,\"gatewayVersionHard\":\"1.04.02\",\"temCali\":0,\"battery\":100,\"temMax\":4000,\"uploadRate\":10,\"netWaring\":true,\"humWarning\":true,\"humMin\":0,\"humCali\":0,\"wifiLevel\":0,\"humMax\":10000,\"deviceName\":\"NHRC Water Sensor\",\"sku\":\"H5109\",\"device\":\"03:48:01:69:00:00:00:0F:FF:FF:00:57:FF:FF:00:45\",\"versionHard\":\"1.4\",\"versionSoft\":\"1.9\",\"wifiHardVersion\":\"\",\"wifiSoftVersion\":\"\",\"gatewayId\":928932,\"gatewayInfo\":{\"device\":\"37:2E:5C:E7:53:BE:F3:C2\",\"sku\":\"H5042\",\"topic\":\"GD/36421bc77799f9c564525904f1f07880\",\"address\":\"5C:E7:53:BE:F3:C3\",\"pactCode\":1,\"pactType\":2,\"bleName\":\"ihoment_H5042_F3C3\",\"secretCode\":\"eMu5ArZbFic=\",\"versionHard\":\"1.04.02\",\"versionSoft\":\"1.01.00\",\"wifiHardVersion\":\"\",\"wifiSoftVersion\":\"\",\"goodsType\":198},\"normalPushOnOff\":true,\"wifiFuncList\":\"\",\"criticalOnOff\":false,\"emailWarningOnOff\":false}",
-          "lastDeviceData": "{\"online\":false,\"tem\":1387,\"hum\":0,\"lastTime\":1777742400000,\"avgDayTem\":1387,\"avgDayHum\":0}",
+          "lastDeviceData": "{\"online\":false,\"tem\":1381,\"hum\":0,\"lastTime\":1777744800000,\"avgDayTem\":1381,\"avgDayHum\":0}",
           "deviceSplice": "{}",
           "extResources": "{\"skuUrl\":\"https://d1f2504ijhdyjw.cloudfront.net/sku-img/86c7b7b5b9fd09778d79463a8afc4268-add_list_type_device_h5109.png\",\"headOnImg\":\"\",\"headOnImgNew\":\"\",\"headOffImg\":\"\",\"headOffImgNew\":\"\",\"ext\":\"\",\"ic\":0}",
           "sharedSettings": "{}"
@@ -47,5 +47,5 @@
     "sortTime": 0,
     "feastLastUpdateTime": null
   },
-  "fetchedAt": "2026-05-02T17:24:15Z"
+  "fetchedAt": "2026-05-02T18:07:40Z"
 }
