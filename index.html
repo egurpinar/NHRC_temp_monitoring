@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
@@ -7,11 +6,8 @@
 <title>NHRC Water Temperature</title>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js"></script>
-
 <style>
 :root{
   --navy:#0d1f3c;--navy2:#162d52;--navy3:#1e3d6e;
@@ -171,7 +167,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--navy2);border:1px solid var(--border);border-radius:10px;padding:10px 18px;font-family:var(--fsans);font-size:.8rem;color:var(--white);transition:transform .3s ease;z-index:100;white-space:nowrap;}
 #toast.show{transform:translateX(-50%) translateY(0);}
 </style>
-
 </head>
 <body>
 <div id="app">
@@ -212,111 +207,110 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
   <div id="dashboard">
 
-```
-<div style="display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;background:rgba(26,111,181,.1);border:1px solid rgba(26,111,181,.3);color:#5ba4e0;">
-  <span style="width:10px;height:10px;border-radius:50%;background:#5ba4e0;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-  <div><strong style="display:block;margin-bottom:2px;">Beta — data may not be accurate</strong>This website is in beta. Temperature readings are provided for guidance only. Please verify against the thermometer on the side of the dock at the boathouse before making rowing decisions.</div>
-</div>
-
-
-<div id="warn-gap" class="warn-banner level-danger" style="display:none;">
-  <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-  <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
-</div>
-<div id="warn-stale" class="warn-banner level-warn" style="display:none;">
-  <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-  <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
-</div>
-<div id="warn-offline" class="warn-banner level-danger" style="display:none;">
-  <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-  <div><strong>Sensor may be offline</strong> No new readings received in over 3 hours. The temperature shown is the last known reading. Check the sensor battery and hub connection at the boathouse.</div>
-</div>
-
-<div class="dash-top">
-  <div>
-    <h2 id="device-name">Water Temperature</h2>
-    <div class="dash-sub" id="last-updated">—</div>
-  </div>
-  <div class="dash-top-btns">
-    <div id="status-pill" class="pill pill-ok"><span class="pill-dot"></span><span id="pill-text">Live</span></div>
-    <button class="rb" onclick="loadData()" style="padding:5px 12px;">Refresh</button>
-  </div>
-</div>
-
-
-<div class="temp-hero">
-  <div class="temp-main">
-    <div class="temp-value"><span id="current-f">--</span><span class="unit">°F</span></div>
-    <div class="temp-celsius" id="current-c">-- °C</div>
-    <div class="temp-meta" id="temp-meta">—</div>
-  </div>
-  <div class="temp-stats">
-    <div class="temp-stat"><label>Min (24h)</label><span id="min-val">--</span></div>
-    <div class="temp-stat"><label>Max (24h)</label><span id="max-val">--</span></div>
-    <div class="temp-stat"><label>Avg (24h)</label><span id="avg-val">--</span></div>
-  </div>
-</div>
-
-<div class="rowing-status-card">
-  <div class="section-label">Rowing Status — Current Conditions</div>
-  <div id="rule-banner" class="rule-banner green"><span id="rule-text">Normal rowing conditions</span></div>
-  <div class="tiers-grid" id="tiers-grid"></div>
-  <div class="note-text" id="rowing-notes"></div>
-</div>
-
-<!-- WEATHER CARD -->
-<div class="weather-card">
-  <div class="section-label">Current Weather — Oxford, CT</div>
-  <div id="weather-content">
-    <div style="font-size:.8rem;color:var(--muted);padding:12px 0;">Loading weather data...</div>
-  </div>
-</div>
-
-<!-- HISTORY CHART -->
-<div class="chart-card">
-  <div class="chart-card-header">
-    <h3>Temperature History</h3>
-    <div class="range-btns" id="range-btns">
-      <button class="rb active" data-d="1">24h</button>
-      <button class="rb" data-d="7">7 days</button>
-      <button class="rb" data-d="30">30 days</button>
-      <button class="rb" data-d="90">3 months</button>
-      <button class="rb" data-d="0">All time</button>
-      <button class="rb rb-csv" onclick="downloadCSV()">Download CSV</button>
+    <div style="display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;background:rgba(26,111,181,.1);border:1px solid rgba(26,111,181,.3);color:#5ba4e0;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#5ba4e0;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong style="display:block;margin-bottom:2px;">Beta — data may not be accurate</strong>This website is in beta. Temperature readings are provided for guidance only. Please verify against the thermometer on the side of the dock at the boathouse before making rowing decisions.</div>
     </div>
-  </div>
 
-  <div class="data-info-bar">
-    <span style="display:flex;align-items:center;gap:5px;"><span id="info-dot" class="dot-live"></span><span id="info-last">Loading…</span></span>
-    
-    <span id="info-count">— readings</span>
-  </div>
 
-  <div id="chart-single-msg" style="display:none;text-align:center;padding:40px 0;font-size:.82rem;color:var(--muted);"></div>
-  <div style="position:relative;">
-    <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
-    <div id="scrubber-line" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(240,180,41,0.6);pointer-events:none;"></div>
-    <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:#162d52;border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
-      <div id="scrubber-temp" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
-      <div id="scrubber-time" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
+    <div id="warn-gap" class="warn-banner level-danger" style="display:none;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
     </div>
-  </div>
-</div>
+    <div id="warn-stale" class="warn-banner level-warn" style="display:none;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
+    </div>
+    <div id="warn-offline" class="warn-banner level-danger" style="display:none;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong>Sensor may be offline</strong> No new readings received in over 3 hours. The temperature shown is the last known reading. Check the sensor battery and hub connection at the boathouse.</div>
+    </div>
+
+    <div class="dash-top">
+      <div>
+        <h2 id="device-name">Water Temperature</h2>
+        <div class="dash-sub" id="last-updated">—</div>
+      </div>
+      <div class="dash-top-btns">
+        <div id="status-pill" class="pill pill-ok"><span class="pill-dot"></span><span id="pill-text">Live</span></div>
+        <button class="rb" onclick="loadData()" style="padding:5px 12px;">Refresh</button>
+      </div>
+    </div>
 
 
-<!-- RIVER LEVEL CARD -->
-<div class="river-card">
-  <div class="section-label">River Level — Housatonic at Stevenson Dam</div>
-  <div id="river-content">
-    <div class="river-unavailable">Loading river level data...</div>
-  </div>
-</div>
-```
+    <div class="temp-hero">
+      <div class="temp-main">
+        <div class="temp-value"><span id="current-f">--</span><span class="unit">°F</span></div>
+        <div class="temp-celsius" id="current-c">-- °C</div>
+        <div class="temp-meta" id="temp-meta">—</div>
+      </div>
+      <div class="temp-stats">
+        <div class="temp-stat"><label>Min (24h)</label><span id="min-val">--</span></div>
+        <div class="temp-stat"><label>Max (24h)</label><span id="max-val">--</span></div>
+        <div class="temp-stat"><label>Avg (24h)</label><span id="avg-val">--</span></div>
+      </div>
+    </div>
+
+    <div class="rowing-status-card">
+      <div class="section-label">Rowing Status — Current Conditions</div>
+      <div id="rule-banner" class="rule-banner green"><span id="rule-text">Normal rowing conditions</span></div>
+      <div class="tiers-grid" id="tiers-grid"></div>
+      <div class="note-text" id="rowing-notes"></div>
+    </div>
+
+    <!-- WEATHER CARD -->
+    <div class="weather-card">
+      <div class="section-label">Current Weather — Oxford, CT</div>
+      <div id="weather-content">
+        <div style="font-size:.8rem;color:var(--muted);padding:12px 0;">Loading weather data...</div>
+      </div>
+    </div>
+
+    <!-- HISTORY CHART -->
+    <div class="chart-card">
+      <div class="chart-card-header">
+        <h3>Temperature History</h3>
+        <div class="range-btns" id="range-btns">
+          <button class="rb active" data-d="1">24h</button>
+          <button class="rb" data-d="7">7 days</button>
+          <button class="rb" data-d="30">30 days</button>
+          <button class="rb" data-d="90">3 months</button>
+          <button class="rb" data-d="0">All time</button>
+          <button class="rb rb-csv" onclick="downloadCSV()">Download CSV</button>
+        </div>
+      </div>
+
+      <div class="data-info-bar">
+        <span style="display:flex;align-items:center;gap:5px;"><span id="info-dot" class="dot-live"></span><span id="info-last">Loading…</span></span>
+        
+        <span id="info-count">— readings</span>
+      </div>
+
+      <div id="chart-single-msg" style="display:none;text-align:center;padding:40px 0;font-size:.82rem;color:var(--muted);"></div>
+      <div style="position:relative;">
+        <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
+        <div id="scrubber-line" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(240,180,41,0.6);pointer-events:none;"></div>
+        <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:#162d52;border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
+          <div id="scrubber-temp" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
+          <div id="scrubber-time" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- RIVER LEVEL CARD -->
+    <div class="river-card">
+      <div class="section-label">River Level — Housatonic at Stevenson Dam</div>
+      <div id="river-content">
+        <div class="river-unavailable">Loading river level data...</div>
+      </div>
+    </div>
+
+
 
   </div>
 
   <!-- FOOTER -->
-
   <div style="background:var(--navy2);border:1px solid var(--border);border-radius:12px;padding:14px 18px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;">
     <div style="display:flex;align-items:center;gap:8px;">
       <span style="font-size:.63rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);">Status</span>
@@ -343,16 +337,23 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.</div>
-</details>
-</div>
-
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.</div>
+      </details>
+    </div>
   </div>
 
 </div>
 <div id="toast"></div>
 
 <script>
+// ─────────────────────────────────────────────────────────────────────────
+// MANUAL ZONE OVERRIDE — Safety Committee use only
+// Set to 'normal', 'coldWater', 'fourOar', 'winter', or null (no override)
+// Flood restrictions always apply regardless of this setting.
+// Change back to null to restore automatic temperature-based rules.
+// ─────────────────────────────────────────────────────────────────────────
+const ZONE_OVERRIDE = normal;
+
 const state = {
   allHistory: [],
   currentRange: 1,
@@ -844,6 +845,18 @@ function checkMorningStreak(threshold) {
 }
 
 function getEffectiveLevel(tempF) {
+  // Apply manual override if set — flood restrictions still handled downstream
+  if (ZONE_OVERRIDE !== null) {
+    return {
+      zone: ZONE_OVERRIDE,
+      immediate: false,
+      override: true,
+      confirmed: null,
+      noData: false,
+      confirmedDays: [],
+    };
+  }
+
   // Two independent calculations — we always take the MORE RESTRICTIVE result.
   //
   // 1. CURRENT TEMP CAP: what the live reading allows at most (immediate downgrade)
@@ -937,6 +950,7 @@ function renderRowingStatus(tempF) {
   const banner = document.getElementById('rule-banner');
   const tiers  = ZONE_TIERS[eff.zone];
   let rule, notes, cssLevel;
+  const isOverride = (ZONE_OVERRIDE !== null);
 
   // Helper to build the "awaiting" message for any zone
   function awaitingMsg(zone, eff) {
@@ -973,7 +987,7 @@ function renderRowingStatus(tempF) {
       notes = '<strong>Eight Oar Rule:</strong> Quads (4x) and Eights (8+) only. Each rower must be certified by the Captain of Winter Rowing, wear over-the-shoulder auto-inflate life jackets, and have signed a Winter Rowing waiver. Two-boat minimum.';
     } else {
       rule  = 'WINTER ROWING — awaiting 3-morning confirmation to lift';
-      notes = awaitingMsg('winter', eff) + ' <strong>Eight Oar Rule remains in effect.</strong>';
+      notes = isOverride ? '' : awaitingMsg('winter', eff) + ' <strong>Eight Oar Rule remains in effect.</strong>';
     }
   } else if (eff.zone === 'fourOar') {
     cssLevel = 'yellow';
@@ -982,7 +996,7 @@ function renderRowingStatus(tempF) {
       notes = '<strong>Four Oar Rule:</strong> No singles or pairs for Tier 1 or 2. Tier 3 may row 2x/4+/- with auto-inflate life jackets.';
     } else {
       rule  = 'FOUR OAR RULE — awaiting 3-morning confirmation to lift';
-      notes = awaitingMsg('fourOar', eff) + ' Four Oar restrictions remain in effect.';
+      notes = isOverride ? '' : awaitingMsg('fourOar', eff) + ' Four Oar restrictions remain in effect.';
     }
   } else if (eff.zone === 'coldWater') {
     cssLevel = 'yellow';
@@ -991,7 +1005,7 @@ function renderRowingStatus(tempF) {
       notes = 'Tier 1 may row 4+, 4- and above. Tier 2 may row 2x and above. Tier 3 may row all boats. No life jackets required.';
     } else {
       rule  = 'COLD WATER — awaiting 3-morning confirmation for Normal';
-      notes = awaitingMsg('coldWater', eff);
+      notes = isOverride ? '' : awaitingMsg('coldWater', eff);
     }
   } else {
     cssLevel = 'green';
@@ -1020,6 +1034,20 @@ function renderRowingStatus(tempF) {
     }).join('')}
     </div>`).join('');
 
+  // Append override notice if active
+  if (isOverride) {
+    const zoneName = {'normal':'Normal','coldWater':'Cold Water',
+                      'fourOar':'Four Oar Rule','winter':'Winter'}[ZONE_OVERRIDE] || ZONE_OVERRIDE;
+    notes += `<div style="margin-top:10px;padding:10px 14px;background:rgba(240,180,41,0.08);
+      border:1px solid rgba(240,180,41,0.3);border-radius:8px;font-size:.78rem;line-height:1.6;">
+      <strong style="color:#ffd166;">&#9888; Safety Committee Notice</strong><br>
+      <strong>${zoneName} conditions</strong> have been manually declared by the Safety Committee
+      to account for sensor sensitivity. The water temperature has been lingering near the
+      ${zoneName === 'Normal' ? '60°F' : zoneName === 'Cold Water' ? '50°F' : '40°F'} threshold
+      and this adjustment reflects real-world conditions at the boathouse.
+      Flood restrictions remain in effect as normal.
+    </div>`;
+  }
   document.getElementById('rowing-notes').innerHTML = notes;
 
   // Append river level context note if data available
@@ -1430,6 +1458,5 @@ function showToast(msg) {
   setTimeout(()=>t.classList.remove('show'), 2500);
 }
 </script>
-
 </body>
 </html>
