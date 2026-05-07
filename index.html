@@ -352,7 +352,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 // Flood restrictions always apply regardless of this setting.
 // Change back to null to restore automatic temperature-based rules.
 // ─────────────────────────────────────────────────────────────────────────
-const ZONE_OVERRIDE = normal;
+const ZONE_OVERRIDE = null;
 
 const state = {
   allHistory: [],
@@ -846,7 +846,7 @@ function checkMorningStreak(threshold) {
 
 function getEffectiveLevel(tempF) {
   // Apply manual override if set — flood restrictions still handled downstream
-  if (ZONE_OVERRIDE !== null) {
+  if (typeof ZONE_OVERRIDE !== 'undefined' && ZONE_OVERRIDE !== null) {
     return {
       zone: ZONE_OVERRIDE,
       immediate: false,
@@ -950,7 +950,7 @@ function renderRowingStatus(tempF) {
   const banner = document.getElementById('rule-banner');
   const tiers  = ZONE_TIERS[eff.zone];
   let rule, notes, cssLevel;
-  const isOverride = (ZONE_OVERRIDE !== null);
+  const isOverride = (typeof ZONE_OVERRIDE !== 'undefined' && ZONE_OVERRIDE !== null);
 
   // Helper to build the "awaiting" message for any zone
   function awaitingMsg(zone, eff) {
