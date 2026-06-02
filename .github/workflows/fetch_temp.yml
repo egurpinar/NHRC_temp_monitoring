@@ -1,10 +1,8 @@
 name: Fetch Govee Temperature
-
 on:
   schedule:
     - cron: '*/10 * * * *'
   workflow_dispatch:
-
 jobs:
   fetch:
     runs-on: ubuntu-latest
@@ -12,64 +10,72 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
       contents: write
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4.2.2
 
-      - name: Fetch temperature from Govee
+      - name: Fetch temperature from Govee OpenAPI
         env:
-          GOVEE_TOKEN: ${{ secrets.GOVEE_TOKEN }}
-          GOVEE_CLIENT_ID: ${{ secrets.GOVEE_CLIENT_ID }}
+          GOVEE_API_KEY: ${{ secrets.GOVEE_API_KEY }}
         run: |
-          TIMESTAMP=$(date +%s%3N)
           FETCHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          TIMESTAMP=$(date +%s%3N)
+          DEVICE="03:48:01:69:00:00:00:0F:FF:FF:00:57:FF:FF:00:45"
 
-          RESPONSE=$(curl -s 'https://app2.govee.com/bff-app/v1/device/list' \
-            -H "Authorization: Bearer $GOVEE_TOKEN" \
-            -H "timestamp: $TIMESTAMP" \
-            -H "clientId: $GOVEE_CLIENT_ID" \
-            -H "appVersion: 7.4.02" \
-            -H "clientType: 1" \
-            -H "envId: 0" \
-            -H "iotVersion: 0" \
-            -H "Accept: */*" \
-            -H "Accept-Language: en" \
+          # Official Govee OpenAPI - permanent API key, no Bearer token, no expiry
+          RESPONSE=$(curl -s -X POST "https://openapi.api.govee.com/router/api/v1/device/state" \
+            -H "Govee-API-Key: $GOVEE_API_KEY" \
             -H "Content-Type: application/json" \
-            -H "timezone: America/New_York" \
-            -H "country: US" \
-            -H "User-Agent: GoveeHome/7.4.02 (com.ihoment.GoVeeSensor; build:2; iOS 26.3.1) Alamofire/5.11.0")
-
+            -d "{\"requestId\":\"fetch\",\"payload\":{\"sku\":\"H5109\",\"device\":\"$DEVICE\"}}")
           echo "Raw response: $RESPONSE"
 
-          # Save data.json (current snapshot for the hero display)
-          echo "$RESPONSE" | jq \
-            --arg ts "$FETCHED_AT" \
-            '. + {fetchedAt: $ts}' > data.json || echo '{"error":"parse_failed","fetchedAt":"'$FETCHED_AT'"}' > data.json
+          # Extract temperature (already in Fahrenheit) and online status
+          TEMP_F=$(echo "$RESPONSE" | jq -r '.payload.capabilities[]? | select(.instance=="sensorTemperature") | .state.value // empty' 2>/dev/null | head -1)
+          ONLINE=$(echo "$RESPONSE" | jq -r '.payload.capabilities[]? | select(.instance=="online") | .state.value // empty' 2>/dev/null | head -1)
 
-          # Extract tempC (tem field / 100) and tempF for history
-          TEM=$(echo "$RESPONSE" | jq -r '
-            .data.devices[]?.deviceExt.lastDeviceData
-            | if type == "string" then fromjson else . end
-            | .tem // empty' 2>/dev/null | head -1)
+          if [ -n "$TEMP_F" ] && [ "$TEMP_F" != "null" ]; then
+            # API gives F directly. Convert to C for storage compatibility.
+            TEMP_C=$(echo "scale=2; ($TEMP_F - 32) * 5 / 9" | bc)
+            # tem field = C x 100 (matches old format so index.html needs no changes)
+            TEM=$(echo "scale=0; ($TEMP_C * 100)/1" | bc)
+            [ -z "$ONLINE" ] && ONLINE=true
 
-          if [ -n "$TEM" ] && [ "$TEM" != "null" ]; then
-            TEMP_C=$(echo "scale=2; $TEM / 100" | bc)
-            TEMP_F=$(echo "scale=1; $TEMP_C * 9 / 5 + 32" | bc)
+            # Build data.json in the SAME structure index.html already parses.
+            # lastDeviceData is a JSON string with tem (C x100), online, hum.
+            jq -n \
+              --arg ts "$FETCHED_AT" \
+              --argjson tem "$TEM" \
+              --argjson online "$ONLINE" \
+              --argjson lasttime "$TIMESTAMP" \
+              '{
+                status: 200,
+                message: "Success",
+                data: {
+                  devices: [{
+                    sku: "H5109",
+                    deviceName: "NHRC Water Sensor",
+                    deviceExt: {
+                      lastDeviceData: ({online: $online, tem: $tem, hum: 0, lastTime: $lasttime, avgDayTem: $tem, avgDayHum: 0} | tostring)
+                    }
+                  }]
+                },
+                fetchedAt: $ts
+              }' > data.json
 
-            NEW_ENTRY="{\"ts\":\"$FETCHED_AT\",\"tempC\":$TEMP_C,\"tempF\":$TEMP_F}"
+            # Append to history.json (store F directly from API for full accuracy)
+            TEMP_F_CLEAN=$(echo "scale=2; $TEMP_F / 1" | bc)
+            NEW_ENTRY="{\"ts\":\"$FETCHED_AT\",\"tempC\":$TEMP_C,\"tempF\":$TEMP_F_CLEAN}"
             echo "New entry: $NEW_ENTRY"
-
-            # Append to history.json (create if missing, keep last 525600 entries = ~10 years at 10min)
             if [ -f history.json ]; then
               jq --argjson entry "$NEW_ENTRY" '. + [$entry] | .[-525600:]' history.json > history_tmp.json && mv history_tmp.json history.json
             else
               echo "[$NEW_ENTRY]" > history.json
             fi
           else
-            echo "Could not extract temperature — skipping history update"
+            # IMPORTANT: on any API failure, do NOT overwrite data.json.
+            # The site keeps showing the last known reading instead of breaking.
+            echo "Could not extract temperature - keeping existing data.json untouched"
           fi
-
           echo "history.json entries: $(jq length history.json 2>/dev/null || echo 0)"
 
       - name: Commit files
