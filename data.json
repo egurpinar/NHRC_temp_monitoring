@@ -1,5 +1,16 @@
 {
-  "status": 401,
-  "message": "authorization token is invalid",
-  "fetchedAt": "2026-06-02T01:39:43Z"
+  "status": 200,
+  "message": "Success",
+  "data": {
+    "devices": [
+      {
+        "sku": "H5109",
+        "deviceName": "NHRC Water Sensor",
+        "deviceExt": {
+          "lastDeviceData": "{\"online\":true,\"tem\":1836,\"hum\":0,\"lastTime\":1780366614664,\"avgDayTem\":1836,\"avgDayHum\":0}"
+        }
+      }
+    ]
+  },
+  "fetchedAt": "2026-06-02T02:16:54Z"
 }
