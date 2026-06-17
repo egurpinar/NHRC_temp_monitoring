@@ -1,7 +1,7 @@
 name: Fetch Govee Temperature
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
 jobs:
   fetch:
