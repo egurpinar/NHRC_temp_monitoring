@@ -733,20 +733,21 @@ document.addEventListener('DOMContentLoaded', () => { setTimeout(initScrubber, 5
 
 /* ── ROWING STATUS ── */
 
-// Morning window: 5:00 AM – 9:30 AM local time.
-// This avoids solar warming bias and matches when rowers are on the water.
-// With GitHub Actions running every 30-40 min, we may get 3–6 readings per
-// morning window — we only need at least 1 to confirm a day.
+// Morning window: 5:00 AM – 11:00 AM America/New_York.
+// This avoids peak solar warming bias while still capturing the period rowers
+// are on the water. GitHub Actions scheduling is best-effort and can be sparse
+// (sometimes only 1–2 readings in a window, occasionally a full miss).
 //
-// For each of the 3 days before today (i.e. yesterday, day before, 3 days ago):
-//   - Find all readings in that day's 6–9 AM window
-//   - If NO readings exist in that window → can't confirm → stop counting
-//   - If readings exist → take the MINIMUM (coldest morning reading, most conservative)
-//   - If min >= threshold → day confirmed above threshold
-//   - If min < threshold → streak broken → stop
-// Returns: { confirmed: N, noData: bool }
-//   confirmed = number of consecutive mornings above threshold (0–3)
-//   noData    = true if we couldn't find morning data for one of the days
+// GAP-TOLERANT confirmation: confirm the 3 MOST RECENT mornings that actually
+// have readings, all at/above threshold (peak reading rounded to 0.5°F).
+//   - A morning with NO data is SKIPPED — it neither confirms nor breaks the
+//     streak (so one missed Actions run can't force the most-restrictive zone).
+//   - A morning WITH data but below threshold BREAKS the streak (water cooled).
+//   - We look back up to 14 days to find 3 qualifying mornings.
+// Returns: { confirmed: N, noData: bool, confirmedDays: [...] }
+//   confirmed = number of qualifying recent mornings found (0–3)
+//   noData    = true if fewer than 3 mornings had data in the lookback window
+//               AND the streak did not break on a cold morning
 
 // Helper: get UTC ms for a given NY calendar date at a specific hour:minute
 function nyWindowBound(y, m, d, hour, minute) {
@@ -761,16 +762,26 @@ function nyWindowBound(y, m, d, hour, minute) {
 }
 
 function checkMorningStreak(threshold) {
-  // Morning window: 5:00 AM – 9:30 AM America/New_York (hardcoded for Oxford, CT boathouse)
-  // Checks daysAgo = 0 (today), 1 (yesterday), 2 (day before).
+  // Morning window: 5:00 AM – 11:00 AM America/New_York (hardcoded for Oxford, CT boathouse).
+  //
+  // GAP-TOLERANT streak: we confirm the 3 MOST RECENT mornings that actually have
+  // readings, all at/above threshold. A morning with NO data is SKIPPED (it neither
+  // confirms nor breaks the streak) — this prevents a single missed GitHub Actions run
+  // from incorrectly forcing the most-restrictive zone. A morning that HAS data but is
+  // too cold DOES break the streak (the water genuinely cooled).
+  //
+  // We look back up to MAX_LOOKBACK_DAYS to find 3 qualifying mornings. If we can't find
+  // 3 mornings with data in that window (and didn't break on a cold morning), we report
+  // noData:true so the UI can explain that the streak can't be confirmed.
   //
   // IMPORTANT: history.json can lag behind data.json by up to 30 min due to GitHub Pages
   // CDN caching. To avoid missing today's morning reading, we supplement the history
   // with the current live reading (state.lastTempF / state.lastFetchedAt) from data.json.
-  //
-  // noData handling: if a morning window has no data at all we stop the streak (can't
-  // confirm). But we do NOT stop if a window exists in history — only if it's genuinely
-  // empty after supplementing with the live reading.
+
+  const MORNING_START_H = 5,  MORNING_START_M = 0;
+  const MORNING_END_H   = 11, MORNING_END_M   = 0;  // widened from 9:30 to 11:00 AM
+  const MAX_LOOKBACK_DAYS = 14;
+  const NEEDED = 3;
 
   const hist = state.allHistory.slice(); // copy so we can supplement without mutation
 
@@ -783,7 +794,7 @@ function checkMorningStreak(threshold) {
     }
   }
 
-  if (!hist.length) return { confirmed: 0, noData: true };
+  if (!hist.length) return { confirmed: 0, noData: true, confirmedDays: [] };
 
   const now = new Date();
 
@@ -795,32 +806,26 @@ function checkMorningStreak(threshold) {
   const [y, m, d] = nyTodayStr.split('-').map(Number);
 
   let confirmed     = 0;
-  let noData        = false;
-  const confirmedDays = []; // [{date, time, tempF, tempFRounded}] for display
+  let brokeOnCold   = false;
+  const confirmedDays = []; // [{date, time, tempF, tempFRounded}] for display, most-recent first
 
-  for (let daysAgo = 0; daysAgo <= 3; daysAgo++) { // up to 4 days back to handle gaps
+  for (let daysAgo = 0; daysAgo <= MAX_LOOKBACK_DAYS && confirmed < NEEDED; daysAgo++) {
     // Build the target NY calendar date by subtracting daysAgo from today
     const targetNoon = new Date(Date.UTC(y, m - 1, d - daysAgo, 12, 0, 0));
     const ty = targetNoon.getUTCFullYear();
     const tm = targetNoon.getUTCMonth() + 1;
     const td = targetNoon.getUTCDate();
 
-    const winStart = nyWindowBound(ty, tm, td, 5,  0);  // 5:00 AM NY
-    const winEnd   = nyWindowBound(ty, tm, td, 9, 30);  // 9:30 AM NY
+    const winStart = nyWindowBound(ty, tm, td, MORNING_START_H, MORNING_START_M);  // 5:00 AM NY
+    const winEnd   = nyWindowBound(ty, tm, td, MORNING_END_H,   MORNING_END_M);    // 11:00 AM NY
 
     const readings = hist.filter(h => h.ts >= winStart && h.ts < winEnd);
 
     if (readings.length === 0) {
-      // No data in this morning window.
-      // For daysAgo=0 (today): if it's before 5 AM or the workflow simply
-      // hasn't run yet this morning, skip today and continue checking
-      // yesterday (daysAgo=1) and the day before (daysAgo=2).
-      // For daysAgo>=1: a genuine gap in the streak — stop counting.
-      if (daysAgo === 0) {
-        continue; // skip today, check previous days
-      }
-      noData = true;
-      break;
+      // Gap-tolerant: a morning with no data is SKIPPED — it neither confirms nor
+      // breaks the streak. This covers both "today's run hasn't happened yet" and a
+      // genuine missed run on a prior day.
+      continue;
     }
 
     // Use the maximum morning temperature. Round to nearest 0.5°F before comparing
@@ -837,9 +842,15 @@ function checkMorningStreak(threshold) {
       });
       confirmed++;
     } else {
-      break; // streak broken — morning was too cold
+      // A morning WITH data was too cold — the water genuinely cooled. Break the streak.
+      brokeOnCold = true;
+      break;
     }
   }
+
+  // noData only when we couldn't gather 3 warm mornings AND it wasn't due to a cold break
+  // (i.e. we ran out of lookback days without enough morning data to decide).
+  const noData = (confirmed < NEEDED && !brokeOnCold);
 
   return { confirmed, noData, confirmedDays };
 }
@@ -863,7 +874,7 @@ function getEffectiveLevel(tempF) {
   //    If it's 45°F right now, conditions cannot be better than Four Oar no matter
   //    what the history says.
   //
-  // 2. EARNED ZONE: what 3 consecutive morning readings (5–9:30 AM) have confirmed.
+  // 2. EARNED ZONE: what the 3 most recent mornings with data (5–11 AM) have confirmed.
   //    Even if it's 55°F today, if we haven't had 3 mornings above 40°F we stay
   //    in Winter Rowing.
   //
@@ -960,14 +971,14 @@ function renderRowingStatus(tempF) {
                      thr === 50 ? '50°F (exit Four Oar Rule)' :
                                   '60°F (Normal conditions)';
     if (eff.insufficient) {
-      return `Winter Rowing restrictions remain in effect. Current temp is above threshold but <strong>less than 3 days of morning data</strong> (5–9 AM) have been collected. Cannot confirm the 3-day morning streak (5–9:30 AM EDT) yet.`;
+      return `Winter Rowing restrictions remain in effect. Current temp is above threshold but <strong>fewer than 3 mornings of data</strong> (5–11 AM) have been collected. Cannot confirm the 3-morning streak yet.`;
     }
     if (eff.noData) {
-      return `Winter Rowing restrictions remain in effect. <strong>Morning readings (5–9:30 AM EDT) are missing for one or more days</strong> due to a data gap. Cannot confirm the 3-day streak. Check the thermometer at the dock.`;
+      return `Winter Rowing restrictions remain in effect. <strong>Fewer than 3 mornings (5–11 AM EDT) have readings</strong> in the recent period due to data gaps. Cannot confirm the 3-morning streak. Check the thermometer at the dock.`;
     }
     const daysList = (eff.confirmedDays && eff.confirmedDays.length)
       ? `<div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.08);padding-top:10px;">
-           <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Qualifying mornings — 5–9:30 AM EDT, peak reading rounded to 0.5°F</div>
+           <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Qualifying mornings — 5–11 AM EDT, peak reading rounded to 0.5°F</div>
            ${eff.confirmedDays.map(d =>
              `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:0.78rem;">
                <span style="color:var(--white);">${d.date}</span>
@@ -977,7 +988,7 @@ function renderRowingStatus(tempF) {
            ).join('')}
          </div>`
       : '';
-    return `Restrictions remain in effect. Current morning temperatures are above ${thrLabel}, but only <strong>${eff.confirmed} of 3 consecutive mornings</strong> (5–9:30 AM) confirmed so far. Need ${need} more morning${need===1?'':'s'}.${daysList}`;
+    return `Restrictions remain in effect. The most recent mornings (5–11 AM) are above ${thrLabel}, but only <strong>${eff.confirmed} of 3 mornings</strong> confirmed so far. Need ${need} more qualifying morning${need===1?'':'s'}.${daysList}`;
   }
 
   if (eff.zone === 'winter') {
