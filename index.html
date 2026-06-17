@@ -588,21 +588,11 @@ function initChart() {
     data:{ datasets:[{
       data:[], borderColor:'#f0b429', backgroundColor:grad,
       borderWidth:1.5, fill:true, tension:0.3,
-      pointRadius: ctx => {
-        // show point only when there's 1 reading or reading is isolated
-        const ds = ctx.chart.data.datasets[0].data;
-        if (ds.length === 1) return 5;
-        const i = ctx.dataIndex;
-        const prev = i > 0 ? ds[i-1] : null;
-        const next = i < ds.length-1 ? ds[i+1] : null;
-        const span = ds.length > 1 ? (ds[ds.length-1].x - ds[0].x) : 1;
-        const gap = 3*60*60*1000; // 3hr gap = isolated point
-        const leftGap  = prev ? (ds[i].x - prev.x) > gap : true;
-        const rightGap = next ? (next.x - ds[i].x) > gap : true;
-        return (leftGap && rightGap) ? 5 : 0;
-      },
+      pointRadius: 1.5,        // small, consistent marker on every data point
+      pointHoverRadius: 3,     // slightly larger on hover
       pointBackgroundColor:'#f0b429',
       pointBorderColor:'#f0b429',
+      pointBorderWidth: 0,
     }]},
     options:{
       responsive:true, maintainAspectRatio:false, animation:false,
