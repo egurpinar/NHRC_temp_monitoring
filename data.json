@@ -7,10 +7,10 @@
         "sku": "H5109",
         "deviceName": "NHRC Water Sensor",
         "deviceExt": {
-          "lastDeviceData": "{\"online\":true,\"tem\":2432,\"hum\":0,\"lastTime\":1784769215166,\"avgDayTem\":2432,\"avgDayHum\":0}"
+          "lastDeviceData": "{\"online\":true,\"tem\":2390,\"hum\":0,\"lastTime\":1784781560408,\"avgDayTem\":2390,\"avgDayHum\":0}"
         }
       }
     ]
   },
-  "fetchedAt": "2026-07-23T01:13:35Z"
+  "fetchedAt": "2026-07-23T04:39:20Z"
 }
