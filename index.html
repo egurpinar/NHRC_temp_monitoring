@@ -4,6 +4,11 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>NHRC Water Temperature</title>
+<link rel="icon" href="favicon.ico" sizes="any"/>
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png"/>
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png"/>
+<link rel="icon" type="image/svg+xml" href="NHRC_logo.svg"/>
+<link rel="apple-touch-icon" href="apple-touch-icon.png"/>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
@@ -379,6 +384,9 @@ const state = {
   lastTempF: null,
   sensorOnline: null, // true/false/null(unknown)
   riverLevel: null,   // current stage in feet (from NOAA)
+  riverObservedStale: false, // true if the observed gauge feed hasn't updated recently
+  riverObservedAgeMs: null,  // age of the last observed reading, in ms
+  riverLevelIsEstimate: false, // true if riverLevel came from forecast fallback, not a live sensor reading
   riverObserved: [],  // [{ts, ft}] observed readings
   riverForecast: [],  // [{ts, ft}] NOAA forecast readings
   riverRange: 3,      // selected zoom window in days for the river chart (default: 3 days)
@@ -783,6 +791,19 @@ function nyWindowBound(y, m, d, hour, minute) {
   return Date.UTC(y, m - 1, d, hour - offsetHours, minute, 0);
 }
 
+// Returns the correct America/New_York zone abbreviation ("EDT" or "EST") for a
+// given instant. Timestamps were previously labeled with a hardcoded "EDT",
+// which is wrong for roughly 4 months a year (Nov–Mar, when NY is on EST) —
+// this makes every displayed time zone-correct instead of assuming DST.
+function nyTzAbbr(ts) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', timeZoneName: 'short',
+    hour: 'numeric',
+  }).formatToParts(new Date(ts));
+  const tz = parts.find(p => p.type === 'timeZoneName');
+  return tz ? tz.value : 'ET';
+}
+
 function checkMorningStreak(threshold) {
   // Morning window: 5:00 AM – 11:00 AM America/New_York (hardcoded for Oxford, CT boathouse).
   //
@@ -859,6 +880,7 @@ function checkMorningStreak(threshold) {
       confirmedDays.push({
         date:  new Date(peakReading.ts).toLocaleDateString('en-US', {timeZone:'America/New_York', weekday:'short', month:'short', day:'numeric'}),
         time:  new Date(peakReading.ts).toLocaleTimeString('en-US', {timeZone:'America/New_York', hour:'2-digit', minute:'2-digit'}),
+        tz:    nyTzAbbr(peakReading.ts),
         tempF: morningMax,
         tempFRounded: morningMaxRounded,
       });
@@ -996,15 +1018,15 @@ function renderRowingStatus(tempF) {
       return `Winter Rowing restrictions remain in effect. Current temp is above threshold but <strong>fewer than 3 mornings of data</strong> (5–11 AM) have been collected. Cannot confirm the 3-morning streak yet.`;
     }
     if (eff.noData) {
-      return `Winter Rowing restrictions remain in effect. <strong>Fewer than 3 mornings (5–11 AM EDT) have readings</strong> in the recent period due to data gaps. Cannot confirm the 3-morning streak. Check the thermometer at the dock.`;
+      return `Winter Rowing restrictions remain in effect. <strong>Fewer than 3 mornings (5–11 AM ET) have readings</strong> in the recent period due to data gaps. Cannot confirm the 3-morning streak. Check the thermometer at the dock.`;
     }
     const daysList = (eff.confirmedDays && eff.confirmedDays.length)
       ? `<div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.08);padding-top:10px;">
-           <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Qualifying mornings — 5–11 AM EDT, peak reading rounded to 0.5°F</div>
+           <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Qualifying mornings — 5–11 AM ET, peak reading rounded to 0.5°F</div>
            ${eff.confirmedDays.map(d =>
              `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:0.78rem;">
                <span style="color:var(--white);">${d.date}</span>
-               <span style="color:var(--muted);">${d.time} EDT</span>
+               <span style="color:var(--muted);">${d.time} ${d.tz}</span>
                <span style="color:#5cc98a;font-weight:700;">${d.tempF.toFixed(1)}°F</span>
              </div>`
            ).join('')}
@@ -1285,9 +1307,38 @@ async function loadRiverData() {
     state.riverObserved = observed;
     state.riverForecast = forecast;
 
-    // Current level = most recent observed reading
-    if (observed.length > 0) {
+    // Current level = most recent observed reading — BUT this gauge's observed
+    // feed has been confirmed to silently stall for weeks at a time (verified
+    // directly against NOAA's API: observed was frozen since Jul 9 while forecast
+    // kept issuing fresh predictions). Trusting a stale reading is dangerous here:
+    // it can show a falsely reassuring low level while the river is actually much
+    // higher, since flood restrictions and boat clearance are gated on this number.
+    // If observed is missing or older than STALE_MS, fall back to the forecast
+    // point nearest to now and flag it clearly so the UI can label it as an
+    // estimate rather than a live sensor reading.
+    const STALE_MS = 6 * 3600000; // 6h — gauge normally reports every ~15 min
+    const lastObsTs = observed.length ? observed[observed.length - 1].ts : null;
+    const obsIsStale = lastObsTs === null || (Date.now() - lastObsTs) > STALE_MS;
+
+    state.riverObservedStale = obsIsStale;
+    state.riverObservedAgeMs = lastObsTs !== null ? Date.now() - lastObsTs : null;
+
+    if (!obsIsStale) {
       state.riverLevel = observed[observed.length - 1].ft;
+      state.riverLevelIsEstimate = false;
+    } else if (forecast.length > 0) {
+      const nearestFc = forecast.reduce((a, b) =>
+        Math.abs(b.ts - Date.now()) < Math.abs(a.ts - Date.now()) ? b : a
+      );
+      state.riverLevel = nearestFc.ft;
+      state.riverLevelIsEstimate = true;
+    } else if (lastObsTs !== null) {
+      // No forecast to fall back on either — show the stale observed reading
+      // rather than nothing, but the staleness banner below still applies.
+      state.riverLevel = observed[observed.length - 1].ft;
+      state.riverLevelIsEstimate = false;
+    } else {
+      state.riverLevel = null;
     }
 
     renderRiverCard();
@@ -1321,15 +1372,45 @@ function renderRiverCard() {
 
   const summary = floodSummaryLabel(level);
   const levelStr = level !== null ? level.toFixed(1) : '--';
-  const updatedAt = obs.length > 0 ? new Date(obs[obs.length-1].ts).toLocaleString('en-US',
-    {timeZone:'America/New_York', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '--';
+
+  // When the observed gauge feed is stale, riverLevel/updatedAt are sourced from
+  // the nearest forecast point instead (see loadRiverData) — label that clearly
+  // so nobody mistakes a modeled estimate for a live sensor reading.
+  let updatedLabel, updatedAt, updatedTz;
+  if (state.riverLevelIsEstimate && fc.length > 0) {
+    const nearestFc = fc.reduce((a, b) =>
+      Math.abs(b.ts - Date.now()) < Math.abs(a.ts - Date.now()) ? b : a
+    );
+    updatedLabel = 'Forecast valid';
+    updatedAt = new Date(nearestFc.ts).toLocaleString('en-US',
+      {timeZone:'America/New_York', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+    updatedTz = nyTzAbbr(nearestFc.ts);
+  } else {
+    updatedLabel = 'Updated';
+    updatedAt = obs.length > 0 ? new Date(obs[obs.length-1].ts).toLocaleString('en-US',
+      {timeZone:'America/New_York', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}) : '--';
+    updatedTz = obs.length > 0 ? nyTzAbbr(obs[obs.length-1].ts) : 'ET';
+  }
+
+  const staleBanner = state.riverObservedStale ? (() => {
+    const staleDays = state.riverObservedAgeMs !== null ? Math.floor(state.riverObservedAgeMs / 86400000) : null;
+    const staleDaysLabel = staleDays !== null ? `${staleDays} day${staleDays === 1 ? '' : 's'}` : 'an extended period';
+    const lastObsLabel = obs.length > 0
+      ? new Date(obs[obs.length-1].ts).toLocaleDateString('en-US', {timeZone:'America/New_York', month:'short', day:'numeric'})
+      : null;
+    return `<div class="warn-banner level-danger" style="margin-bottom:14px;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong>River gauge data is stale</strong> NOAA's observed reading hasn't updated in ${staleDaysLabel}${lastObsLabel ? ` (last reading: ${lastObsLabel})` : ''}. The level shown below is estimated from NOAA's forecast model, not a live sensor — verify at <a href="https://water.noaa.gov/gauges/stvc3" target="_blank" style="color:#f07070;text-decoration:underline;">water.noaa.gov/gauges/stvc3</a> before relying on it.</div>
+    </div>`;
+  })() : '';
 
   el.innerHTML = `
+    ${staleBanner}
     <div class="river-header">
       <div>
         <div style="font-size:.7rem;color:var(--muted);margin-bottom:4px;">Current stage (Stevenson Dam)</div>
-        <span class="river-level-val">${levelStr}</span><span class="river-level-unit">ft</span>
-        <div style="font-size:.7rem;color:var(--muted);margin-top:3px;">Updated: ${updatedAt} EDT</div>
+        <span class="river-level-val">${levelStr}</span><span class="river-level-unit">ft</span>${state.riverLevelIsEstimate ? '<span style="font-size:.65rem;color:#ffd166;margin-left:8px;font-weight:600;">(forecast est.)</span>' : ''}
+        <div style="font-size:.7rem;color:var(--muted);margin-top:3px;">${updatedLabel}: ${updatedAt} ${updatedTz}</div>
       </div>
       ${summary ? `<span class="river-status-pill ${summary.cls}">${summary.text}</span>` : ''}
     </div>
@@ -1425,7 +1506,14 @@ function initRiverChart(obs, fc, currentLevel) {
           backgroundColor: 'rgba(91,164,224,0.04)',
           borderWidth: 2,
           borderDash: [6, 4],
-          pointRadius: 0,
+          // Visible markers on each individual forecast point (unlike Observed,
+          // which stays a plain line) so predicted readings can be checked
+          // one-by-one against NOAA's own gauge page.
+          pointRadius: 3,
+          pointHoverRadius: 5,
+          pointBackgroundColor: '#5ba4e0',
+          pointBorderColor: '#162d52',
+          pointBorderWidth: 1,
           fill: true,
           tension: 0.3,
           order: 2,
@@ -1437,7 +1525,13 @@ function initRiverChart(obs, fc, currentLevel) {
       responsive: true,
       maintainAspectRatio: false,
       animation: false,
-      interaction: { mode: 'index', intersect: false },
+      // 'index' mode matches datasets by shared ARRAY POSITION, not by actual
+      // timestamp — with Observed (15-min cadence) and Forecast (6-hr cadence)
+      // holding very different numbers of points, that mismatch is exactly what
+      // caused hover tooltips to show the wrong date for the forecast line.
+      // 'nearest' picks the single point geometrically closest to the cursor,
+      // so the label always matches what's actually under the mouse.
+      interaction: { mode: 'nearest', intersect: false },
       scales: {
         x: {
           type: 'time',
@@ -1476,9 +1570,13 @@ function initRiverChart(obs, fc, currentLevel) {
           titleFont: { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 13 },
           bodyFont:  { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 13 },
           callbacks: {
-            title: items => new Date(items[0].parsed.x).toLocaleString('en-US',
-              { timeZone:'America/New_York', month:'short', day:'numeric',
-                hour:'2-digit', minute:'2-digit' }) + ' EDT',
+            title: items => {
+              const ts = items[0].parsed.x;
+              const datePart = new Date(ts).toLocaleString('en-US',
+                { timeZone:'America/New_York', month:'short', day:'numeric',
+                  hour:'2-digit', minute:'2-digit' });
+              return `${datePart} ${nyTzAbbr(ts)}`;
+            },
             label: ctx => {
               if (ctx.dataset.borderDash && ctx.datasetIndex > 1) return null; // skip threshold lines
               const tag = ctx.dataset.label === 'Forecast (NOAA)' ? ' (forecast)' : '';
