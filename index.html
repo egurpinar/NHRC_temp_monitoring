@@ -300,7 +300,15 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
     <!-- RIVER LEVEL CARD -->
     <div class="river-card">
-      <div class="section-label">River Level — Housatonic at Stevenson Dam</div>
+      <div class="chart-card-header">
+        <h3>River Level — Housatonic at Stevenson Dam</h3>
+        <div class="range-btns" id="river-range-btns">
+          <button class="rb active" data-d="1">24h</button>
+          <button class="rb" data-d="3">3 days</button>
+          <button class="rb" data-d="7">7 days</button>
+          <button class="rb" data-d="30">30 days</button>
+        </div>
+      </div>
       <div id="river-content">
         <div class="river-unavailable">Loading river level data...</div>
       </div>
@@ -373,6 +381,7 @@ const state = {
   riverLevel: null,   // current stage in feet (from NOAA)
   riverObserved: [],  // [{ts, ft}] observed readings
   riverForecast: [],  // [{ts, ft}] NOAA forecast readings
+  riverRange: 1,      // selected zoom window in days for the river chart (24h=1)
 };
 let chart = null;
 
@@ -556,6 +565,19 @@ document.querySelectorAll('#range-btns .rb:not(.rb-csv)').forEach(btn => {
     btn.classList.add('active');
     state.currentRange = parseInt(btn.dataset.d);
     updateChart();
+  });
+});
+
+/* ── RIVER CHART RANGE BUTTONS ── */
+document.querySelectorAll('#river-range-btns .rb').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('#river-range-btns .rb').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    state.riverRange = parseInt(btn.dataset.d);
+    // Re-draw from already-fetched data — no need to hit NOAA again
+    if (state.riverObserved.length || state.riverForecast.length) {
+      initRiverChart(state.riverObserved, state.riverForecast, state.riverLevel);
+    }
   });
 });
 
@@ -1354,15 +1376,24 @@ function initRiverChart(obs, fc, currentLevel) {
     { ft: 12, color: 'rgba(180,20,20,0.85)',  label: '12 ft' },
   ];
 
-  const obsData = obs.map(d => ({ x: d.ts, y: parseFloat(d.ft.toFixed(2)) }));
+  // Zoom window driven by the range buttons (24h / 3 days / 7 days / 30 days),
+  // mirroring the Temperature History chart. Forecast is always kept in full —
+  // NOAA only projects a few days out, so "include forecast" holds at every zoom level.
+  const rangeDays = state.riverRange || 1;
+  const now       = Date.now();
+  const xMin      = now - rangeDays * 86400000;
+  const xMax      = fc.length ? fc[fc.length-1].ts : now;
+
+  const obsInRange = obs.filter(d => d.ts >= xMin);
+  const obsData = obsInRange.map(d => ({ x: d.ts, y: parseFloat(d.ft.toFixed(2)) }));
   const fcData  = fc.map(d => ({ x: d.ts, y: parseFloat(d.ft.toFixed(2)) }));
 
   // Annotations plugin not available — draw threshold lines as extra datasets
   const thresholdDatasets = THRESHOLDS.map(t => ({
-    data: obsData.length || fcData.length ? [
-      { x: (obsData[0]?.x || fcData[0]?.x), y: t.ft },
-      { x: (fcData[fcData.length-1]?.x || obsData[obsData.length-1]?.x), y: t.ft },
-    ] : [],
+    data: [
+      { x: xMin, y: t.ft },
+      { x: xMax, y: t.ft },
+    ],
     borderColor: t.color,
     borderWidth: 1.5,
     borderDash: [4, 3],
@@ -1410,7 +1441,10 @@ function initRiverChart(obs, fc, currentLevel) {
       scales: {
         x: {
           type: 'time',
-          time: { displayFormats: { hour: 'ha MMM D', day: 'MMM D' } },
+          time: { unit: rangeDays<=1?'hour':rangeDays<=14?'day':'week',
+                  displayFormats: { hour: 'ha MMM D', day: 'MMM D', week: 'MMM D' } },
+          min: xMin,
+          max: xMax,
           ticks: { color: '#b0c4de', maxTicksLimit: 6,
                    font: { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 12 } },
           grid: { color: 'rgba(255,255,255,0.04)' },
