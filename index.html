@@ -1467,7 +1467,15 @@ function initRiverChart(obs, fc, currentLevel) {
 
   const obsInRange = obs.filter(d => d.ts >= xMin);
   const obsData = obsInRange.map(d => ({ x: d.ts, y: parseFloat(d.ft.toFixed(2)) }));
-  const fcData  = fc.map(d => ({ x: d.ts, y: parseFloat(d.ft.toFixed(2)) }));
+
+  // NOAA's forecast series can include a leading point at or before the latest
+  // observed reading (anchoring the forecast to the last known value for
+  // continuity). Plotting that verbatim draws two dots/lines for the same
+  // instant — trim forecast down to strictly after the last observed reading
+  // so Observed and Forecast meet cleanly instead of overlapping.
+  const lastObsTs = obs.length ? obs[obs.length - 1].ts : null;
+  const fcInRange = lastObsTs !== null ? fc.filter(d => d.ts > lastObsTs) : fc;
+  const fcData  = fcInRange.map(d => ({ x: d.ts, y: parseFloat(d.ft.toFixed(2)) }));
 
   // Annotations plugin not available — draw threshold lines as extra datasets
   const thresholdDatasets = THRESHOLDS.map(t => ({
