@@ -31,6 +31,45 @@ const path = require('path');
 const REPO_ROOT = path.resolve(__dirname, '..');
 const INDEX_HTML = path.join(REPO_ROOT, 'index.html');
 
+// ═════════════════════════════════════════════════════════════════════════════
+// ROWING SEASON — Safety Committee setting
+// ═════════════════════════════════════════════════════════════════════════════
+// The daily email is sent every day DURING the season and paused outside it.
+// Months are inclusive and 1-based (1 = January ... 12 = December), evaluated
+// against the current date in America/New_York.
+//
+// To change the season, edit these two numbers. A range that wraps the new year
+// (e.g. start 11, end 3) is supported.
+//
+// TODO(committee): confirm these months. Defaulting to April–October, the
+// typical Connecticut open-water season — adjust as the club decides.
+const SEASON = {
+  startMonth: 4,   // April
+  endMonth: 10,    // October
+};
+
+/**
+ * True if the given instant falls inside the configured rowing season,
+ * evaluated in the boathouse's local timezone (not UTC, and not the runner's
+ * timezone — GitHub Actions runs in UTC, so this must be explicit).
+ * Handles ranges that wrap the year end.
+ */
+function isInSeason(now = new Date(), season = SEASON) {
+  const month = parseInt(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', month: 'numeric',
+  }).format(now), 10);
+
+  const { startMonth: s, endMonth: e } = season;
+  return s <= e
+    ? (month >= s && month <= e)      // normal range, e.g. Apr-Oct
+    : (month >= s || month <= e);     // wraps the year, e.g. Nov-Mar
+}
+
+// Buttondown's free tier caps at 100 subscribers. Warn before that becomes a
+// silent delivery failure for members who signed up but sit past the cap.
+const SUBSCRIBER_WARN_THRESHOLD = 90;
+const SUBSCRIBER_FREE_LIMIT = 100;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Load the site's own logic out of index.html
 // ─────────────────────────────────────────────────────────────────────────────
@@ -493,6 +532,35 @@ async function sendViaButtondown(subject, bodyHtml) {
   return JSON.parse(text);
 }
 
+/**
+ * Checks how close the list is to Buttondown's free-tier ceiling. Purely
+ * advisory — never blocks a send, and never throws, because failing to read a
+ * count is not a reason to withhold safety information.
+ */
+async function checkSubscriberHeadroom() {
+  const key = process.env.BUTTONDOWN_API_KEY;
+  if (!key) return null;
+  try {
+    const res = await fetch('https://api.buttondown.com/v1/subscribers?type=regular', {
+      headers: { 'Authorization': `Token ${key}`, 'X-API-Version': '2026-04-01' },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const count = typeof data.count === 'number' ? data.count : null;
+    if (count === null) return null;
+    if (count >= SUBSCRIBER_FREE_LIMIT) {
+      console.error(`WARNING: ${count} subscribers — at or past Buttondown's free-tier limit of ${SUBSCRIBER_FREE_LIMIT}. Members beyond the cap may not receive this email.`);
+    } else if (count >= SUBSCRIBER_WARN_THRESHOLD) {
+      console.error(`NOTE: ${count} subscribers — approaching the free-tier limit of ${SUBSCRIBER_FREE_LIMIT}.`);
+    } else {
+      console.error(`Subscribers: ${count} (free-tier limit ${SUBSCRIBER_FREE_LIMIT}).`);
+    }
+    return count;
+  } catch (e) {
+    return null;
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. Main
 // ─────────────────────────────────────────────────────────────────────────────
@@ -507,6 +575,18 @@ async function build() {
 
 async function main() {
   const args = process.argv.slice(2);
+
+  // Season gate — applies only to real sends. Previews (--json, default HTML
+  // output) always work so the committee can check the email off-season.
+  // --force overrides the gate for a deliberate out-of-season send.
+  if (args.includes('--send') && !args.includes('--force') && !isInSeason()) {
+    const monthName = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', month: 'long',
+    }).format(new Date());
+    console.log(`Off-season (${monthName}); season is months ${SEASON.startMonth}-${SEASON.endMonth}. Nothing sent.`);
+    return;
+  }
+
   const { digest, html, subject } = await build();
 
   if (args.includes('--json')) {
@@ -514,6 +594,7 @@ async function main() {
     return;
   }
   if (args.includes('--send')) {
+    await checkSubscriberHeadroom();
     const result = await sendViaButtondown(subject, html);
     console.log(`Sent: ${subject}`);
     console.log(`Buttondown email id: ${result.id}`);
@@ -526,7 +607,8 @@ async function main() {
 module.exports = {
   loadSiteLogic, loadLocalData, loadRiver, loadWeather,
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
-  parseGaugeSeries, STALE_MS,
+  parseGaugeSeries, checkSubscriberHeadroom, isInSeason,
+  STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT,
 };
 
 if (require.main === module) {

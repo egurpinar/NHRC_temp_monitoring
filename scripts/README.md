@@ -21,11 +21,40 @@ status using the site's own functions and compares against the email output.
 | `test_daily_email.js` | Test suite (29 tests) |
 | `../.github/workflows/daily_email.yml` | 4 AM ET schedule |
 
+## Rowing season
+
+The email sends **every day during the season** and pauses outside it. The
+season is set in one place — the `SEASON` constant at the top of
+`daily_email.js`:
+
+```js
+const SEASON = {
+  startMonth: 4,   // April
+  endMonth: 10,    // October
+};
+```
+
+Months are inclusive and 1-based, evaluated in `America/New_York` (not UTC, so
+late-evening runs near a month boundary behave correctly). A range that wraps
+the new year — e.g. `startMonth: 11, endMonth: 3` — also works.
+
+Change those two numbers to whatever the committee decides; nothing else needs
+editing. Previews still work off-season, so you can check the email year-round.
+
+## Subscriber limit
+
+Buttondown's free tier caps at **100 subscribers**. Before each send the script
+logs the current count and warns as it approaches the cap, so this doesn't turn
+into silent non-delivery for members who signed up past it. Club membership is
+around 110, so keep an eye on this in the Actions logs.
+
 ## Running locally
 
 ```bash
 node scripts/daily_email.js           # print the email HTML (no send)
 node scripts/daily_email.js --json    # print computed values
+node scripts/daily_email.js --send    # send (respects the season gate)
+node scripts/daily_email.js --send --force   # send even if off-season
 node scripts/test_daily_email.js      # run the tests
 ```
 

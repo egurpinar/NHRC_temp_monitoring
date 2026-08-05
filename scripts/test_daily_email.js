@@ -380,6 +380,68 @@ test('the 4am ET schedule fires at 4am local in BOTH DST regimes', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+section('7b. Rowing season gate');
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('default season (Apr-Oct) includes and excludes the right months', () => {
+  const inSeason  = [4, 5, 6, 7, 8, 9, 10];
+  const offSeason = [1, 2, 3, 11, 12];
+  for (const mo of inSeason) {
+    // 15th at noon ET avoids any month-boundary/DST ambiguity
+    const d = new Date(Date.UTC(2026, mo - 1, 15, 16, 0, 0));
+    assert.strictEqual(M.isInSeason(d), true, `month ${mo} should be in season`);
+  }
+  for (const mo of offSeason) {
+    const d = new Date(Date.UTC(2026, mo - 1, 15, 16, 0, 0));
+    assert.strictEqual(M.isInSeason(d), false, `month ${mo} should be off season`);
+  }
+});
+
+test('season boundaries are inclusive on both ends', () => {
+  // Apr 1 and Oct 31 must both be in season.
+  assert.strictEqual(M.isInSeason(new Date(Date.UTC(2026, 3, 1, 16))), true, 'Apr 1');
+  assert.strictEqual(M.isInSeason(new Date(Date.UTC(2026, 9, 31, 16))), true, 'Oct 31');
+  // Mar 31 and Nov 1 must both be out.
+  assert.strictEqual(M.isInSeason(new Date(Date.UTC(2026, 2, 31, 16))), false, 'Mar 31');
+  assert.strictEqual(M.isInSeason(new Date(Date.UTC(2026, 10, 1, 16))), false, 'Nov 1');
+});
+
+test('season is evaluated in Eastern time, not UTC', () => {
+  // 2026-11-01T02:00Z is still Oct 31 (10pm) in New York. UTC would say
+  // November (off-season); Eastern correctly says October (in season).
+  const d = new Date(Date.UTC(2026, 10, 1, 2, 0, 0));
+  assert.strictEqual(d.getUTCMonth() + 1, 11, 'sanity: UTC month is November');
+  assert.strictEqual(M.isInSeason(d), true,
+    'must use the boathouse timezone — Oct 31 10pm ET is still in season');
+});
+
+test('a season that wraps the new year works', () => {
+  const winterSeason = { startMonth: 11, endMonth: 3 }; // Nov-Mar
+  for (const mo of [11, 12, 1, 2, 3]) {
+    assert.strictEqual(M.isInSeason(new Date(Date.UTC(2026, mo - 1, 15, 16)), winterSeason),
+      true, `month ${mo} should be in a Nov-Mar season`);
+  }
+  for (const mo of [4, 7, 10]) {
+    assert.strictEqual(M.isInSeason(new Date(Date.UTC(2026, mo - 1, 15, 16)), winterSeason),
+      false, `month ${mo} should be outside a Nov-Mar season`);
+  }
+});
+
+test('every month of the year resolves to a definite in/out answer', () => {
+  for (let mo = 1; mo <= 12; mo++) {
+    const r = M.isInSeason(new Date(Date.UTC(2026, mo - 1, 15, 16)));
+    assert.strictEqual(typeof r, 'boolean', `month ${mo} returned ${r}`);
+  }
+});
+
+test('season config is a sane, editable range', () => {
+  for (const k of ['startMonth', 'endMonth']) {
+    assert.ok(Number.isInteger(M.SEASON[k]) && M.SEASON[k] >= 1 && M.SEASON[k] <= 12,
+      `SEASON.${k} must be a month 1-12, got ${M.SEASON[k]}`);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 section('8. Rendering');
 // ═══════════════════════════════════════════════════════════════════════════
 

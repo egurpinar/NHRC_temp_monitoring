@@ -21,6 +21,10 @@ on:
         description: 'Build the email but do NOT send it'
         type: boolean
         default: true
+      force_off_season:
+        description: 'Send even if today falls outside the rowing season'
+        type: boolean
+        default: false
 
 jobs:
   send:
@@ -67,7 +71,14 @@ jobs:
           cat /tmp/digest.json | head -40
 
       - name: Send via Buttondown
+        # The script applies the rowing-season gate itself and exits quietly
+        # (success, nothing sent) when today falls outside the season.
         if: steps.gate.outputs.proceed == 'true' && github.event.inputs.dry_run != 'true'
         env:
           BUTTONDOWN_API_KEY: ${{ secrets.BUTTONDOWN_API_KEY }}
-        run: node scripts/daily_email.js --send
+        run: |
+          if [ "${{ github.event.inputs.force_off_season }}" = "true" ]; then
+            node scripts/daily_email.js --send --force
+          else
+            node scripts/daily_email.js --send
+          fi
