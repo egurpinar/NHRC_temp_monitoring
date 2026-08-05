@@ -35,34 +35,43 @@ const INDEX_HTML = path.join(REPO_ROOT, 'index.html');
 // ROWING SEASON — Safety Committee setting
 // ═════════════════════════════════════════════════════════════════════════════
 // The daily email is sent every day DURING the season and paused outside it.
-// Months are inclusive and 1-based (1 = January ... 12 = December), evaluated
-// against the current date in America/New_York.
 //
-// To change the season, edit these two numbers. A range that wraps the new year
-// (e.g. start 11, end 3) is supported.
+// Both endpoints are INCLUSIVE: with the values below, March 15 and November 15
+// both receive an email; March 14 and November 16 do not. Months are 1-based
+// (1 = January ... 12 = December).
 //
-// TODO(committee): confirm these months. Defaulting to April–October, the
-// typical Connecticut open-water season — adjust as the club decides.
+// The date is evaluated in America/New_York, NOT UTC. This matters: the job
+// fires at 08:00/09:00 UTC, which is still the previous calendar day in the
+// evening — a UTC comparison would start and end the season a day early.
+//
+// To change the season, edit these four numbers. A range that wraps the new
+// year (e.g. Nov 1 -> Mar 31) is supported.
 const SEASON = {
-  startMonth: 4,   // April
-  endMonth: 10,    // October
+  startMonth: 3,  startDay: 15,   // March 15
+  endMonth:  11,  endDay:   15,   // November 15
 };
 
 /**
  * True if the given instant falls inside the configured rowing season,
- * evaluated in the boathouse's local timezone (not UTC, and not the runner's
- * timezone — GitHub Actions runs in UTC, so this must be explicit).
- * Handles ranges that wrap the year end.
+ * evaluated in the boathouse's local timezone. Handles ranges that wrap the
+ * year end. Both endpoints are inclusive.
  */
 function isInSeason(now = new Date(), season = SEASON) {
-  const month = parseInt(new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York', month: 'numeric',
-  }).format(now), 10);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', month: 'numeric', day: 'numeric',
+  }).formatToParts(now);
+  const month = parseInt(parts.find(p => p.type === 'month').value, 10);
+  const day   = parseInt(parts.find(p => p.type === 'day').value, 10);
 
-  const { startMonth: s, endMonth: e } = season;
-  return s <= e
-    ? (month >= s && month <= e)      // normal range, e.g. Apr-Oct
-    : (month >= s || month <= e);     // wraps the year, e.g. Nov-Mar
+  // Encode month/day as a single comparable integer (e.g. Mar 15 -> 315,
+  // Nov 15 -> 1115) so the range check is a plain numeric comparison.
+  const key   = month * 100 + day;
+  const start = season.startMonth * 100 + season.startDay;
+  const end   = season.endMonth   * 100 + season.endDay;
+
+  return start <= end
+    ? (key >= start && key <= end)    // normal range, e.g. Mar 15 - Nov 15
+    : (key >= start || key <= end);   // wraps the year, e.g. Nov 1 - Mar 31
 }
 
 // Buttondown's free tier caps at 100 subscribers. Warn before that becomes a
@@ -580,10 +589,12 @@ async function main() {
   // output) always work so the committee can check the email off-season.
   // --force overrides the gate for a deliberate out-of-season send.
   if (args.includes('--send') && !args.includes('--force') && !isInSeason()) {
-    const monthName = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York', month: 'long',
+    const today = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', month: 'long', day: 'numeric',
     }).format(new Date());
-    console.log(`Off-season (${monthName}); season is months ${SEASON.startMonth}-${SEASON.endMonth}. Nothing sent.`);
+    const fmt = (m, d) => new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric' })
+      .format(new Date(Date.UTC(2000, m - 1, d, 12)));
+    console.log(`Off-season: today is ${today}; season runs ${fmt(SEASON.startMonth, SEASON.startDay)} through ${fmt(SEASON.endMonth, SEASON.endDay)}. Nothing sent.`);
     return;
   }
 

@@ -23,22 +23,26 @@ status using the site's own functions and compares against the email output.
 
 ## Rowing season
 
-The email sends **every day during the season** and pauses outside it. The
-season is set in one place — the `SEASON` constant at the top of
-`daily_email.js`:
+The email sends **every day from March 15 through November 15** and pauses
+outside that window (246 days on, 119 days off). The season is set in one
+place — the `SEASON` constant at the top of `daily_email.js`:
 
 ```js
 const SEASON = {
-  startMonth: 4,   // April
-  endMonth: 10,    // October
+  startMonth: 3,  startDay: 15,   // March 15
+  endMonth:  11,  endDay:   15,   // November 15
 };
 ```
 
-Months are inclusive and 1-based, evaluated in `America/New_York` (not UTC, so
-late-evening runs near a month boundary behave correctly). A range that wraps
-the new year — e.g. `startMonth: 11, endMonth: 3` — also works.
+Both endpoints are **inclusive**: March 15 and November 15 each get an email;
+March 14 and November 16 do not.
 
-Change those two numbers to whatever the committee decides; nothing else needs
+Dates are evaluated in `America/New_York`, not UTC. This matters because the job
+fires at 08:00/09:00 UTC — on November 15 that is still the 15th locally, but a
+UTC comparison would read the 16th and end the season a day early. A range that
+wraps the new year (e.g. Nov 1 → Mar 31) is also supported.
+
+Change those four numbers to whatever the committee decides; nothing else needs
 editing. Previews still work off-season, so you can check the email year-round.
 
 ## Subscriber limit
