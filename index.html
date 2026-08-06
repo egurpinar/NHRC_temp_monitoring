@@ -334,11 +334,26 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       <div style="font-size:.85rem;color:var(--white);line-height:1.6;margin-bottom:14px;">
         Get the rowing status, boat restrictions, river level, and weather sent to your inbox every morning at 4:00 AM ET — before you head to the boathouse.
       </div>
-      <!-- TODO(club): replace href with your real Buttondown subscribe page once the
-           account exists, e.g. https://buttondown.com/rowornodailyupdate -->
-      <a href="https://buttondown.com/REPLACE_WITH_YOUR_USERNAME" target="_blank" style="display:inline-block;background:var(--gold);color:var(--navy);font-weight:700;font-size:.8rem;text-decoration:none;padding:10px 18px;border-radius:8px;">
-        Subscribe to the daily email
-      </a>
+      <!-- Buttondown embed form: a plain POST to their public endpoint, so members
+           sign up without leaving the site. No API key is involved here — that
+           endpoint is public by design and the key must never appear in frontend code. -->
+      <form action="https://buttondown.com/api/emails/embed-subscribe/gurpinar"
+            method="post"
+            target="_blank"
+            class="embeddable-buttondown-form"
+            style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <label for="bd-email" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;">Email address</label>
+        <input type="email" name="email" id="bd-email" required
+               placeholder="you@example.com"
+               style="flex:1 1 220px;min-width:0;padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:var(--navy3);color:var(--white);font-size:.85rem;font-family:inherit;"/>
+        <input type="hidden" name="tag" value="daily-conditions"/>
+        <input type="submit" value="Subscribe"
+               style="background:var(--gold);color:var(--navy);font-weight:700;font-size:.8rem;padding:10px 18px;border-radius:8px;border:0;cursor:pointer;font-family:inherit;"/>
+      </form>
+      <div class="note-text">
+        One email each morning, March 15 – November 15. Unsubscribe anytime from any email.
+        Prefer a hosted page? <a href="https://buttondown.com/gurpinar" target="_blank" style="color:var(--muted);text-decoration:underline;">Sign up on Buttondown</a>.
+      </div>
     </div>
 
 
