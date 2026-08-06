@@ -91,6 +91,26 @@ const SUBSCRIBER_WARN_THRESHOLD = 90;
 const SUBSCRIBER_FREE_LIMIT = 100;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Club logo
+// ─────────────────────────────────────────────────────────────────────────────
+// Email clients do NOT render SVG (Gmail, Outlook and Apple Mail all block or
+// fail on it), so the email uses a PNG rendered from NHRC_logo.svg. It is baked
+// onto the header's navy background with the same white circle and gold ring the
+// website header uses, because the logo's dark strokes would be invisible
+// against the navy otherwise.
+//
+// The image must be referenced by absolute URL — mail clients cannot read files
+// from the repo. It is served by GitHub Pages from the site root once merged.
+//
+// To preview before the file is live on the site (e.g. testing from a branch),
+// point EMAIL_LOGO_URL at the raw GitHub copy:
+//   EMAIL_LOGO_URL=https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/daily-conditions-email/nhrc_email_logo.png \
+//     node scripts/daily_email.js > preview.html
+//
+// To regenerate the PNG after changing the SVG, see scripts/README.md.
+const LOGO_URL = process.env.EMAIL_LOGO_URL || 'https://roworno.com/nhrc_email_logo.png';
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 1. Load the site's own logic out of index.html
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -500,7 +520,7 @@ function renderEmailHtml(d) {
 
         <tr><td style="padding:26px 28px 20px;border-bottom:1px solid rgba(240,180,41,0.2);">
           <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-            <td style="width:56px;height:56px;border-radius:50%;background:#ffffff;border:3px solid #0d1f3c;outline:2px solid #f0b429;outline-offset:1px;text-align:center;vertical-align:middle;font-family:Georgia,serif;font-weight:700;color:#0d1f3c;font-size:20px;">NHRC</td>
+            <td style="width:56px;vertical-align:middle;"><img src="${LOGO_URL}" width="56" height="56" alt="NHRC" style="display:block;width:56px;height:56px;border:0;outline:none;text-decoration:none;"/></td>
             <td style="padding-left:14px;">
               <div style="font-family:Georgia,serif;font-size:18px;font-weight:700;color:#f0b429;">New Haven Rowing Club</div>
               <div style="font-size:11px;letter-spacing:0.05em;text-transform:uppercase;color:#7a93b4;margin-top:3px;">Daily Conditions Report</div>
@@ -688,7 +708,7 @@ module.exports = {
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
   parseGaugeSeries, checkSubscriberHeadroom, isInSeason,
   describeWeatherCode, withWeatherDescription,
-  STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT,
+  STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT, LOGO_URL,
   WMO_CODES_FALLBACK, WMO_ICONS_FALLBACK, DEFAULT_WEATHER_ICON,
 };
 

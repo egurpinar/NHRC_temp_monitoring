@@ -575,6 +575,66 @@ test('renders without throwing in every zone', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+section('8a. Club logo');
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('the logo PNG exists and was generated from the SVG', () => {
+  const fs = require('fs');
+  const png = path.join(__dirname, '..', 'nhrc_email_logo.png');
+  const svg = path.join(__dirname, '..', 'NHRC_logo.svg');
+  assert.ok(fs.existsSync(svg), 'NHRC_logo.svg (the source) is missing');
+  assert.ok(fs.existsSync(png), 'nhrc_email_logo.png is missing — regenerate it (see scripts/README.md)');
+  const buf = fs.readFileSync(png);
+  assert.ok(buf.length > 2000, `logo PNG looks truncated (${buf.length} bytes)`);
+  // PNG magic number
+  assert.deepStrictEqual([...buf.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47], 'not a valid PNG');
+});
+
+test('the email references the logo by absolute URL', () => {
+  const html = M.renderEmailHtml(sampleDigest());
+  const m = html.match(/<img[^>]+src="([^"]+)"[^>]*alt="NHRC"/);
+  assert.ok(m, 'no logo <img> found in the email header');
+  assert.ok(/^https:\/\//.test(m[1]),
+    `logo src must be an absolute https URL (mail clients cannot read repo files), got: ${m[1]}`);
+});
+
+test('the email does NOT reference the SVG (unsupported in email)', () => {
+  const html = M.renderEmailHtml(sampleDigest());
+  assert.ok(!/\.svg/i.test(html),
+    'email must not reference an SVG — Gmail, Outlook and Apple Mail will not render it');
+});
+
+test('logo has alt text so it degrades when images are blocked', () => {
+  // Many clients block images by default; the club name must still be readable.
+  const html = M.renderEmailHtml(sampleDigest());
+  assert.ok(/<img[^>]+alt="NHRC"/.test(html), 'logo needs alt text');
+  assert.ok(html.includes('New Haven Rowing Club'),
+    'club name must appear as real text, not only inside the image');
+});
+
+test('logo has explicit width and height (prevents layout shift in Outlook)', () => {
+  const html = M.renderEmailHtml(sampleDigest());
+  const tag = html.match(/<img[^>]+alt="NHRC"[^>]*>/)[0];
+  assert.ok(/width="\d+"/.test(tag), 'missing width attribute');
+  assert.ok(/height="\d+"/.test(tag), 'missing height attribute');
+});
+
+test('logo URL can be overridden for pre-merge previews', () => {
+  const saved = process.env.EMAIL_LOGO_URL;
+  try {
+    delete require.cache[require.resolve('./daily_email.js')];
+    process.env.EMAIL_LOGO_URL = 'https://example.com/test-logo.png';
+    const Fresh = require('./daily_email.js');
+    assert.strictEqual(Fresh.LOGO_URL, 'https://example.com/test-logo.png');
+  } finally {
+    if (saved === undefined) delete process.env.EMAIL_LOGO_URL;
+    else process.env.EMAIL_LOGO_URL = saved;
+    delete require.cache[require.resolve('./daily_email.js')];
+    require('./daily_email.js');
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 section('8b. Weather icons');
 // ═══════════════════════════════════════════════════════════════════════════
 

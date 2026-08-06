@@ -45,6 +45,38 @@ wraps the new year (e.g. Nov 1 → Mar 31) is also supported.
 Change those four numbers to whatever the committee decides; nothing else needs
 editing. Previews still work off-season, so you can check the email year-round.
 
+## Club logo in the email
+
+Email clients do **not** render SVG — Gmail, Outlook and Apple Mail all block or
+fail on it. So the email uses `nhrc_email_logo.png`, generated from
+`NHRC_logo.svg` with the same white circle and gold ring the website header
+uses, baked onto the header's navy background (the logo's dark strokes would be
+invisible against navy otherwise).
+
+The image is referenced by absolute URL — mail clients can't read repo files —
+and is served by GitHub Pages from `https://roworno.com/nhrc_email_logo.png`
+once merged to `main`.
+
+**Previewing before it's live on the site:** point at the raw GitHub copy —
+
+```bash
+EMAIL_LOGO_URL=https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/daily-conditions-email/nhrc_email_logo.png \
+  node scripts/daily_email.js > preview.html
+```
+
+**Regenerating after changing the SVG** (needs ImageMagick — `brew install imagemagick`):
+
+```bash
+SIZE=168                     # 3x the 56px display size, for high-DPI screens
+INNER=$(python3 -c "print(int($SIZE*0.78))")
+convert -density 600 -background none NHRC_logo.svg -trim +repage \
+        -resize ${INNER}x${INNER} /tmp/logo_inner.png
+convert -size ${SIZE}x${SIZE} xc:none -fill white -stroke '#f0b429' -strokewidth 6 \
+        -draw "circle $((SIZE/2)),$((SIZE/2)) $((SIZE/2)),4" /tmp/circle.png
+convert /tmp/circle.png /tmp/logo_inner.png -gravity center -composite \
+        -background '#0d1f3c' -alpha remove -alpha off nhrc_email_logo.png
+```
+
 ## Subscriber limit
 
 Buttondown's free tier caps at **100 subscribers**. Before each send the script
