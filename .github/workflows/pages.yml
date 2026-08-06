@@ -50,12 +50,35 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
+      # Stage only the files the site actually serves.
+      #
+      # Uploading the repository root would also upload .git — 41 MB of history
+      # here, because the temperature bot rewrites history.json every 15 minutes
+      # — versus 1.4 MB of real site files. That made every deployment ~30x
+      # larger than necessary and left them sitting in deployment_in_progress.
+      # None of .git, .github or scripts is served to browsers.
+      - name: Stage site files
+        run: |
+          mkdir -p _site
+          rsync -a \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='scripts' \
+            --exclude='node_modules' \
+            --exclude='_site' \
+            --exclude='preview*.html' \
+            --exclude='.DS_Store' \
+            --exclude='*~' \
+            ./ _site/
+          echo "Staged $(du -sh _site | cut -f1) across $(find _site -type f | wc -l) files:"
+          find _site -maxdepth 1 -printf '  %f\n' | sort
+
       - name: Upload site
         uses: actions/upload-pages-artifact@v3
         with:
-          # Publish the repository root. .nojekyll keeps the files verbatim, and
-          # CNAME carries the roworno.com custom domain.
-          path: .
+          # .nojekyll keeps the files verbatim and CNAME carries roworno.com;
+          # both are dotfile/plain copies preserved by the rsync above.
+          path: _site
 
       - name: Deploy
         id: deployment
