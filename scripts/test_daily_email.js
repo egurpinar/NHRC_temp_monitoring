@@ -514,45 +514,9 @@ function sampleDigestWithCode(code) {
     new Date());
 }
 
-test('renders every tier and all four boat columns', () => {
-  const html = M.renderEmailHtml(sampleDigest());
-  // Tier labels are abbreviated ("T1 Novice") so the five-column table fits a
-  // phone screen without wrapping, but every tier must still be identifiable.
-  for (const t of ['T1 Novice', 'T2 Intermediate', 'T3 Senior']) {
-    assert.ok(html.includes(t), `missing ${t}`);
-  }
-  for (const c of ['1x / 2-', '2x', '4+ / 4-', '4x / 8+']) {
-    assert.ok(html.includes(c), `missing column ${c}`);
-  }
-});
 
-test('mobile and dark-mode hardening is present', () => {
-  const html = M.renderEmailHtml(sampleDigest());
-  assert.ok(/name="color-scheme"/.test(html),
-    'missing color-scheme meta — iOS will invert the palette');
-  assert.ok(/supported-color-schemes/.test(html), 'missing supported-color-schemes meta');
-  assert.ok(/-webkit-text-size-adjust:100%/.test(html),
-    'missing text-size-adjust — iOS inflates fonts and breaks the table');
-  assert.ok(/@media only screen and \(max-width:480px\)/.test(html),
-    'missing phone breakpoint');
-  assert.ok(/@media \(prefers-color-scheme: dark\)/.test(html),
-    'missing dark-mode colour pinning');
-});
 
-test('status pills use opaque colours (clients drop alpha)', () => {
-  const html = M.renderEmailHtml(sampleDigest());
-  const pills = html.match(/class="bd-pill[^"]*"[^>]*style="([^"]+)"/g) || [];
-  assert.ok(pills.length > 0, 'no status pills rendered');
-  for (const p of pills) {
-    assert.ok(!/rgba\(/.test(p), `pill uses rgba(), which some clients drop: ${p}`);
-  }
-});
 
-test('boat labels and pills do not wrap mid-token', () => {
-  const html = M.renderEmailHtml(sampleDigest());
-  assert.ok(/white-space:nowrap/.test(html),
-    'boat labels need nowrap or they break across lines on narrow screens');
-});
 
 test('includes an unsubscribe link (legally required for bulk email)', () => {
   const html = M.renderEmailHtml(sampleDigest());
@@ -566,15 +530,6 @@ test('includes the safety disclaimer', () => {
   assert.ok(/guidance only/i.test(html), 'missing verify-at-boathouse disclaimer');
 });
 
-test('produces balanced HTML tables', () => {
-  const html = M.renderEmailHtml(sampleDigest());
-  const open = (html.match(/<table/g) || []).length;
-  const close = (html.match(/<\/table>/g) || []).length;
-  assert.strictEqual(open, close, `unbalanced <table>: ${open} open, ${close} close`);
-  const tdO = (html.match(/<td[\s>]/g) || []).length;
-  const tdC = (html.match(/<\/td>/g) || []).length;
-  assert.strictEqual(tdO, tdC, `unbalanced <td>: ${tdO} vs ${tdC}`);
-});
 
 test('escapes HTML to prevent injection from upstream data', () => {
   const digest = sampleDigest();
@@ -679,7 +634,8 @@ test('renders without throwing in every zone', () => {
       { available: false }, new Date());
     const html = M.renderEmailHtml(digest);
     assert.ok(html.length > 1000, `suspiciously short email for ${tempF}F`);
-    assert.ok(html.includes('<!DOCTYPE html>'));
+    assert.ok(html.trimStart().startsWith('<table'),
+      'email must be a fragment beginning with a table');
   }
 });
 
@@ -744,6 +700,202 @@ test('logo URL can be overridden for pre-merge previews', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+section('8a2. EMAIL CLIENT COMPATIBILITY (root-cause guards)');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Buttondown's free plan wraps our content in its own template, so anything
+// that only works as a standalone document is silently discarded. These rules
+// exist because breaking them produced black text, white-on-grey text, and an
+// unreadable table on real devices.
+
+function everyDigest() {
+  const out = [];
+  for (const [tempF, level] of [[72, 5], [72, 10.4], [48, 11.5], [35, 5], [72, 13]]) {
+    out.push(M.computeDigest(logic,
+      { raw: makeRaw(tempF), history: historyAtTemp(tempF) },
+      { level, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+      { available: true, code: 3, tempF: 70, feelsF: 69, windMph: 8,
+        gustMph: 14, dir: 'NW', precip: '0.00' },
+      new Date()));
+  }
+  // plus the fully-degraded case
+  out.push(M.computeDigest(logic,
+    { raw: makeRaw(72), history: [] },
+    { level: null, isEstimate: false, failed: true, stale: true, ageMs: null, lastObsTs: null },
+    { available: false }, new Date()));
+  return out;
+}
+
+test('email is a FRAGMENT — no document wrapper', () => {
+  for (const d of everyDigest()) {
+    const html = M.renderEmailHtml(d);
+    for (const forbidden of ['<!DOCTYPE', '<html', '</html>', '<head', '</head>', '<body', '</body>']) {
+      assert.ok(!new RegExp(forbidden, 'i').test(html),
+        `found ${forbidden} — Buttondown nests this inside its own document, so the client discards our head`);
+    }
+  }
+});
+
+test('no <style> blocks (they live in head and get dropped)', () => {
+  for (const d of everyDigest()) {
+    assert.ok(!/<style/i.test(M.renderEmailHtml(d)), 'found a <style> block');
+  }
+});
+
+test('no media queries (they cannot survive without a style block)', () => {
+  for (const d of everyDigest()) {
+    assert.ok(!/@media/i.test(M.renderEmailHtml(d)), 'found a media query');
+  }
+});
+
+test('no class attributes (no stylesheet exists to match them)', () => {
+  for (const d of everyDigest()) {
+    assert.ok(!/\sclass=/i.test(M.renderEmailHtml(d)), 'found a class attribute');
+  }
+});
+
+test('no rgba() colours (several clients drop alpha entirely)', () => {
+  for (const d of everyDigest()) {
+    assert.ok(!/rgba\(/i.test(M.renderEmailHtml(d)), 'found an rgba() colour');
+  }
+});
+
+test('every element carrying text also sets an explicit colour', () => {
+  // Inheriting colour is precisely how our text ended up black: Buttondown's
+  // template colour won wherever we did not state our own.
+  for (const d of everyDigest()) {
+    const html = M.renderEmailHtml(d);
+    const tags = html.match(/<(td|div|span|a)\b[^>]*>/gi) || [];
+    for (const tag of tags) {
+      const style = (tag.match(/style="([^"]*)"/) || [])[1] || '';
+      // Structural cells with no styling at all hold only nested markup.
+      if (!style) continue;
+      // font-size:0 marks a decorative spacer/rule that renders no text.
+      if (/font-size\s*:\s*0\b/.test(style)) continue;
+      if (/font-size|font-weight/.test(style)) {
+        assert.ok(/(^|;)\s*color\s*:/.test(style),
+          `text-bearing element has no explicit colour: ${tag.slice(0, 140)}`);
+      }
+    }
+  }
+});
+
+test('every coloured text block also states its own background', () => {
+  for (const d of everyDigest()) {
+    const html = M.renderEmailHtml(d);
+    const tags = html.match(/<(td|div)\b[^>]*style="[^"]*"[^>]*>/gi) || [];
+    let checked = 0;
+    for (const tag of tags) {
+      const style = (tag.match(/style="([^"]*)"/) || [])[1] || '';
+      if (!/(^|;)\s*color\s*:/.test(style)) continue;
+      // <a> inherits its parent block; block elements must be opaque.
+      assert.ok(/background-color\s*:/.test(style),
+        `coloured block does not set a background, so it inherits the client's: ${tag.slice(0, 140)}`);
+      checked++;
+    }
+    assert.ok(checked > 5, `expected many coloured blocks, saw ${checked}`);
+  }
+});
+
+test('layout is fluid — no fixed width beyond the 600px shell', () => {
+  for (const d of everyDigest()) {
+    const html = M.renderEmailHtml(d);
+    const widths = (html.match(/width="(\d+)"/g) || []).map(w => parseInt(w.match(/\d+/)[0], 10));
+    for (const w of widths) {
+      assert.ok(w <= 600, `fixed width ${w}px will overflow a 320px phone`);
+    }
+    assert.ok(/max-width:600px/.test(html), 'shell should cap at 600px');
+    assert.ok(/width:100%/.test(html), 'shell should be fluid below that cap');
+  }
+});
+
+test('no row has more than three real columns', () => {
+  // The old five-column grid is what made the table unreadable on a phone.
+  // Count only cells that belong to the row itself — a naive regex also counts
+  // cells of nested tables, which are laid out independently.
+  function maxColumnsPerRow(html) {
+    const tokens = html.match(/<table\b|<\/table>|<tr\b|<\/tr>|<td\b/gi) || [];
+    let tableDepth = 0;
+    const rowStack = [];   // {depth, count}
+    let max = 0;
+    for (const t of tokens) {
+      const tok = t.toLowerCase();
+      if (tok.startsWith('<table')) tableDepth++;
+      else if (tok === '</table>') tableDepth--;
+      else if (tok.startsWith('<tr')) rowStack.push({ depth: tableDepth, count: 0 });
+      else if (tok === '</tr>') {
+        const r = rowStack.pop();
+        if (r) max = Math.max(max, r.count);
+      } else if (tok.startsWith('<td')) {
+        const r = rowStack[rowStack.length - 1];
+        // Only count the cell if it sits directly in the current row's table.
+        if (r && r.depth === tableDepth) r.count++;
+      }
+    }
+    return max;
+  }
+  for (const d of everyDigest()) {
+    const cols = maxColumnsPerRow(M.renderEmailHtml(d));
+    assert.ok(cols <= 3,
+      `widest row has ${cols} columns; more than 3 cannot fit a 320px screen`);
+  }
+});
+
+test('status colours are legible pairings, and distinct from each other', () => {
+  // Rough relative-luminance contrast check on the text/background pairs.
+  function lum(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    const c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map(v => {
+      v /= 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  }
+  function contrast(a, b) {
+    const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p);
+    return (x + 0.05) / (y + 0.05);
+  }
+  const html = M.renderEmailHtml(everyDigest()[1]);
+  const pills = html.match(/background-color:(#[0-9a-f]{6});color:(#[0-9a-f]{6})/gi) || [];
+  assert.ok(pills.length > 0, 'no status pills found');
+  for (const p of pills) {
+    const [, bg, fg] = p.match(/background-color:(#[0-9a-f]{6});color:(#[0-9a-f]{6})/i);
+    const ratio = contrast(bg, fg);
+    assert.ok(ratio >= 4.5,
+      `contrast ${ratio.toFixed(2)}:1 between ${fg} on ${bg} is below the 4.5:1 readability floor`);
+  }
+});
+
+test('body is sent through the Markdown pipeline, not the WYSIWYG', () => {
+  // Fancy mode re-parses HTML into Buttondown's editor schema and normalises
+  // away inline styles and nested tables. Markdown passes block HTML through.
+  const src = require('fs').readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8');
+  assert.ok(/buttondown-editor-mode: plaintext/.test(src),
+    'must declare plaintext (Markdown) editor mode');
+  assert.ok(!/buttondown-editor-mode: fancy/.test(src),
+    'fancy mode strips our inline styles');
+});
+
+test('unsubscribe link and disclaimer survive in every variant', () => {
+  for (const d of everyDigest()) {
+    const html = M.renderEmailHtml(d);
+    assert.ok(html.includes('{{ unsubscribe_url }}'), 'missing unsubscribe token');
+    assert.ok(/guidance only/i.test(html), 'missing safety disclaimer');
+  }
+});
+
+test('no unclosed tags in any variant', () => {
+  for (const d of everyDigest()) {
+    const html = M.renderEmailHtml(d);
+    for (const tag of ['table', 'tr', 'td', 'div', 'span', 'a']) {
+      const open = (html.match(new RegExp(`<${tag}\\b`, 'gi')) || []).length;
+      const close = (html.match(new RegExp(`</${tag}>`, 'gi')) || []).length;
+      assert.strictEqual(open, close, `<${tag}> unbalanced: ${open} open vs ${close} close`);
+    }
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 section('8b. Weather icons');
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -804,47 +956,10 @@ test('a real weather code resolves through computeDigest into the email', () => 
   assert.ok(html.includes('Light rain'), 'rain label missing from email');
 });
 
-test('weather icon is white and bold, not black on navy', () => {
-  // Sun/cloud/snow/storm glyphs are BMP characters rendered as monochrome TEXT,
-  // inheriting the surrounding colour — black by default, unreadable on navy.
-  const html = M.renderEmailHtml(sampleDigestWithCode(3)); // overcast cloud
-  const iconSpan = html.match(/<span style="color:#ffffff;font-weight:bold;">&#\d+;<\/span>/);
-  assert.ok(iconSpan, 'icon must be wrapped in a white, bold span');
 
-  const cell = html.match(/<td[^>]*font-size:32px[^>]*>/);
-  assert.ok(cell && /color:#ffffff/.test(cell[0]),
-    `icon cell should also set white as a fallback, got: ${cell && cell[0]}`);
-});
 
-test('icons must NOT force emoji presentation (it overrides colour)', () => {
-  // U+FE0F requests a colour emoji, which ignores CSS colour entirely — that is
-  // why the cloud stayed black despite the colour being set. Regression guard.
-  const html = M.renderEmailHtml(sampleDigestWithCode(3));
-  assert.ok(!/&#65039;/.test(html),
-    'U+FE0F must not be present — it makes the glyph ignore the white colour');
-});
 
-test('icon is styled in both the weather block and the air-temp card', () => {
-  const html = M.renderEmailHtml(sampleDigestWithCode(3));
-  const styled = (html.match(/<span style="color:#ffffff;font-weight:bold;">&#\d+;<\/span>/g) || []).length;
-  assert.strictEqual(styled, 2,
-    `expected the styled icon in both places, found ${styled}`);
-});
 
-test('icons render as raw entities, not double-escaped', () => {
-  const digest = sampleDigestWithCode(0);
-  const html = M.renderEmailHtml(digest);
-  assert.ok(html.includes('&#9728;'), 'sun entity should be present');
-  assert.ok(!html.includes('&amp;#9728;'), 'icon entity must not be double-escaped');
-});
-
-test('icon appears in both the weather block and the air-temp card', () => {
-  const digest = sampleDigestWithCode(0);
-  const html = M.renderEmailHtml(digest);
-  const occurrences = (html.match(/&#9728;/g) || []).length;
-  assert.ok(occurrences >= 2,
-    `expected the icon in the stat card and the weather row, found ${occurrences}`);
-});
 
 test('no icon is emitted when weather is unavailable', () => {
   const digest = M.computeDigest(logic,

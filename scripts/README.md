@@ -1,7 +1,8 @@
 # Daily Conditions Email
 
 Sends a daily digest of rowing status, boat restrictions, river level, and
-weather to subscribers at **4:00 AM Eastern**, every day.
+weather to subscribers at **1:00 AM Eastern**, so it is in inboxes well before
+anyone leaves for a dawn practice.
 
 ## Why this can't disagree with the website
 
@@ -18,8 +19,8 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (29 tests) |
-| `../.github/workflows/daily_email.yml` | 4 AM ET schedule |
+| `test_daily_email.js` | Test suite (74 tests) |
+| `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
 
 ## Rowing season
 
@@ -38,20 +39,44 @@ Both endpoints are **inclusive**: March 15 and November 15 each get an email;
 March 14 and November 16 do not.
 
 Dates are evaluated in `America/New_York`, not UTC. This matters because the job
-fires at 08:00/09:00 UTC — on November 15 that is still the 15th locally, but a
+fires at 05:00/06:00 UTC — on November 15 that is still the 15th locally, but a
 UTC comparison would read the 16th and end the season a day early. A range that
 wraps the new year (e.g. Nov 1 → Mar 31) is also supported.
 
 Change those four numbers to whatever the committee decides; nothing else needs
 editing. Previews still work off-season, so you can check the email year-round.
 
+## Email rendering rules (read before editing the template)
+
+Buttondown's free plan **wraps our content inside its own email template** —
+"naked mode", which gives full document control, is Professional-only. That
+constraint drives the whole design:
+
+| Rule | Why |
+|---|---|
+| Emit a **fragment**, never `<!DOCTYPE>`/`<html>`/`<head>` | Nesting a document inside their `<body>` makes clients discard our `<head>`, taking every `<style>` rule with it |
+| **No `<style>` blocks, no media queries, no classes** | They live in `<head>`, so they cannot survive |
+| **100% inline styles** | The only thing that reliably survives |
+| **Light palette, dark text** | Clients that force dark mode often invert backgrounds without inverting inline-coloured text, which leaves white text on white |
+| **Every text container sets both `color` and `background-color`** | Inheriting is how our text ended up black on their background |
+| **No `rgba()`** | Several clients drop alpha colours entirely |
+| **Max three columns per row** | A five-column grid is unreadable at 320px |
+| Send as **`plaintext`** editor mode, not `fancy` | Fancy re-parses HTML through a WYSIWYG schema that normalises away inline styles and nested tables |
+
+All of these are enforced by tests (section 8a2). If you break one, the suite
+fails rather than the email quietly rendering wrong on somebody's phone.
+
+To inspect the result visually at several widths, under a simulated Buttondown
+wrapper and forced dark mode, regenerate the harness — see the git history for
+`nhrc_email_compat_harness.html`.
+
 ## Club logo in the email
 
 Email clients do **not** render SVG — Gmail, Outlook and Apple Mail all block or
 fail on it. So the email uses `nhrc_email_logo.png`, generated from
-`NHRC_logo.svg` with the same white circle and gold ring the website header
-uses, baked onto the header's navy background (the logo's dark strokes would be
-invisible against navy otherwise).
+`NHRC_logo.svg` with the same white circle and gold ring the website header uses, on a WHITE
+surround matching the email card (the email is a light design for dark-mode
+safety).
 
 The image is referenced by absolute URL — mail clients can't read repo files —
 and is served by GitHub Pages from `https://roworno.com/nhrc_email_logo.png`
@@ -74,7 +99,7 @@ convert -density 600 -background none NHRC_logo.svg -trim +repage \
 convert -size ${SIZE}x${SIZE} xc:none -fill white -stroke '#f0b429' -strokewidth 6 \
         -draw "circle $((SIZE/2)),$((SIZE/2)) $((SIZE/2)),4" /tmp/circle.png
 convert /tmp/circle.png /tmp/logo_inner.png -gravity center -composite \
-        -background '#0d1f3c' -alpha remove -alpha off nhrc_email_logo.png
+        -background '#ffffff' -alpha remove -alpha off nhrc_email_logo.png
 ```
 
 ## Subscriber limit
@@ -110,8 +135,9 @@ node scripts/test_daily_email.js      # run the tests
 2. **Get the API key** from https://buttondown.com/settings/programming.
 3. **Add it as a GitHub secret** named `BUTTONDOWN_API_KEY` under
    Settings → Secrets and variables → Actions → New repository secret.
-4. **Update the subscribe link** in `index.html` — search for
-   `REPLACE_WITH_YOUR_USERNAME` and swap in the real Buttondown URL.
+4. **Subscribe form** — already wired to the `gurpinar` account in
+   `index.html`, using Buttondown's public embed endpoint (no API key in
+   frontend code).
 5. **Test before going live**: Actions tab → Daily Conditions Email →
    Run workflow, leaving "dry run" checked. This builds the email and runs the
    tests without sending anything.
@@ -120,10 +146,20 @@ node scripts/test_daily_email.js      # run the tests
 
 ## Scheduling note
 
-GitHub Actions cron is UTC-only, so the workflow triggers at both 08:00 and
-09:00 UTC and the job checks whether it is currently the 4 AM hour in
-`America/New_York`. Exactly one of the two fires on any given day, including
-across daylight-saving transitions.
+GitHub Actions cron is UTC-only, so the workflow triggers at both 05:00 and
+06:00 UTC (1 AM Eastern in summer and winter respectively) and the job proceeds
+when the Eastern hour is between 1 and 4.
+
+The window is wide because GitHub's scheduled runs are routinely delayed by tens
+of minutes on shared runners. It previously required exactly 4 AM, so a late
+start skipped the day's email silently while still reporting success — that is
+why no email arrived on 6 August.
+
+Duplicates are impossible: each email carries a per-day slug
+(`nhrc-YYYY-MM-DD`, keyed to the Eastern date) that Buttondown rejects as a
+conflict, so the twin cron, a delayed run and a manual retry all collapse to one
+email. The window deliberately ends before 5 AM — a digest arriving later is no
+use to someone already at the boathouse.
 
 ## Safety behaviour
 
@@ -134,3 +170,5 @@ across daylight-saving transitions.
 - If NOAA is unreachable, the email says the river level is unavailable rather
   than showing a stale or invented number.
 - Every email carries the "verify at the boathouse" disclaimer.
+- The subject line is derived from the actual combined boat statuses, so it can
+  never read "all clear" while the river restricts boats.

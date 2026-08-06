@@ -94,10 +94,11 @@ const SUBSCRIBER_FREE_LIMIT = 100;
 // Club logo
 // ─────────────────────────────────────────────────────────────────────────────
 // Email clients do NOT render SVG (Gmail, Outlook and Apple Mail all block or
-// fail on it), so the email uses a PNG rendered from NHRC_logo.svg. It is baked
-// onto the header's navy background with the same white circle and gold ring the
-// website header uses, because the logo's dark strokes would be invisible
-// against the navy otherwise.
+// fail on it), so the email uses a PNG rendered from NHRC_logo.svg, on the same
+// white circle with a gold ring that the website header uses. The surround is
+// baked to WHITE to match the email card — the email is a light design, because
+// clients that force dark mode frequently invert backgrounds without inverting
+// inline-coloured text, which left the old dark version unreadable.
 //
 // The image must be referenced by absolute URL — mail clients cannot read files
 // from the repo. It is served by GitHub Pages from the site root once merged.
@@ -437,217 +438,226 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 4. Render the email (matches the approved mockup template)
+// 4. Render the email
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// HARD CONSTRAINTS — read before changing anything here.
+//
+// 1. THIS MUST BE A FRAGMENT, NOT A DOCUMENT.
+//    Buttondown's free plan wraps our content inside its own email template
+//    ("naked mode", which gives full document control, is Professional-only).
+//    Emitting <!DOCTYPE>/<html>/<head> nests a document inside their <body>;
+//    clients then discard our <head>, taking every <style> rule with it, and
+//    Buttondown's template CSS colours our text instead. That is exactly what
+//    produced black tier labels and white-on-grey weather text.
+//
+// 2. NO <style> BLOCKS AND NO MEDIA QUERIES.
+//    They live in <head>, so per (1) they cannot be relied on. Every rule here
+//    is an inline style attribute, and the layout must work at any width
+//    without a breakpoint.
+//
+// 3. LIGHT PALETTE, DARK TEXT.
+//    A dark design is fragile: clients that force dark mode often invert
+//    backgrounds but not inline-coloured text, leaving white text on white.
+//    A light design degrades safely — inverted it becomes light text on dark,
+//    which is still legible. Brand colour comes from the logo and gold accents
+//    rather than large dark fills.
+//
+// 4. EVERY TEXT CONTAINER SETS BOTH color AND background-color.
+//    Never inherit either. Inheriting is how our text ended up on Buttondown's
+//    background.
+//
+// 5. NO rgba() — several clients drop alpha colours entirely.
+//
+// These rules are enforced by tests in test_daily_email.js.
+
+const C = {
+  page:      '#eef1f6',
+  card:      '#ffffff',
+  border:    '#d8dfe9',
+  ink:       '#16233b',  // primary text
+  inkSoft:   '#5a6b85',  // secondary text
+  rule:      '#f0b429',  // gold accent (borders/fills only — too light for text)
+  label:     '#8a6400',  // dark gold, readable as text on white
+  goBg:      '#e4f4ea', goText:      '#14622f', goBorder:      '#a9d8bd',
+  cautionBg: '#fdf2d8', cautionText: '#7a5600', cautionBorder: '#e6c66a',
+  noBg:      '#fdeaea', noText:      '#96201f', noBorder:      '#e8a3a3',
+};
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+const STATUS_STYLE = {
+  go:      { bg: C.goBg,      text: C.goText,      border: C.goBorder },
+  caution: { bg: C.cautionBg, text: C.cautionText, border: C.cautionBorder },
+  no:      { bg: C.noBg,      text: C.noText,      border: C.noBorder },
+};
+
 function statusPill(status, label) {
-  // Solid backgrounds rather than rgba(): several mail clients drop alpha
-  // colours, which left pills unreadable on some phones.
-  const styles = {
-    no:      'background:#3d1b1f;color:#ff8a8a;',
-    caution: 'background:#3d3418;color:#ffd166;',
-    go:      'background:#123528;color:#6fe0a4;',
-  };
-  return `<span class="bd-pill bd-nowrap" style="display:inline-block;${styles[status] || styles.go}font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;">${esc(label)}</span>`;
+  const s = STATUS_STYLE[status] || STATUS_STYLE.go;
+  return `<span style="display:inline-block;background-color:${s.bg};color:${s.text};` +
+    `border:1px solid ${s.border};font-size:12px;font-weight:bold;padding:3px 10px;` +
+    `border-radius:12px;white-space:nowrap;">${esc(label)}</span>`;
+}
+
+/** A section heading: small dark-gold label above a block. */
+function sectionLabel(text) {
+  return `<div style="font-size:11px;font-weight:bold;letter-spacing:0.08em;` +
+    `text-transform:uppercase;color:${C.label};background-color:${C.card};` +
+    `padding:0 0 8px 0;">${esc(text)}</div>`;
 }
 
 function renderEmailHtml(d) {
-  const boatCols = ['1x / 2-', '2x', '4+ / 4-', '4x / 8+'];
+  const PAD = 20; // modest padding so 320px screens still have room
 
+  // ── Warnings ───────────────────────────────────────────────────────────────
   const warnings = [];
   if (d.sensorStale) {
     const hrs = Math.floor(d.sensorAgeMs / 3600000);
     warnings.push(`<strong>Water sensor may be offline.</strong> No new reading in ${hrs}+ hours — the temperature below is the last known value. Verify against the thermometer at the dock.`);
   }
   if (d.river.failed) {
-    warnings.push(`<strong>River level unavailable.</strong> NOAA data could not be retrieved, so flood restrictions are not reflected below. Check water.noaa.gov/gauges/stvc3 before launching.`);
+    warnings.push(`<strong>River level unavailable.</strong> NOAA data could not be retrieved, so flood restrictions are not reflected below. Check the gauge before launching.`);
   } else if (d.river.stale) {
     const days = d.river.ageMs !== null ? Math.floor(d.river.ageMs / 86400000) : null;
-    warnings.push(`<strong>River gauge data is stale.</strong> NOAA's observed reading hasn't updated in ${days !== null ? days + ' day' + (days === 1 ? '' : 's') : 'an extended period'}. The level below is estimated from NOAA's forecast model, not a live sensor.`);
+    warnings.push(`<strong>River gauge data is stale.</strong> NOAA's observed reading hasn't updated in ${days !== null ? days + ' day' + (days === 1 ? '' : 's') : 'an extended period'}. The level below is estimated from NOAA's forecast, not a live sensor.`);
   }
 
-  const warningHtml = warnings.map(w => `
-            <tr><td class="bd-pad" style="padding:16px 28px 0;">
-              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:rgba(224,62,62,0.1);border:1px solid rgba(224,62,62,0.35);border-radius:10px;">
-                <tr><td style="padding:12px 14px;font-size:12px;color:#f07070;line-height:1.5;">${w}</td></tr>
-              </table>
-            </td></tr>`).join('');
+  const warningHtml = warnings.map(w =>
+    `<tr><td style="padding:0 ${PAD}px 12px ${PAD}px;background-color:${C.card};">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+        <tr><td style="background-color:${C.noBg};border:1px solid ${C.noBorder};border-radius:8px;padding:12px 14px;font-size:13px;line-height:1.5;color:${C.noText};font-family:Arial,Helvetica,sans-serif;">${w}</td></tr>
+      </table>
+    </td></tr>`).join('');
 
-  // Tier names are shortened on the phone-width layout — "Tier 2 — Intermediate"
-  // is what forced the row to wrap and made the table look scrambled.
-  const tierRows = d.rows.map((tier, i) => {
-    const last = i === d.rows.length - 1;
-    const border = last ? '' : 'border-bottom:1px solid rgba(255,255,255,0.05);';
-    const cells = boatCols.map(col => {
-      const boat = tier.boats.find(b => b.name === col);
-      return `<td class="bd-cell" style="padding:10px 12px;${border}" align="center">${boat ? statusPill(boat.status, boat.label) : '<span style="color:#7a93b4;font-size:11px;">—</span>'}</td>`;
+  // ── Zone banner ────────────────────────────────────────────────────────────
+  const zoneStyle = d.zone === 'normal' ? STATUS_STYLE.go
+    : (d.zone === 'winter' ? STATUS_STYLE.no : STATUS_STYLE.caution);
+
+  // ── Key numbers ────────────────────────────────────────────────────────────
+  const riverStr = d.river.level !== null ? d.river.level.toFixed(1) + ' ft' : '--';
+  const airStr = d.weather.available ? d.weather.tempF + '°F' : '--';
+  const stat = (label, value) =>
+    `<td width="33%" align="center" style="background-color:${C.page};border:1px solid ${C.border};` +
+    `border-radius:8px;padding:10px 4px;font-family:Arial,Helvetica,sans-serif;">
+       <div style="font-size:10px;letter-spacing:0.06em;text-transform:uppercase;color:${C.inkSoft};background-color:${C.page};white-space:nowrap;">${esc(label)}</div>
+       <div style="font-size:17px;font-weight:bold;color:${C.ink};background-color:${C.page};white-space:nowrap;padding-top:3px;">${esc(value)}</div>
+     </td>`;
+
+  // ── Boat restrictions ──────────────────────────────────────────────────────
+  // One block per tier, each a two-column list. The previous five-column grid
+  // could not fit a phone: labels wrapped mid-token and the table became
+  // unreadable. Two columns cannot collapse no matter how narrow the screen.
+  const tierBlocks = d.rows.map(tier => {
+    const rows = tier.boats.map((b, i) => {
+      const line = i === tier.boats.length - 1 ? '' : `border-bottom:1px solid ${C.border};`;
+      const note = b.note ? `<div style="font-size:11px;color:${C.inkSoft};background-color:${C.card};padding-top:2px;">${esc(b.note)}</div>` : '';
+      return `<tr>
+        <td style="padding:8px 0;${line}font-size:14px;color:${C.ink};background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">${esc(b.name)}${note}</td>
+        <td align="right" style="padding:8px 0;${line}background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">${statusPill(b.status, b.label)}</td>
+      </tr>`;
     }).join('');
-    const short = tier.name.split('—').pop().trim();
-    const num = (tier.name.match(/Tier\s*(\d)/) || [])[1] || '';
-    return `<tr><td class="bd-tiername bd-white" style="padding:10px 12px;font-size:13px;color:#ffffff;${border}">` +
-      `<span class="bd-nowrap">${esc(`T${num} ${short}`)}</span></td>${cells}</tr>`;
+    return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin-bottom:14px;">
+      <tr><td colspan="2" style="padding:0 0 4px 0;font-size:13px;font-weight:bold;color:${C.ink};background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">${esc(tier.name)}</td></tr>
+      ${rows}
+    </table>`;
   }).join('');
 
-  const headerCells = boatCols.map(c =>
-    `<td class="bd-cell bd-muted bd-nowrap" style="padding:10px 12px;font-size:11px;color:#7a93b4;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid rgba(255,255,255,0.08);white-space:nowrap;" align="center">${esc(c)}</td>`
-  ).join('');
-
-  const riverStr = d.river.level !== null ? d.river.level.toFixed(1) : '--';
   const riverNote = d.floodSummary
-    ? `River at ${riverStr} ft — ${esc(d.floodSummary.text)}.`
+    ? `River at ${riverStr} — ${esc(d.floodSummary.text)}.`
     : (d.river.level === null ? 'River level unavailable — flood restrictions not applied.' : '');
 
-  // The icon is a controlled HTML entity from our own WMO map, so it is
-  // intentionally NOT escaped — everything derived from the API still is.
-  //
-  // Several of these glyphs (sun, cloud, snowflake, thunderstorm) live in the
-  // BMP and render as monochrome TEXT, inheriting the surrounding colour —
-  // black by default, i.e. unreadable on our navy background.
-  //
-  // We deliberately do NOT append U+FE0F here: that requests colour-emoji
-  // presentation, and a colour emoji ignores CSS colour entirely, so the glyph
-  // stayed dark whatever we set. Keeping it as text presentation means the
-  // explicit white below actually applies. The span (rather than styling the
-  // cell) is because mail clients strip <td> colour far more often than <span>.
-  const rawIcon = d.weather.available ? (d.weather.icon || DEFAULT_WEATHER_ICON) : '';
-  const weatherIcon = rawIcon
-    ? `<span style="color:#ffffff;font-weight:bold;">${rawIcon}</span>` : '';
+  // ── Weather ────────────────────────────────────────────────────────────────
+  // The icon is a controlled entity from our own map, so it is not escaped.
+  // It renders as dark text on a light card, which needs no colour trickery:
+  // the earlier white-on-navy version was invisible whenever the background
+  // failed to apply.
+  const weatherBlock = d.weather.available
+    ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+         <tr>
+           <td style="font-size:26px;line-height:1;padding-right:12px;vertical-align:top;color:${C.ink};background-color:${C.card};">${d.weather.icon || ''}</td>
+           <td style="vertical-align:top;font-family:Arial,Helvetica,sans-serif;background-color:${C.card};">
+             <div style="font-size:14px;font-weight:bold;color:${C.ink};background-color:${C.card};">${esc(d.weather.cond)}, ${d.weather.tempF}°F</div>
+             <div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};padding-top:3px;">Feels like ${d.weather.feelsF}°F &nbsp;&middot;&nbsp; Wind ${d.weather.windMph} mph ${esc(d.weather.dir)}, gusts ${d.weather.gustMph} mph</div>
+             <div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};padding-top:2px;">Precipitation ${esc(d.weather.precip)} in</div>
+           </td>
+         </tr>
+       </table>`
+    : `<div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">Weather data unavailable this morning.</div>`;
 
-  const weatherRow = d.weather.available
-    ? `<table role="presentation" cellpadding="0" cellspacing="0"><tr>
-                <td class="bd-icon bd-white" style="font-size:32px;line-height:1;padding-right:14px;vertical-align:middle;color:#ffffff;">${weatherIcon}</td>
-                <td style="vertical-align:middle;font-size:13px;color:#ffffff;line-height:1.6;">
-                  <strong>${esc(d.weather.cond)}</strong>, ${d.weather.tempF}°F (feels like ${d.weather.feelsF}°F)<br/>
-                  <span style="color:#7a93b4;">Wind ${d.weather.windMph} mph ${esc(d.weather.dir)}, gusts ${d.weather.gustMph} mph &nbsp;·&nbsp; Precip ${esc(d.weather.precip)} in</span>
-                </td>
-              </tr></table>`
-    : 'Weather data unavailable this morning.';
+  // ── Assemble ───────────────────────────────────────────────────────────────
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background-color:${C.page};">
+  <tr><td align="center" style="padding:16px 8px;background-color:${C.page};">
+    <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%;max-width:600px;background-color:${C.card};border:1px solid ${C.border};border-radius:10px;">
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<meta name="format-detection" content="telephone=no,date=no,address=no,email=no"/>
-<!-- Declaring support for both schemes stops iOS Mail and Outlook from
-     "helpfully" re-colouring this email. Without it they invert our navy
-     palette and the white text lands on a near-white background. -->
-<meta name="color-scheme" content="light dark"/>
-<meta name="supported-color-schemes" content="light dark"/>
-<title>NHRC Daily Conditions</title>
-<style>
-  :root { color-scheme: light dark; supported-color-schemes: light dark; }
-  /* Stop iOS inflating font sizes, which was pushing the boat table out of shape. */
-  body, table, td, div, span, a { -webkit-text-size-adjust:100%; -ms-text-size-adjust:100%; }
-  table { border-collapse:collapse; mso-table-lspace:0pt; mso-table-rspace:0pt; }
-  img { -ms-interpolation-mode:bicubic; border:0; outline:none; text-decoration:none; }
-
-  /* Pin our own colours so a client's dark-mode pass cannot repaint them. */
-  @media (prefers-color-scheme: dark) {
-    .bd-page   { background:#eef1f6 !important; }
-    .bd-card   { background:#0d1f3c !important; }
-    .bd-panel  { background:#162d52 !important; }
-    .bd-white  { color:#ffffff !important; }
-    .bd-muted  { color:#7a93b4 !important; }
-    .bd-gold   { color:#f0b429 !important; }
-  }
-
-  /* Phones: the boat table is five columns wide and was the main casualty of
-     the desktop padding and font sizes. */
-  @media only screen and (max-width:480px) {
-    .bd-pad      { padding-left:14px !important; padding-right:14px !important; }
-    .bd-cell     { padding:8px 3px !important; font-size:11px !important; }
-    .bd-tiername { padding:8px 4px !important; font-size:11px !important; }
-    .bd-pill     { font-size:10px !important; padding:3px 6px !important; }
-    .bd-statval  { font-size:17px !important; }
-    .bd-statlbl  { font-size:9px !important; }
-    .bd-title    { font-size:16px !important; }
-    .bd-icon     { font-size:26px !important; padding-right:10px !important; }
-    .bd-nowrap   { white-space:nowrap !important; }
-  }
-</style>
-</head>
-<body class="bd-page" style="margin:0;padding:0;background:#eef1f6;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;">
-  <table role="presentation" class="bd-page" width="100%" cellpadding="0" cellspacing="0" style="background:#eef1f6;padding:24px 0;">
-    <tr><td align="center">
-      <table role="presentation" width="600" cellpadding="0" cellspacing="0" class="bd-card" style="max-width:600px;width:100%;background:#0d1f3c;border-radius:14px;overflow:hidden;">
-
-        <tr><td class="bd-pad" style="padding:26px 28px 20px;border-bottom:1px solid rgba(240,180,41,0.2);">
-          <table role="presentation" cellpadding="0" cellspacing="0"><tr>
-            <td style="width:56px;vertical-align:middle;"><img src="${LOGO_URL}" width="56" height="56" alt="NHRC" style="display:block;width:56px;height:56px;border:0;outline:none;text-decoration:none;"/></td>
-            <td style="padding-left:14px;">
-              <div class="bd-title bd-gold" style="font-family:Georgia,serif;font-size:18px;font-weight:700;color:#f0b429;">New Haven Rowing Club</div>
-              <div style="font-size:11px;letter-spacing:0.05em;text-transform:uppercase;color:#7a93b4;margin-top:3px;">Daily Conditions Report</div>
-              <div style="font-size:11px;color:#7a93b4;margin-top:2px;">${esc(d.dateLabel)} · ${esc(d.timeLabel)} ${esc(d.tz)}</div>
+      <tr><td style="padding:${PAD}px ${PAD}px 14px ${PAD}px;background-color:${C.card};">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+          <tr>
+            <td width="52" style="vertical-align:middle;background-color:${C.card};"><img src="${LOGO_URL}" width="52" height="52" alt="NHRC" style="display:block;width:52px;height:52px;border:0;"/></td>
+            <td style="padding-left:12px;vertical-align:middle;background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">
+              <div style="font-size:17px;font-weight:bold;color:${C.ink};background-color:${C.card};">New Haven Rowing Club</div>
+              <div style="font-size:11px;letter-spacing:0.06em;text-transform:uppercase;color:${C.inkSoft};background-color:${C.card};padding-top:2px;">Daily Conditions</div>
+              <div style="font-size:12px;color:${C.inkSoft};background-color:${C.card};padding-top:2px;">${esc(d.dateLabel)}</div>
             </td>
-          </tr></table>
-        </td></tr>
+          </tr>
+        </table>
+      </td></tr>
+
+      <tr><td style="padding:0 ${PAD}px;background-color:${C.card};"><div style="height:3px;line-height:3px;font-size:0;background-color:${C.rule};">&nbsp;</div></td></tr>
+
+      <tr><td style="padding:16px ${PAD}px 12px ${PAD}px;background-color:${C.card};">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+          <tr><td style="background-color:${zoneStyle.bg};border:1px solid ${zoneStyle.border};border-radius:8px;padding:12px 14px;font-size:15px;font-weight:bold;color:${zoneStyle.text};font-family:Arial,Helvetica,sans-serif;">${esc(d.zoneLabel)}</td></tr>
+        </table>
+      </td></tr>
+
 ${warningHtml}
-        <tr><td class="bd-pad" style="padding:20px 28px 0;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${d.zoneColor.bg};border:1px solid ${d.zoneColor.border};border-radius:10px;">
-            <tr><td style="padding:14px 16px;font-size:14px;font-weight:700;color:${d.zoneColor.text};">${esc(d.zoneLabel)}</td></tr>
-          </table>
-        </td></tr>
 
-        <tr><td class="bd-pad" style="padding:16px 28px 0;">
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-            <td width="33%" class="bd-panel" style="background:#162d52;border-radius:10px;padding:12px;" align="center">
-              <div class="bd-statlbl bd-muted" style="font-size:10px;letter-spacing:0.07em;text-transform:uppercase;color:#7a93b4;">Water Temp</div>
-              <div class="bd-statval bd-white" style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${d.tempF.toFixed(1)}°F</div>
-            </td>
-            <td width="4"></td>
-            <td width="33%" class="bd-panel" style="background:#162d52;border-radius:10px;padding:12px;" align="center">
-              <div class="bd-statlbl bd-muted" style="font-size:10px;letter-spacing:0.07em;text-transform:uppercase;color:#7a93b4;">River Level</div>
-              <div class="bd-statval bd-white" style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${riverStr} <span style="font-size:12px;color:#7a93b4;">ft</span></div>
-            </td>
-            <td width="4"></td>
-            <td width="33%" class="bd-panel" style="background:#162d52;border-radius:10px;padding:12px;" align="center">
-              <div class="bd-statlbl bd-muted" style="font-size:10px;letter-spacing:0.07em;text-transform:uppercase;color:#7a93b4;">Air Temp</div>
-              <div class="bd-statval bd-white" style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${d.weather.available ? weatherIcon + ' ' + d.weather.tempF + '°F' : '--'}</div>
-            </td>
-          </tr></table>
-        </td></tr>
+      <tr><td style="padding:0 ${PAD}px 16px ${PAD}px;background-color:${C.card};">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;border-spacing:4px 0;">
+          <tr>
+            ${stat('Water', d.tempF.toFixed(1) + '°F')}
+            ${stat('River', riverStr)}
+            ${stat('Air', airStr)}
+          </tr>
+        </table>
+      </td></tr>
 
-        <tr><td class="bd-pad" style="padding:22px 28px 0;">
-          <div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#f0b429;margin-bottom:10px;">Rowing Status — Boat Restrictions</div>
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="bd-panel" style="background:#162d52;border-radius:10px;border-collapse:separate;">
-            <tr><td style="padding:10px 12px;font-size:11px;color:#7a93b4;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid rgba(255,255,255,0.08);">Tier</td>${headerCells}</tr>
-            ${tierRows}
-          </table>
-          ${riverNote ? `<div style="font-size:11px;color:#7a93b4;margin-top:8px;line-height:1.5;">${riverNote}</div>` : ''}
-        </td></tr>
+      <tr><td style="padding:0 ${PAD}px 8px ${PAD}px;background-color:${C.card};">
+        ${sectionLabel('Boat restrictions')}
+        ${tierBlocks}
+        ${riverNote ? `<div style="font-size:12px;color:${C.inkSoft};background-color:${C.card};line-height:1.5;font-family:Arial,Helvetica,sans-serif;">${riverNote}</div>` : ''}
+      </td></tr>
 
-        <tr><td class="bd-pad" style="padding:22px 28px 0;">
-          <div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#f0b429;margin-bottom:10px;">Weather — Oxford, CT</div>
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="bd-panel" style="background:#162d52;border-radius:10px;">
-            <tr><td style="padding:14px 16px;font-size:13px;color:#ffffff;">${weatherRow}</td></tr>
-          </table>
-        </td></tr>
+      <tr><td style="padding:8px ${PAD}px 16px ${PAD}px;background-color:${C.card};">
+        ${sectionLabel('Weather — Oxford, CT')}
+        ${weatherBlock}
+      </td></tr>
 
-        <tr><td class="bd-pad" style="padding:22px 28px 0;" align="center">
-          <a href="https://roworno.com" style="display:inline-block;background:#f0b429;color:#0d1f3c;font-weight:700;font-size:13px;text-decoration:none;padding:11px 22px;border-radius:8px;">View full conditions &amp; navigation map →</a>
-        </td></tr>
+      <tr><td align="center" style="padding:0 ${PAD}px 20px ${PAD}px;background-color:${C.card};">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+          <tr><td style="background-color:${C.rule};border-radius:6px;padding:11px 20px;font-family:Arial,Helvetica,sans-serif;">
+            <a href="https://roworno.com" style="font-size:14px;font-weight:bold;color:${C.ink};text-decoration:none;">View full conditions &amp; river map</a>
+          </td></tr>
+        </table>
+      </td></tr>
 
-        <tr><td class="bd-pad" style="padding:26px 28px 24px;">
-          <div style="border-top:1px solid rgba(255,255,255,0.08);margin-top:6px;padding-top:16px;font-size:11px;color:#7a93b4;line-height:1.6;text-align:center;">
-            Conditions are provided for guidance only — always verify at the boathouse before launching.<br/>
-            New Haven Rowing Club · 407 Roosevelt Drive, Oxford, CT 06478<br/>
-            <a href="{{ unsubscribe_url }}" style="color:#7a93b4;text-decoration:underline;">Unsubscribe</a> &nbsp;·&nbsp; <a href="https://roworno.com" style="color:#7a93b4;text-decoration:underline;">roworno.com</a>
-          </div>
-        </td></tr>
+      <tr><td style="padding:14px ${PAD}px 18px ${PAD}px;background-color:${C.page};border-top:1px solid ${C.border};">
+        <div style="font-size:11px;line-height:1.6;color:${C.inkSoft};background-color:${C.page};text-align:center;font-family:Arial,Helvetica,sans-serif;">
+          Conditions are guidance only — always verify at the boathouse before launching.<br/>
+          New Haven Rowing Club &middot; 407 Roosevelt Drive, Oxford, CT 06478<br/>
+          <a href="{{ unsubscribe_url }}" style="color:${C.inkSoft};text-decoration:underline;">Unsubscribe</a>
+          &nbsp;&middot;&nbsp;
+          <a href="https://roworno.com" style="color:${C.inkSoft};text-decoration:underline;">roworno.com</a>
+        </div>
+      </td></tr>
 
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
+    </table>
+  </td></tr>
+</table>`;
 }
-
 /**
  * Builds the subject line.
  *
@@ -734,9 +744,12 @@ async function sendViaButtondown(subject, bodyHtml, now = new Date()) {
   const key = process.env.BUTTONDOWN_API_KEY;
   if (!key) throw new Error('BUTTONDOWN_API_KEY is not set');
 
-  // "fancy" mode tells Buttondown to treat the body as rich HTML rather than
-  // Markdown, which is required for this table-based email template.
-  const body = '<!-- buttondown-editor-mode: fancy -->' + bodyHtml;
+  // NOT "fancy" mode. Fancy is Buttondown's WYSIWYG: it re-parses submitted
+  // HTML into its own editor schema, which normalises away inline styles and
+  // nested table markup it does not model — that is what stripped our colours
+  // and backgrounds. "plaintext" is the Markdown pipeline, and raw block HTML
+  // passes through Markdown untouched, which is what this template needs.
+  const body = '<!-- buttondown-editor-mode: plaintext -->\n\n' + bodyHtml;
   const slug = dailySlug(now);
 
   const res = await fetch('https://api.buttondown.com/v1/emails', {
