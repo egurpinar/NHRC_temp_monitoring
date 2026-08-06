@@ -497,12 +497,19 @@ function renderEmailHtml(d) {
 
   // The icon is a controlled HTML entity from our own WMO map, so it is
   // intentionally NOT escaped — everything derived from the API still is.
+  //
+  // Several of these glyphs (sun, cloud, snowflake, thunderstorm) live in the
+  // BMP and default to monochrome TEXT presentation, which inherits the
+  // surrounding text colour — black by default, i.e. invisible on our navy
+  // background. Appending U+FE0F requests colour emoji presentation, and the
+  // containing cell sets an explicit light colour so the glyph is still legible
+  // in clients that ignore the variation selector and render it as text.
   const weatherIcon = d.weather.available
-    ? (d.weather.icon || DEFAULT_WEATHER_ICON) : '';
+    ? (d.weather.icon || DEFAULT_WEATHER_ICON) + '&#65039;' : '';
 
   const weatherRow = d.weather.available
     ? `<table role="presentation" cellpadding="0" cellspacing="0"><tr>
-                <td style="font-size:32px;line-height:1;padding-right:14px;vertical-align:middle;">${weatherIcon}</td>
+                <td style="font-size:32px;line-height:1;padding-right:14px;vertical-align:middle;color:#ffd166;">${weatherIcon}</td>
                 <td style="vertical-align:middle;font-size:13px;color:#ffffff;line-height:1.6;">
                   <strong>${esc(d.weather.cond)}</strong>, ${d.weather.tempF}°F (feels like ${d.weather.feelsF}°F)<br/>
                   <span style="color:#7a93b4;">Wind ${d.weather.windMph} mph ${esc(d.weather.dir)}, gusts ${d.weather.gustMph} mph &nbsp;·&nbsp; Precip ${esc(d.weather.precip)} in</span>
@@ -589,15 +596,61 @@ ${warningHtml}
 </html>`;
 }
 
-function renderSubject(d) {
-  const short = {
-    winter: 'Winter Rowing', fourOar: 'Four Oar Rule',
-    coldWater: 'Cold Water', normal: 'Normal conditions',
-  }[d.zone] || d.zone;
-  const dateShort = new Date().toLocaleDateString('en-US', {
+/**
+ * Builds the subject line.
+ *
+ * SAFETY: the headline is derived from the ACTUAL combined boat statuses
+ * (temperature AND flood restrictions), never from the temperature zone alone.
+ * The zone only describes water temperature, so a subject built from it would
+ * read "Normal conditions" while the river was at 13 ft and nobody could row —
+ * exactly the kind of thing someone skims at 4am before driving to the
+ * boathouse. The subject must never be less restrictive than the email body.
+ */
+function renderSubject(d, now = new Date()) {
+  const ZONE_SHORT = {
+    winter: 'Winter Rowing', fourOar: 'Four Oar Rule', coldWater: 'Cold Water',
+  };
+
+  const boats = d.rows.flatMap(r => r.boats);
+  const allNo      = boats.length > 0 && boats.every(b => b.status === 'no');
+  const anyNo      = boats.some(b => b.status === 'no');
+  const anyCaution = boats.some(b => b.status === 'caution');
+
+  // Does the river level alone restrict anything? (getFloodStatus starts
+  // cautioning 1x/2- above 8 ft.)
+  const floodRestricts = d.river.level !== null && d.river.level > 8;
+
+  const causes = [];
+  if (ZONE_SHORT[d.zone]) causes.push(ZONE_SHORT[d.zone]);
+  if (floodRestricts) causes.push('high river');
+
+  // With no river reading, flood rules cannot be applied — so every boat shows
+  // clear purely because the data is missing. Saying "All boats clear" there
+  // would assert a safety conclusion we have not actually verified.
+  const riverUnknown = d.river.failed || d.river.level === null;
+
+  let headline;
+  if (allNo) {
+    headline = 'ALL BOATS RESTRICTED';
+  } else if (causes.length) {
+    headline = causes.join(' + ');
+  } else if (anyNo || anyCaution) {
+    headline = 'Some boats restricted';
+  } else if (riverUnknown) {
+    headline = 'Check river level';
+  } else {
+    headline = 'All boats clear';
+  }
+
+  const dateShort = now.toLocaleDateString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric',
   });
-  return `NHRC ${dateShort} — ${short} · ${d.tempF.toFixed(1)}°F water`;
+
+  const riverPart = d.river.failed || d.river.level === null
+    ? 'river n/a'
+    : `river ${d.river.level.toFixed(1)} ft${d.river.isEstimate ? ' est.' : ''}`;
+
+  return `NHRC ${dateShort} — ${headline} · ${d.tempF.toFixed(1)}°F · ${riverPart}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
