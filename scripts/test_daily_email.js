@@ -554,12 +554,91 @@ test('escapes HTML to prevent injection from upstream data', () => {
   assert.ok(html.includes('&lt;script&gt;'), 'should be escaped');
 });
 
-test('subject line reflects zone and temperature', () => {
+test('subject line includes club, temperature and river level', () => {
   const d = sampleDigest();
   const s = M.renderSubject(d);
   assert.ok(s.includes('NHRC'), s);
   assert.ok(s.includes('72.4'), s);
-  assert.ok(/Normal conditions|Cold Water|Four Oar|Winter/.test(s), s);
+  assert.ok(/river/.test(s), `subject must surface the river level: ${s}`);
+});
+
+test('SAFETY: subject never claims "clear" when any boat is restricted', () => {
+  // Regression guard. The subject used to be built from the temperature zone
+  // alone, so it read "Normal conditions" even at 13 ft when nobody could row.
+  let checked = 0;
+  for (const tempF of [30, 38, 45, 52, 58, 65, 72, 80]) {
+    for (const level of [2.5, 7.9, 8.5, 9, 9.5, 10, 10.4, 11, 11.5, 12, 12.1, 15]) {
+      const digest = M.computeDigest(logic,
+        { raw: makeRaw(tempF), history: historyAtTemp(tempF) },
+        { level, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+        { available: false }, new Date());
+      const subject = M.renderSubject(digest);
+      const restricted = digest.rows.flatMap(r => r.boats).filter(b => b.status !== 'go');
+      if (restricted.length > 0) {
+        assert.ok(!/all boats clear/i.test(subject),
+          `@${tempF}F/${level}ft — ${restricted.length} boats restricted but subject says clear: "${subject}"`);
+      }
+      checked++;
+    }
+  }
+  assert.ok(checked >= 90, `expected a broad sweep, ran ${checked}`);
+});
+
+test('SAFETY: subject shouts when NO boat may launch', () => {
+  const digest = M.computeDigest(logic,
+    { raw: makeRaw(72), history: historyAtTemp(72) },
+    { level: 13, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+    { available: false }, new Date());
+  assert.ok(digest.rows.flatMap(r => r.boats).every(b => b.status === 'no'),
+    'sanity: every boat should be restricted at 13 ft');
+  assert.ok(/ALL BOATS RESTRICTED/.test(M.renderSubject(digest)),
+    `subject should state that nobody can row: "${M.renderSubject(digest)}"`);
+});
+
+test('SAFETY: subject does not claim clear when the river reading is missing', () => {
+  // With no river data the flood rules cannot run, so every boat looks clear.
+  // The subject must not present that absence of data as a safe all-clear.
+  const digest = M.computeDigest(logic,
+    { raw: makeRaw(72), history: historyAtTemp(72) },
+    { level: null, isEstimate: false, failed: true, stale: true, ageMs: null, lastObsTs: null },
+    { available: false }, new Date());
+  const s = M.renderSubject(digest);
+  assert.ok(!/all boats clear/i.test(s), `must not assert all-clear without river data: "${s}"`);
+  assert.ok(/check river|river n\/a/i.test(s), `should flag the missing reading: "${s}"`);
+});
+
+test('subject names the binding constraint (temperature, river, or both)', () => {
+  const mk = (tempF, level) => M.renderSubject(M.computeDigest(logic,
+    { raw: makeRaw(tempF), history: historyAtTemp(tempF) },
+    { level, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+    { available: false }, new Date()));
+
+  assert.ok(/All boats clear/.test(mk(72, 5)), mk(72, 5));
+  assert.ok(/high river/.test(mk(72, 10.4)), mk(72, 10.4));
+  assert.ok(/Four Oar Rule/.test(mk(48, 5)), mk(48, 5));
+  const both = mk(48, 11.5);
+  assert.ok(/Four Oar Rule/.test(both) && /high river/.test(both),
+    `both causes should appear: "${both}"`);
+});
+
+test('subject marks an estimated river level as an estimate', () => {
+  const digest = M.computeDigest(logic,
+    { raw: makeRaw(72), history: historyAtTemp(72) },
+    { level: 10, isEstimate: true, failed: false, stale: true,
+      ageMs: 25 * 86400000, lastObsTs: Date.now() - 25 * 86400000 },
+    { available: false }, new Date());
+  assert.ok(/est\./.test(M.renderSubject(digest)),
+    `estimated levels should be labelled: "${M.renderSubject(digest)}"`);
+});
+
+test('subject stays a reasonable length for mobile inboxes', () => {
+  for (const [tempF, level] of [[72, 5], [48, 11.5], [72, 13], [35, 5]]) {
+    const s = M.renderSubject(M.computeDigest(logic,
+      { raw: makeRaw(tempF), history: historyAtTemp(tempF) },
+      { level, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+      { available: false }, new Date()));
+    assert.ok(s.length <= 78, `subject too long (${s.length}): "${s}"`);
+  }
 });
 
 test('renders without throwing in every zone', () => {
@@ -693,6 +772,19 @@ test('a real weather code resolves through computeDigest into the email', () => 
   const html = M.renderEmailHtml(digest);
   assert.ok(html.includes(logic.WMO_ICONS[61]), 'rain icon missing from email');
   assert.ok(html.includes('Light rain'), 'rain label missing from email');
+});
+
+test('weather icon is legible against the navy background', () => {
+  // Sun/cloud/snow/storm glyphs are BMP characters that default to monochrome
+  // TEXT presentation, inheriting the surrounding colour — black by default,
+  // i.e. invisible on navy. Guard both mitigations.
+  const html = M.renderEmailHtml(sampleDigestWithCode(3)); // overcast cloud
+  const cell = html.match(/<td[^>]*font-size:32px[^>]*>/);
+  assert.ok(cell, 'weather icon cell not found');
+  assert.ok(/color:#[0-9a-fA-F]{6}/.test(cell[0]),
+    `icon cell must set an explicit colour, got: ${cell[0]}`);
+  assert.ok(/&#65039;/.test(html),
+    'icons should request emoji presentation via the U+FE0F variation selector');
 });
 
 test('icons render as raw entities, not double-escaped', () => {
