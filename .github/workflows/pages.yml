@@ -1,0 +1,62 @@
+name: Deploy site to GitHub Pages
+
+# WHY THIS FILE EXISTS
+# --------------------
+# The temperature bot commits new data every 15 minutes, and every push to main
+# queues a Pages deployment. GitHub Pages permits exactly one deployment at a
+# time, and its built-in "deploy from a branch" flow has no queueing: when a new
+# deployment starts while another is running, one of two things happens —
+#
+#   "Error: Deployment cancelled."                     (older run discarded), or
+#   "Failed to create deployment (status: 400) ...
+#    due to in progress deployment"                    (newer run rejected)
+#
+# — both of which surface as failed red runs even though the site is usually
+# fine. Deploying from our own workflow lets us set a concurrency group, which
+# is GitHub's documented remedy: one deployment at a time, later pushes queue
+# behind it rather than colliding with it.
+#
+# REQUIRED SETTING: Settings -> Pages -> Source must be "GitHub Actions"
+# (not "Deploy from a branch"), otherwise this workflow and the built-in one
+# will fight over the same environment.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time. cancel-in-progress is deliberately false: an
+# in-flight deployment is allowed to finish, and intermediate queued runs are
+# superseded by the newest, so the site always converges on the latest commit.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Publish the repository root. .nojekyll keeps the files verbatim, and
+          # CNAME carries the roworno.com custom domain.
+          path: .
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
