@@ -505,6 +505,15 @@ function sampleDigest(overrides = {}) {
     new Date());
 }
 
+function sampleDigestWithCode(code) {
+  return M.computeDigest(logic,
+    { raw: makeRaw(72.4), history: historyAtTemp(72.4) },
+    { level: 10, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+    { available: true, code, tempF: 78, feelsF: 80,
+      windMph: 8, gustMph: 14, dir: 'NW', precip: '0.00' },
+    new Date());
+}
+
 test('renders every tier and all four boat columns', () => {
   const html = M.renderEmailHtml(sampleDigest());
   for (const t of ['Tier 1 — Novice', 'Tier 2 — Intermediate', 'Tier 3 — Senior']) {
@@ -563,6 +572,92 @@ test('renders without throwing in every zone', () => {
     assert.ok(html.length > 1000, `suspiciously short email for ${tempF}F`);
     assert.ok(html.includes('<!DOCTYPE html>'));
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('8b. Weather icons');
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('icon mapping is extracted from index.html, not duplicated', () => {
+  assert.ok(logic.WMO_ICONS, 'WMO_ICONS should be extracted from the site');
+  assert.ok(logic.WMO_CODES, 'WMO_CODES should be extracted from the site');
+  // The email must use the same icons the website shows.
+  for (const code of [0, 3, 61, 71, 95]) {
+    assert.strictEqual(M.describeWeatherCode(code, logic).icon, logic.WMO_ICONS[code],
+      `code ${code} icon should match the site's`);
+    assert.strictEqual(M.describeWeatherCode(code, logic).cond, logic.WMO_CODES[code],
+      `code ${code} label should match the site's`);
+  }
+});
+
+test('every documented WMO code maps to a distinct-looking icon and label', () => {
+  for (const code of Object.keys(M.WMO_CODES_FALLBACK)) {
+    const { cond, icon } = M.describeWeatherCode(Number(code), logic);
+    assert.notStrictEqual(cond, 'Unknown', `code ${code} has no label`);
+    assert.ok(/^&#\d+;$/.test(icon), `code ${code} icon is not an HTML entity: ${icon}`);
+  }
+});
+
+test('unmapped weather codes fall back to a default icon, not a blank', () => {
+  const { cond, icon } = M.describeWeatherCode(12345, logic);
+  assert.strictEqual(cond, 'Unknown');
+  assert.strictEqual(icon, M.DEFAULT_WEATHER_ICON);
+  assert.ok(icon && icon.length > 0, 'must never render an empty icon');
+});
+
+test('resolution works even if extraction from index.html fails', () => {
+  // Passing no logic object simulates extraction failure — a cosmetic lookup
+  // must never be able to break a send.
+  const { cond, icon } = M.describeWeatherCode(0, null);
+  assert.strictEqual(cond, 'Clear sky');
+  assert.ok(/^&#\d+;$/.test(icon));
+});
+
+test('an existing label is not clobbered when no code is present', () => {
+  // Regression: computeDigest previously overwrote a caller-supplied `cond`
+  // with "Unknown" whenever weather.code was absent.
+  const out = M.withWeatherDescription(
+    { available: true, cond: 'Partly cloudy', tempF: 78 }, logic);
+  assert.strictEqual(out.cond, 'Partly cloudy', 'existing label must survive');
+  assert.strictEqual(out.icon, M.DEFAULT_WEATHER_ICON, 'should still get an icon');
+});
+
+test('a real weather code resolves through computeDigest into the email', () => {
+  const digest = M.computeDigest(logic,
+    { raw: makeRaw(72), history: historyAtTemp(72) },
+    { level: 5, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+    { available: true, code: 61, tempF: 60, feelsF: 58, windMph: 10,
+      gustMph: 18, dir: 'NE', precip: '0.12' },
+    new Date());
+  assert.strictEqual(digest.weather.cond, logic.WMO_CODES[61], 'should be the rain label');
+  const html = M.renderEmailHtml(digest);
+  assert.ok(html.includes(logic.WMO_ICONS[61]), 'rain icon missing from email');
+  assert.ok(html.includes('Light rain'), 'rain label missing from email');
+});
+
+test('icons render as raw entities, not double-escaped', () => {
+  const digest = sampleDigestWithCode(0);
+  const html = M.renderEmailHtml(digest);
+  assert.ok(html.includes('&#9728;'), 'sun entity should be present');
+  assert.ok(!html.includes('&amp;#9728;'), 'icon entity must not be double-escaped');
+});
+
+test('icon appears in both the weather block and the air-temp card', () => {
+  const digest = sampleDigestWithCode(0);
+  const html = M.renderEmailHtml(digest);
+  const occurrences = (html.match(/&#9728;/g) || []).length;
+  assert.ok(occurrences >= 2,
+    `expected the icon in the stat card and the weather row, found ${occurrences}`);
+});
+
+test('no icon is emitted when weather is unavailable', () => {
+  const digest = M.computeDigest(logic,
+    { raw: makeRaw(72), history: historyAtTemp(72) },
+    { level: 5, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+    { available: false }, new Date());
+  const html = M.renderEmailHtml(digest);
+  assert.ok(/Weather data unavailable/.test(html));
+  assert.ok(!/&#\d{4,};/.test(html), 'should not render weather entities with no data');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -149,6 +149,7 @@ function loadSiteLogic(indexHtmlPath = INDEX_HTML) {
     'getEffectiveLevel', 'checkMorningStreak', 'nyWindowBound', 'nyTzAbbr',
     'getFloodStatus', 'combineStatus', 'boatKeys', 'floodStatusForBoat',
     'floodSummaryLabel', 'extractTemp', 'parseLastDeviceData',
+    'WMO_CODES', 'WMO_ICONS',
   ];
   const exportSrc = EXPORTS
     .map(n => `try { __out.${n} = ${n}; } catch (e) {}`)
@@ -253,7 +254,10 @@ async function loadRiver() {
   };
 }
 
-const WMO_CODES = {
+// Weather condition names and icons are extracted from index.html (see
+// loadSiteLogic) so the email matches the website. These fallbacks are used
+// only if extraction ever fails, so a cosmetic lookup can never break a send.
+const WMO_CODES_FALLBACK = {
   0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
   45: 'Foggy', 48: 'Icy fog',
   51: 'Light drizzle', 53: 'Moderate drizzle', 55: 'Heavy drizzle',
@@ -263,10 +267,50 @@ const WMO_CODES = {
   85: 'Light snow showers', 86: 'Heavy snow showers',
   95: 'Thunderstorm', 96: 'Thunderstorm w/ hail', 99: 'Thunderstorm w/ heavy hail',
 };
+// HTML entities rather than literal emoji: they survive any encoding mishap
+// between here, Buttondown, and the recipient's mail client.
+const WMO_ICONS_FALLBACK = {
+  0: '&#9728;', 1: '&#127780;', 2: '&#9925;', 3: '&#9729;', 45: '&#127787;', 48: '&#127787;',
+  51: '&#127782;', 53: '&#127782;', 55: '&#127783;',
+  61: '&#127783;', 63: '&#127783;', 65: '&#127783;',
+  71: '&#127784;', 73: '&#127784;', 75: '&#10052;', 77: '&#127784;',
+  80: '&#127782;', 81: '&#127783;', 82: '&#9928;',
+  85: '&#127784;', 86: '&#10052;', 95: '&#9928;', 96: '&#9928;', 99: '&#9928;',
+};
+const DEFAULT_WEATHER_ICON = '&#127777;'; // thermometer, for unmapped codes
 
 function windDirLabel(deg) {
   const dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
   return dirs[Math.round(deg / 22.5) % 16];
+}
+
+/**
+ * Resolves a WMO weather code to its label and icon, preferring the site's own
+ * mapping so the email and website agree, with a local fallback.
+ */
+function describeWeatherCode(code, logic) {
+  const codes = (logic && logic.WMO_CODES) || WMO_CODES_FALLBACK;
+  const icons = (logic && logic.WMO_ICONS) || WMO_ICONS_FALLBACK;
+  return {
+    cond: codes[code] || 'Unknown',
+    icon: icons[code] || DEFAULT_WEATHER_ICON,
+  };
+}
+
+/**
+ * Adds `cond` and `icon` to a weather object. Only overrides an existing
+ * `cond` when there is actually a code to resolve — otherwise a caller that
+ * supplied its own label (or an API response missing weather_code) would have
+ * it silently replaced with "Unknown".
+ */
+function withWeatherDescription(weather, logic) {
+  if (!weather || !weather.available) return weather;
+  const hasCode = weather.code !== undefined && weather.code !== null;
+  const resolved = hasCode ? describeWeatherCode(weather.code, logic) : {};
+  return Object.assign({}, weather, {
+    cond: resolved.cond || weather.cond || 'Unknown',
+    icon: resolved.icon || weather.icon || DEFAULT_WEATHER_ICON,
+  });
 }
 
 async function loadWeather() {
@@ -279,9 +323,9 @@ async function loadWeather() {
     const c = data.current;
     return {
       available: true,
+      code: c.weather_code,
       tempF: Math.round(c.temperature_2m),
       feelsF: Math.round(c.apparent_temperature),
-      cond: WMO_CODES[c.weather_code] || 'Unknown',
       windMph: Math.round(c.wind_speed_10m),
       gustMph: Math.round(c.wind_gusts_10m),
       dir: windDirLabel(c.wind_direction_10m),
@@ -364,7 +408,9 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
     rows,
     river,
     floodSummary,
-    weather,
+    // Resolve the condition label and icon here, where the site's own mapping
+    // is available, so the email uses the same icons the website shows.
+    weather: withWeatherDescription(weather, logic),
     sensorStale,
     sensorAgeMs,
   };
@@ -429,8 +475,19 @@ function renderEmailHtml(d) {
     ? `River at ${riverStr} ft — ${esc(d.floodSummary.text)}.`
     : (d.river.level === null ? 'River level unavailable — flood restrictions not applied.' : '');
 
+  // The icon is a controlled HTML entity from our own WMO map, so it is
+  // intentionally NOT escaped — everything derived from the API still is.
+  const weatherIcon = d.weather.available
+    ? (d.weather.icon || DEFAULT_WEATHER_ICON) : '';
+
   const weatherRow = d.weather.available
-    ? `${esc(d.weather.cond)}, ${d.weather.tempF}°F (feels like ${d.weather.feelsF}°F) &nbsp;·&nbsp; Wind ${d.weather.windMph} mph ${esc(d.weather.dir)}, gusts ${d.weather.gustMph} mph &nbsp;·&nbsp; Precip ${esc(d.weather.precip)} in`
+    ? `<table role="presentation" cellpadding="0" cellspacing="0"><tr>
+                <td style="font-size:32px;line-height:1;padding-right:14px;vertical-align:middle;">${weatherIcon}</td>
+                <td style="vertical-align:middle;font-size:13px;color:#ffffff;line-height:1.6;">
+                  <strong>${esc(d.weather.cond)}</strong>, ${d.weather.tempF}°F (feels like ${d.weather.feelsF}°F)<br/>
+                  <span style="color:#7a93b4;">Wind ${d.weather.windMph} mph ${esc(d.weather.dir)}, gusts ${d.weather.gustMph} mph &nbsp;·&nbsp; Precip ${esc(d.weather.precip)} in</span>
+                </td>
+              </tr></table>`
     : 'Weather data unavailable this morning.';
 
   return `<!DOCTYPE html>
@@ -472,7 +529,7 @@ ${warningHtml}
             <td width="4"></td>
             <td width="33%" style="background:#162d52;border-radius:10px;padding:12px;" align="center">
               <div style="font-size:10px;letter-spacing:0.07em;text-transform:uppercase;color:#7a93b4;">Air Temp</div>
-              <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${d.weather.available ? d.weather.tempF + '°F' : '--'}</div>
+              <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${d.weather.available ? weatherIcon + ' ' + d.weather.tempF + '°F' : '--'}</div>
             </td>
           </tr></table>
         </td></tr>
@@ -630,7 +687,9 @@ module.exports = {
   loadSiteLogic, loadLocalData, loadRiver, loadWeather,
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
   parseGaugeSeries, checkSubscriberHeadroom, isInSeason,
+  describeWeatherCode, withWeatherDescription,
   STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT,
+  WMO_CODES_FALLBACK, WMO_ICONS_FALLBACK, DEFAULT_WEATHER_ICON,
 };
 
 if (require.main === module) {
