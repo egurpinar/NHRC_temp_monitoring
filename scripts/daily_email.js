@@ -25,6 +25,17 @@
 
 'use strict';
 
+// Node 18+ is required for the built-in global fetch() this script relies on.
+// Fail with a plain-English message rather than a confusing "fetch is not
+// defined" several seconds into the run.
+const NODE_MAJOR = parseInt(process.versions.node.split('.')[0], 10);
+if (NODE_MAJOR < 18) {
+  console.error(
+    `This script needs Node 18 or newer (you have ${process.versions.node}).\n` +
+    `Install the LTS release from https://nodejs.org, then open a NEW terminal window and try again.`);
+  process.exit(1);
+}
+
 const fs = require('fs');
 const path = require('path');
 

@@ -52,6 +52,15 @@ logs the current count and warns as it approaches the cap, so this doesn't turn
 into silent non-delivery for members who signed up past it. Club membership is
 around 110, so keep an eye on this in the Actions logs.
 
+## Prerequisites
+
+Running these scripts on your own machine requires **Node 18 or newer**
+(GitHub Actions already has it, so the scheduled automation needs nothing).
+
+If `node --version` says "command not found", install the LTS release from
+<https://nodejs.org> and then open a **new** terminal window — an existing one
+won't pick up the change.
+
 ## Running locally
 
 ```bash
