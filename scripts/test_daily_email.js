@@ -516,12 +516,42 @@ function sampleDigestWithCode(code) {
 
 test('renders every tier and all four boat columns', () => {
   const html = M.renderEmailHtml(sampleDigest());
-  for (const t of ['Tier 1 — Novice', 'Tier 2 — Intermediate', 'Tier 3 — Senior']) {
+  // Tier labels are abbreviated ("T1 Novice") so the five-column table fits a
+  // phone screen without wrapping, but every tier must still be identifiable.
+  for (const t of ['T1 Novice', 'T2 Intermediate', 'T3 Senior']) {
     assert.ok(html.includes(t), `missing ${t}`);
   }
   for (const c of ['1x / 2-', '2x', '4+ / 4-', '4x / 8+']) {
     assert.ok(html.includes(c), `missing column ${c}`);
   }
+});
+
+test('mobile and dark-mode hardening is present', () => {
+  const html = M.renderEmailHtml(sampleDigest());
+  assert.ok(/name="color-scheme"/.test(html),
+    'missing color-scheme meta — iOS will invert the palette');
+  assert.ok(/supported-color-schemes/.test(html), 'missing supported-color-schemes meta');
+  assert.ok(/-webkit-text-size-adjust:100%/.test(html),
+    'missing text-size-adjust — iOS inflates fonts and breaks the table');
+  assert.ok(/@media only screen and \(max-width:480px\)/.test(html),
+    'missing phone breakpoint');
+  assert.ok(/@media \(prefers-color-scheme: dark\)/.test(html),
+    'missing dark-mode colour pinning');
+});
+
+test('status pills use opaque colours (clients drop alpha)', () => {
+  const html = M.renderEmailHtml(sampleDigest());
+  const pills = html.match(/class="bd-pill[^"]*"[^>]*style="([^"]+)"/g) || [];
+  assert.ok(pills.length > 0, 'no status pills rendered');
+  for (const p of pills) {
+    assert.ok(!/rgba\(/.test(p), `pill uses rgba(), which some clients drop: ${p}`);
+  }
+});
+
+test('boat labels and pills do not wrap mid-token', () => {
+  const html = M.renderEmailHtml(sampleDigest());
+  assert.ok(/white-space:nowrap/.test(html),
+    'boat labels need nowrap or they break across lines on narrow screens');
 });
 
 test('includes an unsubscribe link (legally required for bulk email)', () => {
@@ -824,6 +854,56 @@ test('no icon is emitted when weather is unavailable', () => {
   const html = M.renderEmailHtml(digest);
   assert.ok(/Weather data unavailable/.test(html));
   assert.ok(!/&#\d{4,};/.test(html), 'should not render weather entities with no data');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('8c. Send scheduling and idempotency');
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('daily slug is stable within a day and changes across days', () => {
+  const a = M.dailySlug(new Date(Date.UTC(2026, 7, 6, 5, 30)));   // 1:30am ET
+  const b = M.dailySlug(new Date(Date.UTC(2026, 7, 6, 8, 15)));   // 4:15am ET same day
+  const c = M.dailySlug(new Date(Date.UTC(2026, 7, 7, 5, 30)));   // next day
+  assert.strictEqual(a, b, 'same Eastern day must produce the same slug');
+  assert.notStrictEqual(a, c, 'a new day must produce a new slug');
+  assert.ok(/^nhrc-\d{4}-\d{2}-\d{2}$/.test(a), `unexpected slug format: ${a}`);
+});
+
+test('slug uses the Eastern date, not UTC', () => {
+  // 02:00 UTC on Aug 7 is still 10pm on Aug 6 in New York. Keying off UTC would
+  // roll the slug a day early and permit a second send within one Eastern day.
+  const d = new Date(Date.UTC(2026, 7, 7, 2, 0));
+  assert.strictEqual(d.getUTCDate(), 7, 'sanity: UTC date is the 7th');
+  assert.strictEqual(M.dailySlug(d), 'nhrc-2026-08-06',
+    'slug must follow the boathouse date, not UTC');
+});
+
+test('the send window covers every scheduled cron across DST', () => {
+  // Crons fire at 05:00 and 06:00 UTC; the job proceeds when the Eastern hour
+  // is 1-4. Every date must have at least one eligible run.
+  function etHour(utcHour, y, mo, dy) {
+    const d = new Date(Date.UTC(y, mo, dy, utcHour, 0, 0));
+    return parseInt(new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', hour: 'numeric', hour12: false,
+    }).format(d), 10);
+  }
+  const dates = [[2026,0,15],[2026,2,7],[2026,2,8],[2026,5,15],[2026,7,6],[2026,10,1],[2026,10,2],[2026,11,25]];
+  for (const [y, mo, dy] of dates) {
+    const eligible = [5, 6].filter(h => {
+      const et = etHour(h, y, mo, dy);
+      return et >= 1 && et <= 4;
+    });
+    assert.ok(eligible.length >= 1,
+      `${y}-${mo+1}-${dy}: no run falls inside the 1-4am ET window`);
+  }
+});
+
+test('the send window never extends past 5am', () => {
+  // A digest arriving after 5am is too late to be useful before dawn practice.
+  const fs2 = require('fs');
+  const wf = fs2.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'daily_email.yml'), 'utf8');
+  assert.ok(/-ge 1 \] && \[ "\$ET_HOUR" -le 4/.test(wf),
+    'workflow gate should accept only the 1-4am Eastern hours');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

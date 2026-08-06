@@ -446,12 +446,14 @@ function esc(s) {
 }
 
 function statusPill(status, label) {
+  // Solid backgrounds rather than rgba(): several mail clients drop alpha
+  // colours, which left pills unreadable on some phones.
   const styles = {
-    no:      'background:rgba(224,62,62,0.18);color:#f07070;',
-    caution: 'background:rgba(240,180,41,0.18);color:#ffd166;',
-    go:      'background:rgba(46,125,79,0.2);color:#5cc98a;',
+    no:      'background:#3d1b1f;color:#ff8a8a;',
+    caution: 'background:#3d3418;color:#ffd166;',
+    go:      'background:#123528;color:#6fe0a4;',
   };
-  return `<span style="display:inline-block;${styles[status] || styles.go}font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;">${esc(label)}</span>`;
+  return `<span class="bd-pill bd-nowrap" style="display:inline-block;${styles[status] || styles.go}font-size:11px;font-weight:700;padding:3px 9px;border-radius:999px;white-space:nowrap;">${esc(label)}</span>`;
 }
 
 function renderEmailHtml(d) {
@@ -470,24 +472,29 @@ function renderEmailHtml(d) {
   }
 
   const warningHtml = warnings.map(w => `
-            <tr><td style="padding:16px 28px 0;">
+            <tr><td class="bd-pad" style="padding:16px 28px 0;">
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:rgba(224,62,62,0.1);border:1px solid rgba(224,62,62,0.35);border-radius:10px;">
                 <tr><td style="padding:12px 14px;font-size:12px;color:#f07070;line-height:1.5;">${w}</td></tr>
               </table>
             </td></tr>`).join('');
 
+  // Tier names are shortened on the phone-width layout — "Tier 2 — Intermediate"
+  // is what forced the row to wrap and made the table look scrambled.
   const tierRows = d.rows.map((tier, i) => {
     const last = i === d.rows.length - 1;
     const border = last ? '' : 'border-bottom:1px solid rgba(255,255,255,0.05);';
     const cells = boatCols.map(col => {
       const boat = tier.boats.find(b => b.name === col);
-      return `<td style="padding:10px 12px;${border}" align="center">${boat ? statusPill(boat.status, boat.label) : '<span style="color:#7a93b4;font-size:11px;">—</span>'}</td>`;
+      return `<td class="bd-cell" style="padding:10px 12px;${border}" align="center">${boat ? statusPill(boat.status, boat.label) : '<span style="color:#7a93b4;font-size:11px;">—</span>'}</td>`;
     }).join('');
-    return `<tr><td style="padding:10px 12px;font-size:13px;color:#ffffff;${border}">${esc(tier.name)}</td>${cells}</tr>`;
+    const short = tier.name.split('—').pop().trim();
+    const num = (tier.name.match(/Tier\s*(\d)/) || [])[1] || '';
+    return `<tr><td class="bd-tiername bd-white" style="padding:10px 12px;font-size:13px;color:#ffffff;${border}">` +
+      `<span class="bd-nowrap">${esc(`T${num} ${short}`)}</span></td>${cells}</tr>`;
   }).join('');
 
   const headerCells = boatCols.map(c =>
-    `<td style="padding:10px 12px;font-size:11px;color:#7a93b4;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid rgba(255,255,255,0.08);" align="center">${esc(c)}</td>`
+    `<td class="bd-cell bd-muted bd-nowrap" style="padding:10px 12px;font-size:11px;color:#7a93b4;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid rgba(255,255,255,0.08);white-space:nowrap;" align="center">${esc(c)}</td>`
   ).join('');
 
   const riverStr = d.river.level !== null ? d.river.level.toFixed(1) : '--';
@@ -513,7 +520,7 @@ function renderEmailHtml(d) {
 
   const weatherRow = d.weather.available
     ? `<table role="presentation" cellpadding="0" cellspacing="0"><tr>
-                <td style="font-size:32px;line-height:1;padding-right:14px;vertical-align:middle;color:#ffffff;">${weatherIcon}</td>
+                <td class="bd-icon bd-white" style="font-size:32px;line-height:1;padding-right:14px;vertical-align:middle;color:#ffffff;">${weatherIcon}</td>
                 <td style="vertical-align:middle;font-size:13px;color:#ffffff;line-height:1.6;">
                   <strong>${esc(d.weather.cond)}</strong>, ${d.weather.tempF}°F (feels like ${d.weather.feelsF}°F)<br/>
                   <span style="color:#7a93b4;">Wind ${d.weather.windMph} mph ${esc(d.weather.dir)}, gusts ${d.weather.gustMph} mph &nbsp;·&nbsp; Precip ${esc(d.weather.precip)} in</span>
@@ -523,69 +530,110 @@ function renderEmailHtml(d) {
 
   return `<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>NHRC Daily Conditions</title></head>
-<body style="margin:0;padding:0;background:#eef1f6;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef1f6;padding:24px 0;">
-    <tr><td align="center">
-      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#0d1f3c;border-radius:14px;overflow:hidden;">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<meta name="format-detection" content="telephone=no,date=no,address=no,email=no"/>
+<!-- Declaring support for both schemes stops iOS Mail and Outlook from
+     "helpfully" re-colouring this email. Without it they invert our navy
+     palette and the white text lands on a near-white background. -->
+<meta name="color-scheme" content="light dark"/>
+<meta name="supported-color-schemes" content="light dark"/>
+<title>NHRC Daily Conditions</title>
+<style>
+  :root { color-scheme: light dark; supported-color-schemes: light dark; }
+  /* Stop iOS inflating font sizes, which was pushing the boat table out of shape. */
+  body, table, td, div, span, a { -webkit-text-size-adjust:100%; -ms-text-size-adjust:100%; }
+  table { border-collapse:collapse; mso-table-lspace:0pt; mso-table-rspace:0pt; }
+  img { -ms-interpolation-mode:bicubic; border:0; outline:none; text-decoration:none; }
 
-        <tr><td style="padding:26px 28px 20px;border-bottom:1px solid rgba(240,180,41,0.2);">
+  /* Pin our own colours so a client's dark-mode pass cannot repaint them. */
+  @media (prefers-color-scheme: dark) {
+    .bd-page   { background:#eef1f6 !important; }
+    .bd-card   { background:#0d1f3c !important; }
+    .bd-panel  { background:#162d52 !important; }
+    .bd-white  { color:#ffffff !important; }
+    .bd-muted  { color:#7a93b4 !important; }
+    .bd-gold   { color:#f0b429 !important; }
+  }
+
+  /* Phones: the boat table is five columns wide and was the main casualty of
+     the desktop padding and font sizes. */
+  @media only screen and (max-width:480px) {
+    .bd-pad      { padding-left:14px !important; padding-right:14px !important; }
+    .bd-cell     { padding:8px 3px !important; font-size:11px !important; }
+    .bd-tiername { padding:8px 4px !important; font-size:11px !important; }
+    .bd-pill     { font-size:10px !important; padding:3px 6px !important; }
+    .bd-statval  { font-size:17px !important; }
+    .bd-statlbl  { font-size:9px !important; }
+    .bd-title    { font-size:16px !important; }
+    .bd-icon     { font-size:26px !important; padding-right:10px !important; }
+    .bd-nowrap   { white-space:nowrap !important; }
+  }
+</style>
+</head>
+<body class="bd-page" style="margin:0;padding:0;background:#eef1f6;font-family:-apple-system,'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table role="presentation" class="bd-page" width="100%" cellpadding="0" cellspacing="0" style="background:#eef1f6;padding:24px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" class="bd-card" style="max-width:600px;width:100%;background:#0d1f3c;border-radius:14px;overflow:hidden;">
+
+        <tr><td class="bd-pad" style="padding:26px 28px 20px;border-bottom:1px solid rgba(240,180,41,0.2);">
           <table role="presentation" cellpadding="0" cellspacing="0"><tr>
             <td style="width:56px;vertical-align:middle;"><img src="${LOGO_URL}" width="56" height="56" alt="NHRC" style="display:block;width:56px;height:56px;border:0;outline:none;text-decoration:none;"/></td>
             <td style="padding-left:14px;">
-              <div style="font-family:Georgia,serif;font-size:18px;font-weight:700;color:#f0b429;">New Haven Rowing Club</div>
+              <div class="bd-title bd-gold" style="font-family:Georgia,serif;font-size:18px;font-weight:700;color:#f0b429;">New Haven Rowing Club</div>
               <div style="font-size:11px;letter-spacing:0.05em;text-transform:uppercase;color:#7a93b4;margin-top:3px;">Daily Conditions Report</div>
               <div style="font-size:11px;color:#7a93b4;margin-top:2px;">${esc(d.dateLabel)} · ${esc(d.timeLabel)} ${esc(d.tz)}</div>
             </td>
           </tr></table>
         </td></tr>
 ${warningHtml}
-        <tr><td style="padding:20px 28px 0;">
+        <tr><td class="bd-pad" style="padding:20px 28px 0;">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${d.zoneColor.bg};border:1px solid ${d.zoneColor.border};border-radius:10px;">
             <tr><td style="padding:14px 16px;font-size:14px;font-weight:700;color:${d.zoneColor.text};">${esc(d.zoneLabel)}</td></tr>
           </table>
         </td></tr>
 
-        <tr><td style="padding:16px 28px 0;">
+        <tr><td class="bd-pad" style="padding:16px 28px 0;">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
-            <td width="33%" style="background:#162d52;border-radius:10px;padding:12px;" align="center">
-              <div style="font-size:10px;letter-spacing:0.07em;text-transform:uppercase;color:#7a93b4;">Water Temp</div>
-              <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${d.tempF.toFixed(1)}°F</div>
+            <td width="33%" class="bd-panel" style="background:#162d52;border-radius:10px;padding:12px;" align="center">
+              <div class="bd-statlbl bd-muted" style="font-size:10px;letter-spacing:0.07em;text-transform:uppercase;color:#7a93b4;">Water Temp</div>
+              <div class="bd-statval bd-white" style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${d.tempF.toFixed(1)}°F</div>
             </td>
             <td width="4"></td>
-            <td width="33%" style="background:#162d52;border-radius:10px;padding:12px;" align="center">
-              <div style="font-size:10px;letter-spacing:0.07em;text-transform:uppercase;color:#7a93b4;">River Level</div>
-              <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${riverStr} <span style="font-size:12px;color:#7a93b4;">ft</span></div>
+            <td width="33%" class="bd-panel" style="background:#162d52;border-radius:10px;padding:12px;" align="center">
+              <div class="bd-statlbl bd-muted" style="font-size:10px;letter-spacing:0.07em;text-transform:uppercase;color:#7a93b4;">River Level</div>
+              <div class="bd-statval bd-white" style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${riverStr} <span style="font-size:12px;color:#7a93b4;">ft</span></div>
             </td>
             <td width="4"></td>
-            <td width="33%" style="background:#162d52;border-radius:10px;padding:12px;" align="center">
-              <div style="font-size:10px;letter-spacing:0.07em;text-transform:uppercase;color:#7a93b4;">Air Temp</div>
-              <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${d.weather.available ? weatherIcon + ' ' + d.weather.tempF + '°F' : '--'}</div>
+            <td width="33%" class="bd-panel" style="background:#162d52;border-radius:10px;padding:12px;" align="center">
+              <div class="bd-statlbl bd-muted" style="font-size:10px;letter-spacing:0.07em;text-transform:uppercase;color:#7a93b4;">Air Temp</div>
+              <div class="bd-statval bd-white" style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#ffffff;margin-top:4px;">${d.weather.available ? weatherIcon + ' ' + d.weather.tempF + '°F' : '--'}</div>
             </td>
           </tr></table>
         </td></tr>
 
-        <tr><td style="padding:22px 28px 0;">
+        <tr><td class="bd-pad" style="padding:22px 28px 0;">
           <div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#f0b429;margin-bottom:10px;">Rowing Status — Boat Restrictions</div>
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#162d52;border-radius:10px;border-collapse:separate;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="bd-panel" style="background:#162d52;border-radius:10px;border-collapse:separate;">
             <tr><td style="padding:10px 12px;font-size:11px;color:#7a93b4;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid rgba(255,255,255,0.08);">Tier</td>${headerCells}</tr>
             ${tierRows}
           </table>
           ${riverNote ? `<div style="font-size:11px;color:#7a93b4;margin-top:8px;line-height:1.5;">${riverNote}</div>` : ''}
         </td></tr>
 
-        <tr><td style="padding:22px 28px 0;">
+        <tr><td class="bd-pad" style="padding:22px 28px 0;">
           <div style="font-size:11px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#f0b429;margin-bottom:10px;">Weather — Oxford, CT</div>
-          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#162d52;border-radius:10px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" class="bd-panel" style="background:#162d52;border-radius:10px;">
             <tr><td style="padding:14px 16px;font-size:13px;color:#ffffff;">${weatherRow}</td></tr>
           </table>
         </td></tr>
 
-        <tr><td style="padding:22px 28px 0;" align="center">
+        <tr><td class="bd-pad" style="padding:22px 28px 0;" align="center">
           <a href="https://roworno.com" style="display:inline-block;background:#f0b429;color:#0d1f3c;font-weight:700;font-size:13px;text-decoration:none;padding:11px 22px;border-radius:8px;">View full conditions &amp; navigation map →</a>
         </td></tr>
 
-        <tr><td style="padding:26px 28px 24px;">
+        <tr><td class="bd-pad" style="padding:26px 28px 24px;">
           <div style="border-top:1px solid rgba(255,255,255,0.08);margin-top:6px;padding-top:16px;font-size:11px;color:#7a93b4;line-height:1.6;text-align:center;">
             Conditions are provided for guidance only — always verify at the boathouse before launching.<br/>
             New Haven Rowing Club · 407 Roosevelt Drive, Oxford, CT 06478<br/>
@@ -661,13 +709,35 @@ function renderSubject(d, now = new Date()) {
 // 5. Send via Buttondown
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function sendViaButtondown(subject, bodyHtml) {
+/**
+ * Deterministic per-day identifier, e.g. "nhrc-2026-08-06", based on the date
+ * in the boathouse's timezone.
+ *
+ * This is the idempotency key. Buttondown rejects a duplicate slug, so if the
+ * job runs more than once in a day — a delayed run, the DST twin cron, a manual
+ * retry — only the first actually sends. That lets the schedule tolerate delay
+ * without any risk of members getting the same email twice.
+ */
+function dailySlug(now = new Date()) {
+  const ymd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now);
+  return `nhrc-${ymd}`;
+}
+
+/**
+ * Sends the email. Returns {sent: false, reason: 'already-sent'} rather than
+ * throwing if today's email already went out, so a duplicate run is a clean
+ * no-op instead of a failed workflow.
+ */
+async function sendViaButtondown(subject, bodyHtml, now = new Date()) {
   const key = process.env.BUTTONDOWN_API_KEY;
   if (!key) throw new Error('BUTTONDOWN_API_KEY is not set');
 
   // "fancy" mode tells Buttondown to treat the body as rich HTML rather than
   // Markdown, which is required for this table-based email template.
   const body = '<!-- buttondown-editor-mode: fancy -->' + bodyHtml;
+  const slug = dailySlug(now);
 
   const res = await fetch('https://api.buttondown.com/v1/emails', {
     method: 'POST',
@@ -678,12 +748,18 @@ async function sendViaButtondown(subject, bodyHtml) {
       // Required once per API key to confirm real sends are intended.
       'X-Buttondown-Live-Dangerously': 'true',
     },
-    body: JSON.stringify({ subject, body, status: 'about_to_send' }),
+    body: JSON.stringify({ subject, body, slug, status: 'about_to_send' }),
   });
 
   const text = await res.text();
+
+  // 409 Conflict = an email with this slug already exists, i.e. today's digest
+  // has already been sent. Treat as success so a retry does not fail the run.
+  if (res.status === 409) {
+    return { sent: false, reason: 'already-sent', slug };
+  }
   if (!res.ok) throw new Error(`Buttondown API ${res.status}: ${text}`);
-  return JSON.parse(text);
+  return Object.assign({ sent: true, slug }, JSON.parse(text));
 }
 
 /**
@@ -752,8 +828,12 @@ async function main() {
   if (args.includes('--send')) {
     await checkSubscriberHeadroom();
     const result = await sendViaButtondown(subject, html);
+    if (!result.sent) {
+      console.log(`Today's email (${result.slug}) was already sent — nothing to do.`);
+      return;
+    }
     console.log(`Sent: ${subject}`);
-    console.log(`Buttondown email id: ${result.id}`);
+    console.log(`Buttondown email id: ${result.id} (slug ${result.slug})`);
     return;
   }
   console.error(`Subject: ${subject}`); // stderr so stdout stays pure HTML
@@ -763,7 +843,7 @@ async function main() {
 module.exports = {
   loadSiteLogic, loadLocalData, loadRiver, loadWeather,
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
-  parseGaugeSeries, checkSubscriberHeadroom, isInSeason,
+  parseGaugeSeries, checkSubscriberHeadroom, isInSeason, dailySlug,
   describeWeatherCode, withWeatherDescription,
   STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT, LOGO_URL,
   WMO_CODES_FALLBACK, WMO_ICONS_FALLBACK, DEFAULT_WEATHER_ICON,

@@ -1,20 +1,25 @@
 name: Daily Conditions Email
 
-# Sends the daily conditions digest at 4:00 AM Eastern LOCAL time, year-round.
+# Sends the daily conditions digest at 1:00 AM Eastern LOCAL time, year-round,
+# so it is always in inboxes well before anyone leaves for a dawn practice.
 #
 # WHY TWO CRON TIMES
 # ------------------
-# GitHub Actions cron is always UTC and has no timezone support. 4:00 AM Eastern
-# is 08:00 UTC during EDT (summer) and 09:00 UTC during EST (winter). We trigger
-# at BOTH times and let the job itself check whether it is currently 4 AM in
-# America/New_York — exactly one of the two runs will match on any given day, so
-# the email goes out at 4 AM local whether or not daylight saving is in effect.
-# This is verified by the DST test in scripts/test_daily_email.js.
+# GitHub Actions cron is always UTC and has no timezone support. 1:00 AM Eastern
+# is 05:00 UTC during EDT (summer) and 06:00 UTC during EST (winter). We trigger
+# at BOTH and let the job check the actual Eastern hour, so the send tracks
+# local time across daylight saving. Verified by the DST test in
+# scripts/test_daily_email.js.
+#
+# The twin cron doubles as a free retry: in summer the 06:00 UTC run lands at
+# 2 AM Eastern, inside the send window, so if the 1 AM attempt failed it tries
+# again an hour later. Duplicates are impossible because the send is idempotent
+# (per-day slug, see dailySlug in scripts/daily_email.js).
 
 on:
   schedule:
-    - cron: '0 8 * * *'   # 4:00 AM EDT (summer)
-    - cron: '0 9 * * *'   # 4:00 AM EST (winter)
+    - cron: '0 5 * * *'   # 1:00 AM EDT (summer)
+    - cron: '0 6 * * *'   # 1:00 AM EST (winter)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -38,24 +43,41 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Decide whether this run is the 4 AM Eastern one
+      - name: Decide whether this run should proceed
         id: gate
         run: |
-          # Manual runs always proceed. Scheduled runs only proceed when it is
-          # currently the 4 AM hour in America/New_York.
+          # Manual runs always proceed.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "proceed=true" >> "$GITHUB_OUTPUT"
             echo "Manual run — proceeding."
             exit 0
           fi
+
+          # Scheduled runs: proceed during the 01:00-04:59 Eastern window.
+          #
+          # This used to require exactly the 4 AM hour, which silently dropped
+          # the whole day's email whenever GitHub started the job late —
+          # scheduled runs on shared runners are routinely delayed by tens of
+          # minutes, and the job still reported success, so the failure was
+          # invisible. That is why no email arrived on 2026-08-06.
+          #
+          # The window ends at 04:59 deliberately: a digest arriving after 5 AM
+          # is too late to be useful to anyone heading out for a dawn practice,
+          # so it is better to skip and be visibly missing than to send stale
+          # advice to someone already at the boathouse.
+          #
+          # A wide window is safe because the send is idempotent: the email
+          # carries a per-day slug (nhrc-YYYY-MM-DD) that Buttondown rejects as
+          # a duplicate, so the twin cron, a delayed run and a manual retry can
+          # all fire and members still receive exactly one email.
           ET_HOUR=$(TZ=America/New_York date +%H)
           echo "Current Eastern hour: $ET_HOUR"
-          if [ "$ET_HOUR" = "04" ]; then
+          if [ "$ET_HOUR" -ge 1 ] && [ "$ET_HOUR" -le 4 ]; then
             echo "proceed=true" >> "$GITHUB_OUTPUT"
-            echo "This is the 4 AM Eastern run — proceeding."
+            echo "Within the 1-4 AM Eastern send window — proceeding."
           else
             echo "proceed=false" >> "$GITHUB_OUTPUT"
-            echo "Not 4 AM Eastern (DST twin run) — skipping."
+            echo "Outside the 1-4 AM Eastern send window — skipping."
           fi
 
       - name: Run test suite
