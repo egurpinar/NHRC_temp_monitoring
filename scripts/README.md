@@ -89,7 +89,14 @@ EMAIL_LOGO_URL=https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/
   node scripts/daily_email.js > preview.html
 ```
 
-**Regenerating after changing the SVG** (needs ImageMagick — `brew install imagemagick`):
+**Note on `NHRC_logo.svg`:** despite the extension it is not vector art — it is
+a PNG embedded inside an SVG wrapper. It was originally a 3000x2500 bitmap
+weighing 1.9 MB, displayed at 96px. It is now stored at 384x320 (4x the display
+size, so still crisp on any screen) at 107 KB, which is visually identical and
+94% smaller. Re-exporting from Inkscape will likely reinflate it — resize before
+committing.
+
+**Regenerating the email logo after changing the SVG** (needs ImageMagick — `brew install imagemagick`):
 
 ```bash
 SIZE=168                     # 3x the 56px display size, for high-DPI screens
