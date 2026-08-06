@@ -1,0 +1,84 @@
+name: Daily Conditions Email
+
+# Sends the daily conditions digest at 4:00 AM Eastern LOCAL time, year-round.
+#
+# WHY TWO CRON TIMES
+# ------------------
+# GitHub Actions cron is always UTC and has no timezone support. 4:00 AM Eastern
+# is 08:00 UTC during EDT (summer) and 09:00 UTC during EST (winter). We trigger
+# at BOTH times and let the job itself check whether it is currently 4 AM in
+# America/New_York — exactly one of the two runs will match on any given day, so
+# the email goes out at 4 AM local whether or not daylight saving is in effect.
+# This is verified by the DST test in scripts/test_daily_email.js.
+
+on:
+  schedule:
+    - cron: '0 8 * * *'   # 4:00 AM EDT (summer)
+    - cron: '0 9 * * *'   # 4:00 AM EST (winter)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build the email but do NOT send it'
+        type: boolean
+        default: true
+      force_off_season:
+        description: 'Send even if today falls outside the rowing season'
+        type: boolean
+        default: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Decide whether this run is the 4 AM Eastern one
+        id: gate
+        run: |
+          # Manual runs always proceed. Scheduled runs only proceed when it is
+          # currently the 4 AM hour in America/New_York.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "Manual run — proceeding."
+            exit 0
+          fi
+          ET_HOUR=$(TZ=America/New_York date +%H)
+          echo "Current Eastern hour: $ET_HOUR"
+          if [ "$ET_HOUR" = "04" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "This is the 4 AM Eastern run — proceeding."
+          else
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "Not 4 AM Eastern (DST twin run) — skipping."
+          fi
+
+      - name: Run test suite
+        if: steps.gate.outputs.proceed == 'true'
+        # The rules logic is safety-critical. If the tests fail, do not send.
+        run: node scripts/test_daily_email.js
+
+      - name: Build email (dry run preview)
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          node scripts/daily_email.js --json > /tmp/digest.json
+          echo "Computed digest:"
+          cat /tmp/digest.json | head -40
+
+      - name: Send via Buttondown
+        # The script applies the rowing-season gate itself and exits quietly
+        # (success, nothing sent) when today falls outside the season.
+        if: steps.gate.outputs.proceed == 'true' && github.event.inputs.dry_run != 'true'
+        env:
+          BUTTONDOWN_API_KEY: ${{ secrets.BUTTONDOWN_API_KEY }}
+        run: |
+          if [ "${{ github.event.inputs.force_off_season }}" = "true" ]; then
+            node scripts/daily_email.js --send --force
+          else
+            node scripts/daily_email.js --send
+          fi
