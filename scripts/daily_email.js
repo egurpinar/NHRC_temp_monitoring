@@ -499,17 +499,21 @@ function renderEmailHtml(d) {
   // intentionally NOT escaped — everything derived from the API still is.
   //
   // Several of these glyphs (sun, cloud, snowflake, thunderstorm) live in the
-  // BMP and default to monochrome TEXT presentation, which inherits the
-  // surrounding text colour — black by default, i.e. invisible on our navy
-  // background. Appending U+FE0F requests colour emoji presentation, and the
-  // containing cell sets an explicit light colour so the glyph is still legible
-  // in clients that ignore the variation selector and render it as text.
-  const weatherIcon = d.weather.available
-    ? (d.weather.icon || DEFAULT_WEATHER_ICON) + '&#65039;' : '';
+  // BMP and render as monochrome TEXT, inheriting the surrounding colour —
+  // black by default, i.e. unreadable on our navy background.
+  //
+  // We deliberately do NOT append U+FE0F here: that requests colour-emoji
+  // presentation, and a colour emoji ignores CSS colour entirely, so the glyph
+  // stayed dark whatever we set. Keeping it as text presentation means the
+  // explicit white below actually applies. The span (rather than styling the
+  // cell) is because mail clients strip <td> colour far more often than <span>.
+  const rawIcon = d.weather.available ? (d.weather.icon || DEFAULT_WEATHER_ICON) : '';
+  const weatherIcon = rawIcon
+    ? `<span style="color:#ffffff;font-weight:bold;">${rawIcon}</span>` : '';
 
   const weatherRow = d.weather.available
     ? `<table role="presentation" cellpadding="0" cellspacing="0"><tr>
-                <td style="font-size:32px;line-height:1;padding-right:14px;vertical-align:middle;color:#ffd166;">${weatherIcon}</td>
+                <td style="font-size:32px;line-height:1;padding-right:14px;vertical-align:middle;color:#ffffff;">${weatherIcon}</td>
                 <td style="vertical-align:middle;font-size:13px;color:#ffffff;line-height:1.6;">
                   <strong>${esc(d.weather.cond)}</strong>, ${d.weather.tempF}°F (feels like ${d.weather.feelsF}°F)<br/>
                   <span style="color:#7a93b4;">Wind ${d.weather.windMph} mph ${esc(d.weather.dir)}, gusts ${d.weather.gustMph} mph &nbsp;·&nbsp; Precip ${esc(d.weather.precip)} in</span>

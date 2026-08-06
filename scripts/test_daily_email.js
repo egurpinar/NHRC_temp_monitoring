@@ -774,17 +774,31 @@ test('a real weather code resolves through computeDigest into the email', () => 
   assert.ok(html.includes('Light rain'), 'rain label missing from email');
 });
 
-test('weather icon is legible against the navy background', () => {
-  // Sun/cloud/snow/storm glyphs are BMP characters that default to monochrome
-  // TEXT presentation, inheriting the surrounding colour — black by default,
-  // i.e. invisible on navy. Guard both mitigations.
+test('weather icon is white and bold, not black on navy', () => {
+  // Sun/cloud/snow/storm glyphs are BMP characters rendered as monochrome TEXT,
+  // inheriting the surrounding colour — black by default, unreadable on navy.
   const html = M.renderEmailHtml(sampleDigestWithCode(3)); // overcast cloud
+  const iconSpan = html.match(/<span style="color:#ffffff;font-weight:bold;">&#\d+;<\/span>/);
+  assert.ok(iconSpan, 'icon must be wrapped in a white, bold span');
+
   const cell = html.match(/<td[^>]*font-size:32px[^>]*>/);
-  assert.ok(cell, 'weather icon cell not found');
-  assert.ok(/color:#[0-9a-fA-F]{6}/.test(cell[0]),
-    `icon cell must set an explicit colour, got: ${cell[0]}`);
-  assert.ok(/&#65039;/.test(html),
-    'icons should request emoji presentation via the U+FE0F variation selector');
+  assert.ok(cell && /color:#ffffff/.test(cell[0]),
+    `icon cell should also set white as a fallback, got: ${cell && cell[0]}`);
+});
+
+test('icons must NOT force emoji presentation (it overrides colour)', () => {
+  // U+FE0F requests a colour emoji, which ignores CSS colour entirely — that is
+  // why the cloud stayed black despite the colour being set. Regression guard.
+  const html = M.renderEmailHtml(sampleDigestWithCode(3));
+  assert.ok(!/&#65039;/.test(html),
+    'U+FE0F must not be present — it makes the glyph ignore the white colour');
+});
+
+test('icon is styled in both the weather block and the air-temp card', () => {
+  const html = M.renderEmailHtml(sampleDigestWithCode(3));
+  const styled = (html.match(/<span style="color:#ffffff;font-weight:bold;">&#\d+;<\/span>/g) || []).length;
+  assert.strictEqual(styled, 2,
+    `expected the styled icon in both places, found ${styled}`);
 });
 
 test('icons render as raw entities, not double-escaped', () => {
