@@ -162,11 +162,21 @@ of minutes on shared runners. It previously required exactly 4 AM, so a late
 start skipped the day's email silently while still reporting success — that is
 why no email arrived on 6 August.
 
-Duplicates are impossible: each email carries a per-day slug
-(`nhrc-YYYY-MM-DD`, keyed to the Eastern date) that Buttondown rejects as a
-conflict, so the twin cron, a delayed run and a manual retry all collapse to one
-email. The window deliberately ends before 5 AM — a digest arriving later is no
-use to someone already at the boathouse.
+Because the window is wide, BOTH scheduled crons are eligible in summer
+(05:00 UTC = 1 AM ET, 06:00 UTC = 2 AM ET), so a duplicate guard is essential.
+Before sending, the script asks Buttondown whether an email carrying today's
+slug (`nhrc-YYYY-MM-DD`, keyed to the Eastern date) already exists, and skips if
+so. The two runs are an hour apart rather than concurrent, so check-then-send is
+sufficient.
+
+An earlier version relied on Buttondown rejecting a duplicate slug with a 409.
+It does not — the API documents `slug` only as an archive-URL identifier, with
+no uniqueness guarantee — and members received the digest twice. If the API
+cannot be reached the script sends only on the primary 1 AM run, so an outage
+cannot produce a second copy.
+
+The window deliberately ends before 5 AM — a digest arriving later is no use to
+someone already at the boathouse.
 
 ## Safety behaviour
 

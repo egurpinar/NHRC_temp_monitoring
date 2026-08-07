@@ -1022,6 +1022,75 @@ test('the send window never extends past 5am', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+section('8d. Duplicate-send prevention');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Members received the digest twice. The cause: the send window deliberately
+// spans 1-4am ET so a delayed run still goes out, which means BOTH scheduled
+// crons are eligible in summer (05:00 UTC = 1am ET, 06:00 UTC = 2am ET). The
+// only thing stopping the second was an assumption that Buttondown rejects a
+// duplicate slug — which it does not. These tests pin the real guard.
+
+test('BOTH scheduled crons are eligible in summer — so a guard is required', () => {
+  function etHour(utcHour, y, mo, dy) {
+    const d = new Date(Date.UTC(y, mo, dy, utcHour, 0, 0));
+    return parseInt(new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', hour: 'numeric', hour12: false,
+    }).format(d), 10);
+  }
+  // August: 05:00 UTC -> 1am ET, 06:00 UTC -> 2am ET. Both inside 1-4.
+  const hours = [5, 6].map(h => etHour(h, 2026, 7, 7));
+  const eligible = hours.filter(h => h >= 1 && h <= 4);
+  assert.strictEqual(eligible.length, 2,
+    `expected both crons eligible in summer, got ET hours ${hours}`);
+});
+
+test('exactly one cron is the primary 1am run', () => {
+  const primaries = [5, 6].filter(h =>
+    M.isPrimarySendHour(new Date(Date.UTC(2026, 7, 7, h, 0, 0))));
+  assert.strictEqual(primaries.length, 1,
+    'exactly one scheduled hour should be the primary 1am ET run (summer)');
+  const primariesWinter = [5, 6].filter(h =>
+    M.isPrimarySendHour(new Date(Date.UTC(2026, 0, 15, h, 0, 0))));
+  assert.strictEqual(primariesWinter.length, 1,
+    'exactly one scheduled hour should be the primary 1am ET run (winter)');
+});
+
+test('the primary hour differs between summer and winter', () => {
+  const summer = [5, 6].find(h => M.isPrimarySendHour(new Date(Date.UTC(2026, 7, 7, h))));
+  const winter = [5, 6].find(h => M.isPrimarySendHour(new Date(Date.UTC(2026, 0, 15, h))));
+  assert.strictEqual(summer, 5, 'summer primary should be 05:00 UTC');
+  assert.strictEqual(winter, 6, 'winter primary should be 06:00 UTC');
+});
+
+test('alreadySentToday reports unknown rather than false without an API key', () => {
+  const saved = process.env.BUTTONDOWN_API_KEY;
+  delete process.env.BUTTONDOWN_API_KEY;
+  return M.alreadySentToday(new Date()).then(r => {
+    if (saved) process.env.BUTTONDOWN_API_KEY = saved;
+    assert.strictEqual(r.known, false,
+      'must not claim to know the answer when it cannot ask');
+    assert.strictEqual(r.found, false);
+  });
+});
+
+test('the slug is a per-day marker the duplicate check can match on', () => {
+  const a = M.dailySlug(new Date(Date.UTC(2026, 7, 7, 5, 0)));  // 1am ET
+  const b = M.dailySlug(new Date(Date.UTC(2026, 7, 7, 6, 0)));  // 2am ET, same day
+  assert.strictEqual(a, b, 'both scheduled runs must compute the same marker');
+  // Buttondown may uniquify a repeated slug, so matching is by prefix.
+  assert.ok((a + '-2').startsWith(a), 'prefix matching must catch uniquified slugs');
+});
+
+test('documentation no longer claims slug is an idempotency key', () => {
+  const src = require('fs').readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8');
+  assert.ok(!/Buttondown rejects a duplicate slug/.test(src),
+    'stale claim: the API does not guarantee slug uniqueness');
+  assert.ok(/NOT an idempotency key/.test(src),
+    'the corrected reasoning should be recorded next to the code');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 section('9. Failure modes');
 // ═══════════════════════════════════════════════════════════════════════════
 

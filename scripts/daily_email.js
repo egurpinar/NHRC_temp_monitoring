@@ -721,12 +721,15 @@ function renderSubject(d, now = new Date()) {
 
 /**
  * Deterministic per-day identifier, e.g. "nhrc-2026-08-06", based on the date
- * in the boathouse's timezone.
+ * in the boathouse's timezone. Used as the archive slug AND as the marker that
+ * alreadySentToday() looks for.
  *
- * This is the idempotency key. Buttondown rejects a duplicate slug, so if the
- * job runs more than once in a day — a delayed run, the DST twin cron, a manual
- * retry — only the first actually sends. That lets the schedule tolerate delay
- * without any risk of members getting the same email twice.
+ * NOTE: the slug is NOT an idempotency key. An earlier version of this script
+ * assumed Buttondown rejects duplicate slugs with a 409; it does not — the API
+ * documents `slug` only as "a short, human-readable identifier ... used in the
+ * archive URL", with no uniqueness guarantee. Both scheduled runs therefore
+ * sent, and members received the digest twice. Duplicate prevention now relies
+ * on an explicit check against the API instead of on assumed behaviour.
  */
 function dailySlug(now = new Date()) {
   const ymd = new Intl.DateTimeFormat('en-CA', {
@@ -773,6 +776,59 @@ async function sendViaButtondown(subject, bodyHtml, now = new Date()) {
   }
   if (!res.ok) throw new Error(`Buttondown API ${res.status}: ${text}`);
   return Object.assign({ sent: true, slug }, JSON.parse(text));
+}
+
+/**
+ * True if this run is the primary scheduled send for today — i.e. the cron
+ * whose UTC hour maps to 1 AM in the boathouse's timezone.
+ *
+ * The workflow fires at both 05:00 and 06:00 UTC so that one of them is 1 AM
+ * Eastern year-round; in summer the other lands at 2 AM, inside the send
+ * window. This distinguishes them, and is the tie-breaker used when we cannot
+ * reach the API to check whether today's email already went out.
+ */
+function isPrimarySendHour(now = new Date(), targetLocalHour = 1) {
+  const localHour = parseInt(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: 'numeric', hour12: false,
+  }).format(now), 10);
+  return localHour === targetLocalHour;
+}
+
+/**
+ * Has today's digest already been sent?
+ *
+ * Returns { known, found }. `known` is false when the API could not be
+ * consulted, so the caller can decide what to do rather than guessing.
+ *
+ * Buttondown's list endpoint supports creation_date__start, so we ask only for
+ * emails created on today's Eastern date and look for our slug. The two
+ * scheduled runs are an hour apart rather than concurrent, so a check-then-send
+ * is sufficient here; no atomic idempotency is required.
+ */
+async function alreadySentToday(now = new Date()) {
+  const key = process.env.BUTTONDOWN_API_KEY;
+  if (!key) return { known: false, found: false };
+
+  const slug = dailySlug(now);
+  const ymd = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now);
+
+  try {
+    const url = `https://api.buttondown.com/v1/emails?creation_date__start=${ymd}&excluded_fields=body`;
+    const res = await fetch(url, {
+      headers: { 'Authorization': `Token ${key}`, 'X-API-Version': '2026-04-01' },
+    });
+    if (!res.ok) return { known: false, found: false };
+    const data = await res.json();
+    const results = Array.isArray(data.results) ? data.results : [];
+    // Buttondown may uniquify a repeated slug (e.g. "-2"), so match on prefix.
+    const found = results.some(e =>
+      typeof e.slug === 'string' && e.slug.startsWith(slug));
+    return { known: true, found };
+  } catch (e) {
+    return { known: false, found: false };
+  }
 }
 
 /**
@@ -839,8 +895,29 @@ async function main() {
     return;
   }
   if (args.includes('--send')) {
+    const now = new Date();
+
+    // Duplicate guard. The workflow deliberately allows several runs inside the
+    // send window (the DST twin cron, plus tolerance for GitHub's scheduling
+    // delays), so exactly one of them must actually send.
+    const check = await alreadySentToday(now);
+
+    if (check.known && check.found && !args.includes('--force')) {
+      console.log(`Today's digest (${dailySlug(now)}) has already been sent — nothing to do.`);
+      return;
+    }
+
+    // If the API could not be reached we cannot tell whether today's email went
+    // out. Send only on the primary 1 AM run: a later run staying silent risks
+    // no email today, but sending would risk a second copy, and we already know
+    // what duplicates feel like from the receiving end.
+    if (!check.known && !isPrimarySendHour(now) && !args.includes('--force')) {
+      console.log('Could not verify whether today\'s digest was already sent, and this is not the primary 1 AM run — skipping to avoid a duplicate.');
+      return;
+    }
+
     await checkSubscriberHeadroom();
-    const result = await sendViaButtondown(subject, html);
+    const result = await sendViaButtondown(subject, html, now);
     if (!result.sent) {
       console.log(`Today's email (${result.slug}) was already sent — nothing to do.`);
       return;
@@ -857,6 +934,7 @@ module.exports = {
   loadSiteLogic, loadLocalData, loadRiver, loadWeather,
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
   parseGaugeSeries, checkSubscriberHeadroom, isInSeason, dailySlug,
+  alreadySentToday, isPrimarySendHour,
   describeWeatherCode, withWeatherDescription,
   STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT, LOGO_URL,
   WMO_CODES_FALLBACK, WMO_ICONS_FALLBACK, DEFAULT_WEATHER_ICON,
