@@ -968,7 +968,16 @@ test('no icon is emitted when weather is unavailable', () => {
     { available: false }, new Date());
   const html = M.renderEmailHtml(digest);
   assert.ok(/Weather data unavailable/.test(html));
-  assert.ok(!/&#\d{4,};/.test(html), 'should not render weather entities with no data');
+  // Check specifically for WMO icon codepoints. A blanket "no 4-digit entity"
+  // check is wrong now that all non-ASCII is entity-encoded — the em dash in
+  // the tier labels is legitimately &#8212;.
+  const iconCodes = Object.values(M.WMO_ICONS_FALLBACK)
+    .concat([M.DEFAULT_WEATHER_ICON])
+    .map(e => e.replace(/[^0-9]/g, ''));
+  for (const code of iconCodes) {
+    assert.ok(!html.includes('&#' + code + ';'),
+      `weather icon &#${code}; rendered despite no weather data`);
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1175,6 +1184,70 @@ test('boathouse coordinates are the shared source for weather', () => {
   assert.ok(M.BOATHOUSE.lon > -74 && M.BOATHOUSE.lon < -72, 'longitude out of range');
   const dLat = Math.abs(M.BOATHOUSE.lat - 41.4786);
   assert.ok(dLat > 0.01, 'coordinates should be the boathouse, not the airport');
+});
+
+// ===========================================================================
+section('8f. Character encoding (mojibake prevention)');
+// ===========================================================================
+//
+// The email is a FRAGMENT, so it cannot carry a <meta charset>. Encoding is
+// therefore decided by Buttondown's wrapper and the receiving client, and when
+// they disagree UTF-8 is read as Latin-1: a degree sign arrives as "\u00c2\u00b0" and
+// an em dash as "\u00e2\u0080\u0094". Members saw both. Emitting pure ASCII removes the
+// possibility entirely.
+
+function nonAsciiChars(s) {
+  const out = [];
+  for (const ch of String(s)) if (ch.codePointAt(0) > 127) out.push(ch);
+  return out;
+}
+
+test('rendered email body contains NO non-ASCII characters', () => {
+  for (const d of everyDigest()) {
+    const bad = nonAsciiChars(M.renderEmailHtml(d));
+    assert.strictEqual(bad.length, 0,
+      `found ${bad.length} raw non-ASCII chars (would mojibake): ${JSON.stringify(bad.slice(0, 8))}`);
+  }
+});
+
+test('subject line contains NO non-ASCII characters', () => {
+  for (const d of everyDigest()) {
+    const subject = M.renderSubject(d);
+    const bad = nonAsciiChars(subject);
+    assert.strictEqual(bad.length, 0,
+      `subject has non-ASCII (entities do not work in subjects): ${JSON.stringify(bad)} in "${subject}"`);
+  }
+});
+
+test('entities decode back to the intended characters', () => {
+  const d = everyDigest()[1];
+  const html = M.renderEmailHtml(d);
+  const decoded = html.replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)));
+  assert.ok(/\u00b0F/.test(decoded), 'degree sign should decode correctly');
+  assert.ok(/Tier 2 \u2014 Intermediate/.test(decoded),
+    'the em dash in tier labels should decode correctly');
+});
+
+test('data pulled from index.html is encoded too, not just our own strings', () => {
+  // The tier labels come from ZONE_TIERS in index.html and contain an em dash.
+  // Escaping only hard-coded strings would have missed them.
+  const html = M.renderEmailHtml(everyDigest()[0]);
+  assert.ok(/Tier 2 &#8212; Intermediate/.test(html),
+    'tier label em dash should be an entity');
+  assert.ok(!/Tier 2 \u2014/.test(html), 'raw em dash leaked through');
+});
+
+test('toAsciiEntities leaves existing entities and ASCII untouched', () => {
+  assert.strictEqual(M.toAsciiEntities('&nbsp;&middot; plain ASCII'), '&nbsp;&middot; plain ASCII');
+  assert.strictEqual(M.toAsciiEntities('a\u00b0b'), 'a&#176;b');
+  assert.strictEqual(M.toAsciiEntities(''), '');
+});
+
+test('toAsciiSubject degrades punctuation readably', () => {
+  assert.strictEqual(M.toAsciiSubject('A \u2014 B'), 'A - B');
+  assert.strictEqual(M.toAsciiSubject('72.4\u00b0F'), '72.4F');
+  assert.strictEqual(M.toAsciiSubject('a \u00b7 b'), 'a - b');
+  assert.strictEqual(nonAsciiChars(M.toAsciiSubject('\u2018q\u2019 \u201cd\u201d \u00a0 \u20ac')).length, 0);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

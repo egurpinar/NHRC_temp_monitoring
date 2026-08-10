@@ -570,6 +570,44 @@ function sectionLabel(text) {
     `padding:0 0 8px 0;">${esc(text)}</div>`;
 }
 
+/**
+ * Converts every non-ASCII character to a numeric HTML entity.
+ *
+ * WHY: the email is a fragment (see the constraints above), so it cannot carry
+ * a <meta charset>. That leaves the character encoding entirely to Buttondown's
+ * wrapper and the receiving client, and when they disagree UTF-8 bytes get read
+ * as Latin-1 — a degree sign arrives as "Â°" and an em dash as "â€”".
+ *
+ * Numeric entities are pure ASCII, so they survive any charset mismatch and
+ * render identically everywhere.
+ *
+ * This runs over the FINAL html rather than at each interpolation site, so it
+ * also covers text pulled from index.html — the tier labels contain an em dash
+ * ("Tier 2 — Intermediate"), which is where the mojibake was most visible.
+ * Existing entities are untouched because they are already ASCII.
+ */
+function toAsciiEntities(html) {
+  return String(html).replace(/[-￿]/g, ch => '&#' + ch.charCodeAt(0) + ';');
+}
+
+/**
+ * Subject lines cannot use HTML entities — they are not HTML, so "&deg;" would
+ * appear literally. Their encoding depends on MIME headers we do not control,
+ * so the subject is kept pure ASCII instead.
+ */
+function toAsciiSubject(s) {
+  return String(s)
+    .replace(/[‒-―]/g, '-')   // dashes
+    .replace(/[‘’]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/·/g, '-')            // middle dot
+    .replace(/°/g, '')             // degree: "72.4F" reads fine
+    .replace(/ /g, ' ')
+    .replace(/[-￿]/g, '')    // anything else non-ASCII
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 function renderEmailHtml(d) {
   const PAD = 20; // modest padding so 320px screens still have room
 
@@ -650,7 +688,7 @@ function renderEmailHtml(d) {
     : `<div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">Weather data unavailable this morning.</div>`;
 
   // ── Assemble ───────────────────────────────────────────────────────────────
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background-color:${C.page};">
+  return toAsciiEntities(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background-color:${C.page};">
   <tr><td align="center" style="padding:16px 8px;background-color:${C.page};">
     <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%;max-width:600px;background-color:${C.card};border:1px solid ${C.border};border-radius:10px;">
 
@@ -718,7 +756,7 @@ ${warningHtml}
 
     </table>
   </td></tr>
-</table>`;
+</table>`);
 }
 /**
  * Builds the subject line.
@@ -774,7 +812,10 @@ function renderSubject(d, now = new Date()) {
     ? 'river n/a'
     : `river ${d.river.level.toFixed(1)} ft${d.river.isEstimate ? ' est.' : ''}`;
 
-  return `NHRC ${dateShort} — ${headline} · ${d.tempF.toFixed(1)}°F · ${riverPart}`;
+  // Kept ASCII-only: subjects are not HTML, so entities would show literally,
+  // and their encoding depends on MIME headers we do not control.
+  return toAsciiSubject(
+    `NHRC ${dateShort} - ${headline} - ${d.tempF.toFixed(1)}F - ${riverPart}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -998,6 +1039,7 @@ module.exports = {
   parseGaugeSeries, checkSubscriberHeadroom, isInSeason, dailySlug,
   alreadySentToday, isPrimarySendHour,
   describeWeatherCode, withWeatherDescription, formatLocalClock,
+  toAsciiEntities, toAsciiSubject,
   STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT, LOGO_URL, BOATHOUSE,
   WMO_CODES_FALLBACK, WMO_ICONS_FALLBACK, DEFAULT_WEATHER_ICON,
 };
