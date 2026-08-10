@@ -334,14 +334,73 @@ function withWeatherDescription(weather, logic) {
   });
 }
 
+// Boathouse coordinates — 407 Roosevelt Drive, Oxford CT.
+//
+// Open-Meteo is a gridded forecast model, not a weather station: it interpolates
+// to whatever point you ask for, so this is already a boathouse forecast rather
+// than an airport observation. (Waterbury-Oxford Airport is 4.8 km north; we do
+// not use it.) Sunrise and sunset are computed astronomically from these exact
+// coordinates, so they are precise to the metre; temperature and wind come from
+// a model grid of roughly 1-11 km, so small coordinate changes move them little.
+//
+// To fine-tune, replace these two numbers with the dock's coordinates.
+const BOATHOUSE = { lat: 41.4370, lon: -73.1190 };
+
+/**
+ * Formats an Open-Meteo sunrise/sunset value as a local clock time ("5:52 AM").
+ *
+ * Handles all three shapes the API can return, because getting this wrong fails
+ * silently — an hours-off sunrise still looks like a plausible time:
+ *
+ *   "2026-08-07T05:52"        already in the requested timezone, NO offset.
+ *                             Must be read literally: passing it to new Date()
+ *                             treats it as UTC and shifts it by hours.
+ *   "2026-08-07T05:52-04:00"  an absolute instant, so convert via timeZone.
+ *   1786...                   unix seconds (timeformat=unixtime), same.
+ */
+function formatLocalClock(value, timeZone = 'America/New_York') {
+  const viaInstant = (d) => {
+    if (isNaN(d.getTime())) return null;
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone, hour: 'numeric', minute: '2-digit', hour12: true,
+    }).format(d).replace(/ /g, ' ');
+  };
+
+  if (typeof value === 'number' && isFinite(value)) {
+    // Only accept timestamps in a plausible range (roughly 2000-2100). Without
+    // this a stray small number like 42 would silently render as a valid-looking
+    // clock time instead of being rejected as nonsense.
+    if (value < 946684800 || value > 4102444800) return null;
+    return viaInstant(new Date(value * 1000));
+  }
+  if (typeof value !== 'string') return null;
+
+  // Explicit offset or Z means it identifies an instant, not a wall clock.
+  if (/(Z|[+-]\d{2}:?\d{2})$/.test(value)) return viaInstant(new Date(value));
+
+  const m = value.match(/T(\d{2}):(\d{2})/);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  if (!(h >= 0 && h <= 23)) return null;
+  const min = m[2];
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${min} ${suffix}`;
+}
+
 async function loadWeather() {
-  const lat = 41.4370, lon = -73.1190; // NHRC boathouse, Oxford CT
+  const { lat, lon } = BOATHOUSE;
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
     `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation` +
+    `&daily=sunrise,sunset` +
     `&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=America%2FNew_York`;
   try {
     const data = await fetchJson(url);
     const c = data.current;
+    // daily arrays are indexed by day; [0] is today in the requested timezone.
+    const sunrise = formatLocalClock(data && data.daily && data.daily.sunrise && data.daily.sunrise[0]);
+    const sunset  = formatLocalClock(data && data.daily && data.daily.sunset  && data.daily.sunset[0]);
     return {
       available: true,
       code: c.weather_code,
@@ -351,6 +410,8 @@ async function loadWeather() {
       gustMph: Math.round(c.wind_gusts_10m),
       dir: windDirLabel(c.wind_direction_10m),
       precip: Number(c.precipitation).toFixed(2),
+      sunrise,
+      sunset,
     };
   } catch (e) {
     return { available: false };
@@ -582,6 +643,7 @@ function renderEmailHtml(d) {
              <div style="font-size:14px;font-weight:bold;color:${C.ink};background-color:${C.card};">${esc(d.weather.cond)}, ${d.weather.tempF}°F</div>
              <div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};padding-top:3px;">Feels like ${d.weather.feelsF}°F &nbsp;&middot;&nbsp; Wind ${d.weather.windMph} mph ${esc(d.weather.dir)}, gusts ${d.weather.gustMph} mph</div>
              <div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};padding-top:2px;">Precipitation ${esc(d.weather.precip)} in</div>
+             ${(d.weather.sunrise || d.weather.sunset) ? `<div style="font-size:13px;color:${C.ink};background-color:${C.card};padding-top:6px;">Sunrise ${esc(d.weather.sunrise || '--')} &nbsp;&middot;&nbsp; Sunset ${esc(d.weather.sunset || '--')}</div>` : ''}
            </td>
          </tr>
        </table>`
@@ -935,8 +997,8 @@ module.exports = {
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
   parseGaugeSeries, checkSubscriberHeadroom, isInSeason, dailySlug,
   alreadySentToday, isPrimarySendHour,
-  describeWeatherCode, withWeatherDescription,
-  STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT, LOGO_URL,
+  describeWeatherCode, withWeatherDescription, formatLocalClock,
+  STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT, LOGO_URL, BOATHOUSE,
   WMO_CODES_FALLBACK, WMO_ICONS_FALLBACK, DEFAULT_WEATHER_ICON,
 };
 

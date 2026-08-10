@@ -1091,6 +1091,93 @@ test('documentation no longer claims slug is an idempotency key', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+section('8e. Sunrise / sunset');
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('naive local times are read literally, not reinterpreted as UTC', () => {
+  // Open-Meteo returns daily times already in the requested timezone and with
+  // NO offset ("2026-08-07T05:52"). Passing that to new Date() would treat it
+  // as UTC and shift it by hours, so sunrise would read 1:52 AM in summer.
+  const cases = [
+    ['2026-08-07T05:52', '5:52 AM'],
+    ['2026-08-07T20:01', '8:01 PM'],
+    ['2026-01-15T00:07', '12:07 AM'],
+    ['2026-01-15T12:00', '12:00 PM'],
+    ['2026-06-01T13:05', '1:05 PM'],
+    ['2026-11-15T16:30', '4:30 PM'],
+  ];
+  for (const [input, expected] of cases) {
+    assert.strictEqual(M.formatLocalClock(input), expected, `for ${input}`);
+  }
+});
+
+test('every API response shape yields the SAME correct clock time', () => {
+  // The exact shape is not pinned down by the docs, and an hours-off sunrise
+  // looks perfectly plausible — so all three forms must agree.
+  const expected = '5:52 AM';
+  assert.strictEqual(M.formatLocalClock('2026-08-07T05:52'), expected, 'naive local');
+  assert.strictEqual(M.formatLocalClock('2026-08-07T05:52-04:00'), expected, 'with offset');
+  assert.strictEqual(M.formatLocalClock('2026-08-07T09:52Z'), expected, 'UTC Z');
+  assert.strictEqual(M.formatLocalClock(Math.floor(Date.UTC(2026, 7, 7, 9, 52) / 1000)),
+    expected, 'unix seconds');
+  // And across DST, where a fixed offset assumption would break.
+  assert.strictEqual(M.formatLocalClock('2026-01-15T07:15-05:00'), '7:15 AM', 'winter offset');
+});
+
+test('sunrise times are plausible for the boathouse latitude', () => {
+  // Guards against a whole-hours timezone error slipping through unnoticed:
+  // at 41 N, sunrise never falls outside roughly 4am-8am.
+  for (const iso of ['2026-06-21T05:19', '2026-12-21T07:16', '2026-08-07T05:52']) {
+    const out = M.formatLocalClock(iso);
+    const [, h, , suffix] = out.match(/^(\d{1,2}):(\d{2}) (AM|PM)$/);
+    const hour24 = suffix === 'AM' ? (h === '12' ? 0 : Number(h)) : Number(h) + 12;
+    assert.ok(hour24 >= 4 && hour24 <= 8,
+      `sunrise ${out} is implausible for 41N — suspect a timezone shift`);
+  }
+});
+
+test('malformed or missing times degrade to null, never NaN', () => {
+  for (const bad of [undefined, null, '', 'not-a-time', 42, {}]) {
+    assert.strictEqual(M.formatLocalClock(bad), null, `for ${JSON.stringify(bad)}`);
+  }
+});
+
+test('sunrise and sunset appear in the email when available', () => {
+  const digest = M.computeDigest(logic,
+    { raw: makeRaw(72), history: historyAtTemp(72) },
+    { level: 5, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+    { available: true, code: 0, tempF: 70, feelsF: 69, windMph: 5, gustMph: 9,
+      dir: 'NW', precip: '0.00', sunrise: '5:52 AM', sunset: '8:01 PM' },
+    new Date());
+  const html = M.renderEmailHtml(digest);
+  assert.ok(/Sunrise 5:52 AM/.test(html), 'sunrise missing from email');
+  assert.ok(/Sunset 8:01 PM/.test(html), 'sunset missing from email');
+});
+
+test('the email omits the line entirely when sun times are unavailable', () => {
+  const digest = M.computeDigest(logic,
+    { raw: makeRaw(72), history: historyAtTemp(72) },
+    { level: 5, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+    { available: true, code: 0, tempF: 70, feelsF: 69, windMph: 5, gustMph: 9,
+      dir: 'NW', precip: '0.00' },
+    new Date());
+  const html = M.renderEmailHtml(digest);
+  assert.ok(!/Sunrise/.test(html), 'should not render a sunrise line with no data');
+  assert.ok(!/undefined|null/.test(html.replace(/\{\{[^}]*\}\}/g, '')),
+    'no placeholder leakage');
+});
+
+test('boathouse coordinates are the shared source for weather', () => {
+  assert.ok(M.BOATHOUSE && typeof M.BOATHOUSE.lat === 'number',
+    'coordinates should be a named constant, not scattered literals');
+  // Sanity: within Connecticut, and not Waterbury-Oxford Airport (41.4786,-73.1352).
+  assert.ok(M.BOATHOUSE.lat > 41 && M.BOATHOUSE.lat < 42, 'latitude out of range');
+  assert.ok(M.BOATHOUSE.lon > -74 && M.BOATHOUSE.lon < -72, 'longitude out of range');
+  const dLat = Math.abs(M.BOATHOUSE.lat - 41.4786);
+  assert.ok(dLat > 0.01, 'coordinates should be the boathouse, not the airport');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 section('9. Failure modes');
 // ═══════════════════════════════════════════════════════════════════════════
 

@@ -1179,10 +1179,34 @@ async function loadWeather() {
     const lat = 41.4370, lon = -73.1190;
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
       `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation` +
+      `&daily=sunrise,sunset` +
       `&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=America%2FNew_York`;
     const res  = await fetch(url);
     const data = await res.json();
     const c    = data.current;
+    // Open-Meteo returns daily times already converted to the requested
+    // timezone and WITHOUT an offset ("2026-08-07T05:52"). Parsing those with
+    // new Date() would treat them as UTC and shift them by hours, so read the
+    // clock digits directly.
+    const sunTime = (v) => {
+      const viaInstant = (d) => isNaN(d.getTime()) ? null
+        : new Intl.DateTimeFormat('en-US', {timeZone:'America/New_York', hour:'numeric', minute:'2-digit', hour12:true}).format(d);
+      // Only accept plausible timestamps (~2000-2100) so a stray number
+      // cannot render as a valid-looking time.
+      if (typeof v === 'number' && isFinite(v)) return (v < 946684800 || v > 4102444800) ? null : viaInstant(new Date(v * 1000));
+      if (typeof v !== 'string') return null;
+      // An explicit offset or Z means it is an instant, so convert it properly.
+      if (/(Z|[+-]\d{2}:?\d{2})$/.test(v)) return viaInstant(new Date(v));
+      const m = v.match(/T(\d{2}):(\d{2})/);
+      if (!m) return null;
+      let h = parseInt(m[1], 10);
+      if (!(h >= 0 && h <= 23)) return null;
+      const suffix = h >= 12 ? 'PM' : 'AM';
+      h = h % 12; if (h === 0) h = 12;
+      return `${h}:${m[2]} ${suffix}`;
+    };
+    const sunrise = sunTime(data && data.daily && data.daily.sunrise && data.daily.sunrise[0]);
+    const sunset  = sunTime(data && data.daily && data.daily.sunset  && data.daily.sunset[0]);
     const code    = c.weather_code;
     const tempF   = Math.round(c.temperature_2m);
     const feelsF  = Math.round(c.apparent_temperature);
@@ -1210,6 +1234,10 @@ async function loadWeather() {
         <div class="wstat"><div class="wk">Gusts</div><div class="wv">${gustMph}<span class="wu">mph</span></div><div class="wd">Peak gust</div></div>
         <div class="wstat"><div class="wk">Precip</div><div class="wv">${precip}<span class="wu">in</span></div><div class="wd">Current hour</div></div>
       </div>
+      ${(sunrise || sunset) ? `<div class="weather-stats-row" style="margin-top:10px;grid-template-columns:repeat(2,1fr);">
+        <div class="wstat"><div class="wk">Sunrise</div><div class="wv">${sunrise || '--'}</div><div class="wd">Oxford, CT</div></div>
+        <div class="wstat"><div class="wk">Sunset</div><div class="wv">${sunset || '--'}</div><div class="wd">Oxford, CT</div></div>
+      </div>` : ''}
       <div style="margin-top:10px;text-align:right;">
         <a href="https://forecast.weather.gov/MapClick.php?CityName=Oxford&state=CT&site=OKX&textField1=41.4370&textField2=-73.1190"
            target="_blank"
