@@ -263,6 +263,19 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       <div class="note-text" id="rowing-notes"></div>
     </div>
 
+    <!-- BOATHOUSE CAMERA -->
+    <!-- Hidden until a snapshot actually loads, so it never shows a broken
+         image. Configure the source in CAMERA_SNAPSHOT_URL near the bottom
+         of this file. -->
+    <div class="river-card" id="camera-card" style="display:none;">
+      <div class="section-label">Boathouse Camera &mdash; Still Image, Updates ~Every 15 Min</div>
+      <div style="border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);line-height:0;background:var(--navy3);">
+        <img id="camera-img" alt="Latest view of the river from the boathouse"
+             style="width:100%;height:auto;display:block;"/>
+      </div>
+      <div class="note-text" id="camera-note">Updates automatically through the day.</div>
+    </div>
+
     <!-- WEATHER CARD -->
     <div class="weather-card">
       <div class="section-label">Current Weather — Oxford, CT</div>
@@ -317,19 +330,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       <div id="river-content">
         <div class="river-unavailable">Loading river level data...</div>
       </div>
-    </div>
-
-    <!-- BOATHOUSE CAMERA -->
-    <!-- Hidden until a snapshot actually loads, so it never shows a broken
-         image. Configure the source in CAMERA_SNAPSHOT_URL near the bottom
-         of this file. -->
-    <div class="river-card" id="camera-card" style="display:none;">
-      <div class="section-label">Boathouse Camera &mdash; Still Image, Updates ~Every 15 Min</div>
-      <div style="border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);line-height:0;background:var(--navy3);">
-        <img id="camera-img" alt="Latest view of the river from the boathouse"
-             style="width:100%;height:auto;display:block;"/>
-      </div>
-      <div class="note-text" id="camera-note">Updates automatically through the day.</div>
     </div>
 
     <!-- RIVER NAVIGATION & SAFETY MAP -->
