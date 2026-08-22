@@ -32,8 +32,9 @@ Ring refresh tokens rotate about hourly and expire shortly after use. The
 > is to delete the client from Ring Control Center and repeat the authentication
 > process"
 
-So a botched token doesn't just break this script — it can silently disable
-motion notifications on the camera itself. A cron job authenticates cold every
+So a botched token doesn't just break this script — it silently disables push
+notifications for the Ring account being used (this account only, not the camera
+owner's, since FCM registration is per-account). A cron job authenticates cold every
 run and has no safe way to persist the rotation. A long-lived process holds the
 session in memory, subscribes to `onRefreshTokenUpdated`, and writes each new
 token to disk atomically.
@@ -260,18 +261,30 @@ journalctl -u nhrc-camera -n 50           # what the Pi has been doing
 Read this before deploying. The design keeps blast radius small, but two risks
 are inherent and one of them is worth a deliberate decision.
 
-### The Ring token is the crown jewel — reduce what it unlocks
+### The Ring token — keep its reach small
 
-A Ring refresh token is equivalent to the account password. If the Pi were
-compromised, an attacker holding it could reach **everything that account can
-reach** — every camera, and the alarm system if you have one.
+A Ring refresh token is equivalent to the account password: whoever holds it can
+reach everything that account can reach.
 
-**Strongly recommended: do not use your personal Ring account.** Ring supports
-Shared Users. Create one, share **only the boathouse camera** with it, and
-authenticate the Pi with that account. A stolen token then exposes one camera
-pointed at a river, not your home.
+**In this deployment that is already narrow.** The account used here is not the
+camera owner's; the boathouse camera was shared with it, and it is not used for
+anything else. So a stolen token exposes one camera pointed at a river — which
+is exactly the isolation a purpose-made Shared User would have provided. Nothing
+further is needed.
 
-This is the single highest-value mitigation here and it costs five minutes.
+Two consequences worth noting:
+
+- Mishandling a token would break push notifications on **this** account only.
+  FCM registration is per-account, so the camera owner's notifications are not
+  at risk.
+- If this account is ever given access to more Ring devices, the blast radius
+  grows silently. Keep it single-purpose.
+
+**Permission, separately from security.** The camera belongs to someone else.
+Being able to view a shared camera is not the same as permission to republish
+its images publicly every 15 minutes. Get the owner's explicit agreement before
+going live, and tell them the framing is water-only — it is their device, their
+Ring account terms, and unwinding it later is harder than asking first.
 
 | Protection in place | What it does |
 |---|---|
@@ -327,7 +340,8 @@ Pin versions and update deliberately rather than automatically.
 Being explicit, since these are real:
 
 - **A compromised Pi.** If the box is owned, the Ring token goes with it. The
-  Shared User recommendation above is the mitigation that actually matters.
+  limiting factor is what that account can reach — currently one shared camera,
+  which is why keeping the account single-purpose matters.
 - **Anyone who can see the published image.** It is public by design. The
   privacy control is the camera's framing, not access control.
 - **Someone re-aiming the camera.** If it is ever moved to cover the dock,
