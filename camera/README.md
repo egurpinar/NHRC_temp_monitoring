@@ -1,14 +1,16 @@
 # Boathouse Camera
 
-Captures a snapshot from the Ring camera every 15 minutes and publishes it at
-`cam.roworno.com`, so the website can show current river conditions.
+Captures a snapshot from the Ring camera every 15 minutes and publishes it via
+a Cloudflare Worker, so the website can show current river conditions.
 
 ```
 Ring cloud  <--  Pi Zero W (snapshot_service.js)  -->  Cloudflare Worker + R2
-                 outbound only, no open ports          cam.roworno.com
+                 outbound only, no open ports          *.workers.dev
                                                               |
                                                        roworno.com <img>
 ```
+
+Tested on Raspbian GNU/Linux 12 (bookworm), 32-bit, Pi Zero W (ARMv6).
 
 ## Two things to get right
 
@@ -40,17 +42,35 @@ token to disk atomically.
 
 ## 1. Cloudflare Worker (the receiving end)
 
-Requires `roworno.com` to be on Cloudflare DNS.
-
 1. **R2 → Create bucket** → `nhrc-camera`
 2. **Workers & Pages → Create Worker** → paste `cloudflare_worker.js`
 3. **Settings → Variables and Secrets**
    - `UPLOAD_SECRET` (type: Secret) — generate with `openssl rand -hex 32`
 4. **Settings → Bindings → R2 bucket**
    - Variable name `BUCKET`, bucket `nhrc-camera`
-5. **Settings → Domains & Routes → Custom domain** → `cam.roworno.com`
 
-Check it: `curl https://cam.roworno.com/status` → JSON saying no snapshot yet.
+### Which URL
+
+`roworno.com` currently uses **GoDaddy** nameservers
+(`ns11/ns12.domaincontrol.com`), pointing at GitHub Pages, with no MX records.
+Cloudflare Workers custom domains require the zone to be hosted on Cloudflare,
+so `cam.roworno.com` is not available without moving the nameservers.
+
+**Use the workers.dev URL** that Cloudflare assigns automatically:
+
+```
+https://nhrc-camera.<your-account>.workers.dev/latest.jpg
+```
+
+It has valid TLS, costs nothing, and needs no DNS change — so the live site is
+never at risk. The URL appears only in `index.html`; members never see it.
+
+If you later move DNS to Cloudflare (relatively low risk here: four A records
+and no email to break), add the custom domain under **Settings → Domains &
+Routes** and change the one constant in `index.html`.
+
+Check it: `curl https://nhrc-camera.<account>.workers.dev/status` → JSON saying
+no snapshot has been uploaded yet.
 
 ## 2. Node on the Pi Zero W
 
@@ -102,7 +122,7 @@ itself — do not hand-edit it afterwards.
 ```bash
 cat > /opt/nhrc-camera/env <<'EOF'
 RING_CAMERA_NAME=boathouse
-CAMERA_UPLOAD_URL=https://cam.roworno.com/latest.jpg
+CAMERA_UPLOAD_URL=https://nhrc-camera.YOUR-ACCOUNT.workers.dev/latest.jpg
 CAMERA_UPLOAD_SECRET=the-same-secret-as-the-worker
 CAMERA_INTERVAL_MINUTES=15
 CAMERA_ACTIVE_START_HOUR=5
@@ -118,7 +138,7 @@ node snapshot_service.js --once      # one real capture and upload
 `RING_CAMERA_NAME` is a case-insensitive substring; if it matches nothing the
 error lists every camera on the account.
 
-Then open `https://cam.roworno.com/latest.jpg`.
+Then open the same URL in a browser — you should see the river.
 
 ## 6. Run it permanently
 
@@ -188,11 +208,11 @@ journalctl -u nhrc-camera -f
 
 ## 7. Show it on the website
 
-Once `cam.roworno.com/latest.jpg` is live, set this near the bottom of
+Once the snapshot URL is live, set this near the bottom of
 `index.html`:
 
 ```js
-const CAMERA_SNAPSHOT_URL = 'https://cam.roworno.com/latest.jpg';
+const CAMERA_SNAPSHOT_URL = 'https://nhrc-camera.YOUR-ACCOUNT.workers.dev/latest.jpg';
 ```
 
 The card stays hidden until an image loads, and hides again on any failure — so
@@ -220,7 +240,7 @@ hardware fault.
 ## When something is wrong
 
 ```bash
-curl https://cam.roworno.com/status       # age of the current frame
+curl https://nhrc-camera.YOUR-ACCOUNT.workers.dev/status       # age of the current frame
 journalctl -u nhrc-camera -n 50           # what the Pi has been doing
 ```
 
@@ -268,8 +288,8 @@ from the Pi directly — that would mean exposing a DNS server to the internet.
 
 ### The upload secret
 
-Worst case if it leaks: someone replaces the picture on `cam.roworno.com`. Not
-trivial — it is the club's domain — but it grants no access to the Pi, the Ring
+Worst case if it leaks: someone replaces the published picture. Annoying, but
+it grants no access to the Pi, the Ring
 account, or the website repo.
 
 Hardening applied:
