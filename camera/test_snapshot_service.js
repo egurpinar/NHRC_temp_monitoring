@@ -188,6 +188,64 @@ test('a successful upload sends the secret and the image', async () => {
   assert.strictEqual(seen.opts.headers['Content-Type'], 'image/jpeg');
 });
 
+test('the upload survives a REAL fetch against a real server', async () => {
+  // Every other upload test injects a fake fetch, which records headers without
+  // validating them. This one uses the genuine global fetch against a loopback
+  // server, so the request is really constructed and really transmitted.
+  // NOTE: this does NOT by itself catch a manually-set Content-Length — Node 22
+  // accepts one where Node 20 throws. The static check below is the guard for
+  // that. What this test does cover is that the body arrives intact and the
+  // auth and content-type headers survive a real round trip.
+  const http = require('http');
+  const received = {};
+  const server = http.createServer((req, res) => {
+    received.method = req.method;
+    received.auth = req.headers.authorization;
+    received.type = req.headers['content-type'];
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => {
+      received.body = Buffer.concat(chunks);
+      res.writeHead(200); res.end('OK');
+    });
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  try {
+    const payload = Buffer.from('\xFF\xD8\xFFhello-jpeg\xFF\xD9', 'binary');
+    const cfg = { ...baseCfg, uploadUrl: `http://127.0.0.1:${port}/latest.jpg` };
+    await S.uploadSnapshot(payload, cfg); // real global fetch, no stub
+    assert.strictEqual(received.method, 'PUT');
+    assert.strictEqual(received.auth, `Bearer ${cfg.uploadSecret}`);
+    assert.strictEqual(received.type, 'image/jpeg');
+    assert.strictEqual(received.body.length, payload.length, 'body truncated');
+    assert.ok(received.body.equals(payload), 'body corrupted in transit');
+  } finally {
+    await new Promise(r => server.close(r));
+  }
+});
+
+test('Content-Length is never set by hand', () => {
+  // THIS is the load-bearing guard, not the live test above: whether undici
+  // rejects a caller-supplied Content-Length depends on its version. Node 20 on
+  // the Pi throws UND_ERR_INVALID_ARG; Node 22 accepts it silently. So a live
+  // test can pass on the dev machine while the Pi fails, and did.
+  const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
+  const start = src.indexOf('async function uploadSnapshot');
+  assert.ok(start > 0, 'uploadSnapshot not found — test needs updating');
+  // End at the next top-level function so the slice cannot silently collapse.
+  // An earlier version ended at the string "// Ring", which first occurs in a
+  // config comment ABOVE this function: the slice came out empty and the
+  // assertion passed against nothing. A vacuous test is worse than no test.
+  const rest = src.slice(start + 1);
+  const endRel = rest.search(/\n(?:async )?function /);
+  const uploadFn = rest.slice(0, endRel === -1 ? rest.length : endRel);
+  assert.ok(uploadFn.length > 200 && /fetchImpl\(/.test(uploadFn),
+    `extracted uploadSnapshot body looks wrong (${uploadFn.length} chars)`);
+  assert.ok(!/['"]Content-Length['"]\s*:/.test(uploadFn),
+    'uploadSnapshot sets Content-Length; undici rejects it with UND_ERR_INVALID_ARG');
+});
+
 test('a transport failure names the real cause, not just "fetch failed"', async () => {
   // Node's fetch throws a bare "fetch failed" and buries the reason on .cause.
   // A log line that only says "fetch failed" cost a full debugging round trip.

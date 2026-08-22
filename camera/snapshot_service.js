@@ -206,7 +206,9 @@ async function uploadSnapshot(buffer, cfg = CONFIG, fetchImpl = globalThis.fetch
       headers: {
         'Authorization': `Bearer ${cfg.uploadSecret}`,
         'Content-Type': 'image/jpeg',
-        'Content-Length': String(buffer.length),
+        // Do NOT set Content-Length. undici derives it from the body and
+        // rejects a caller-supplied value with UND_ERR_INVALID_ARG, so setting
+        // it here made every upload fail before a byte left the Pi.
       },
       body: buffer,
     });
