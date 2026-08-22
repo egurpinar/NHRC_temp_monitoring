@@ -5,3 +5,16 @@ preview*.html
 # Editor / OS cruft
 .DS_Store
 *~
+
+# Camera service secrets and captures.
+# This repository is PUBLIC and git history is permanent: a committed token or
+# snapshot could never truly be withdrawn. These patterns are a safety net, not
+# a substitute for keeping them off the repo machine entirely.
+camera/env
+camera/*.env
+camera/ring-token
+camera/*ring-token*
+*.jpg
+*.jpeg
+!nhrc_email_logo.png
+node_modules/
