@@ -93,12 +93,50 @@ node --version    # v20.18.1
 ```bash
 sudo mkdir -p /opt/nhrc-camera && sudo chown $USER /opt/nhrc-camera
 cd /opt/nhrc-camera
-cp /path/to/repo/camera/snapshot_service.js .
+curl -fsSL -o snapshot_service.js \
+  https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/snapshot_service.js
 
 npm init -y
-# --ignore-scripts skips the ffmpeg binary download, which has no ARMv6 build.
-# Only video streaming needs ffmpeg; snapshots do not.
-npm install ring-client-api --ignore-scripts
+# --ignore-scripts skips the ffmpeg binary download, which has no ARMv6 build,
+# and — more importantly — stops package install scripts running arbitrary code
+# on a machine serving DNS. Only video streaming needs ffmpeg; snapshots do not.
+npm install ring-client-api --ignore-scripts --no-audit --no-fund
+```
+
+### Memory during install
+
+Installing is the memory-hungry step, not running. npm resolving a large
+dependency tree can transiently need several hundred MB — more than the service
+ever uses. On a 512 MB Pi Zero W (~427 MB usable) that can thrash swap or get
+OOM-killed, which on a Pi-hole box means DNS hiccups.
+
+Check headroom first:
+
+```bash
+free -m          # look at the "available" column, not "free"
+```
+
+If `available` is under ~250 MB, or swap is already heavily used, give the
+install more room temporarily:
+
+```bash
+sudo dphys-swapfile swapoff
+sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=1024/' /etc/dphys-swapfile
+sudo dphys-swapfile setup && sudo dphys-swapfile swapon
+free -m          # confirm ~1 GB swap
+```
+
+Revert to the original value afterwards if you prefer — the running service does
+not need it. Heavy swapping wears the SD card, so this is for the install only.
+
+**If npm still fails or the Pi becomes unresponsive**, install on another machine
+and copy the result across. `--ignore-scripts` means nothing is compiled, so the
+tree is portable:
+
+```bash
+# on your Mac, in an empty directory
+npm init -y && npm install ring-client-api --ignore-scripts --no-audit --no-fund
+rsync -az node_modules package.json emre@pihole2:/opt/nhrc-camera/
 ```
 
 ## 4. Authenticate to Ring (once)
@@ -162,7 +200,10 @@ RestartSec=60
 
 # This box also serves DNS. Cap memory so a leak here can never take Pi-hole
 # down with it — systemd kills this service instead of the OOM killer choosing.
-MemoryMax=150M
+# 200M sits comfortably above the ~80-120M the service actually uses (including
+# startup spikes) while leaving headroom on a 427M Pi Zero W. Set it too low and
+# systemd kills the service on every start, producing a restart loop.
+MemoryMax=200M
 
 # --- Containment -----------------------------------------------------------
 # This process runs a large third-party dependency tree on a machine that
@@ -330,7 +371,7 @@ DNS. Mitigations:
 - **Dedicated unprivileged user, no shell, no home directory.**
 - **systemd containment** — `NoNewPrivileges`, restricted address families,
   read-only filesystem apart from one directory.
-- **`MemoryMax=150M`** — a runaway process gets killed rather than triggering
+- **`MemoryMax=200M`** — a runaway process gets killed rather than triggering
   the OOM killer, which might otherwise choose Pi-hole.
 
 Pin versions and update deliberately rather than automatically.
