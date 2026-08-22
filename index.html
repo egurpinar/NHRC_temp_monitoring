@@ -324,7 +324,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
          image. Configure the source in CAMERA_SNAPSHOT_URL near the bottom
          of this file. -->
     <div class="river-card" id="camera-card" style="display:none;">
-      <div class="section-label">Boathouse Camera &mdash; River View</div>
+      <div class="section-label">Boathouse Camera &mdash; Still Image, Updates ~Every 15 Min</div>
       <div style="border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);line-height:0;background:var(--navy3);">
         <img id="camera-img" alt="Latest view of the river from the boathouse"
              style="width:100%;height:auto;display:block;"/>
@@ -460,7 +460,10 @@ function loadCameraSnapshot() {
     if (note) {
       const t = new Date().toLocaleTimeString('en-US',
         { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
-      note.textContent = `View of the river from the boathouse. Loaded ${t} ${nyTzAbbr(Date.now())}.`;
+      // "Loaded" described when the browser fetched the image, which reads as
+      // when the photo was taken. It can be up to a capture interval older, so
+      // say so rather than implying a live view.
+      note.textContent = `View of the river from the boathouse. Checked ${t} ${nyTzAbbr(Date.now())}; image may be up to 15 min older.`;
     }
   };
   // Any failure (offline camera, missing file, network) hides the card rather
