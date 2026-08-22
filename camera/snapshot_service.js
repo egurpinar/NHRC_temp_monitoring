@@ -192,7 +192,11 @@ async function connectRing(cfg = CONFIG) {
       `then write it to that file (chmod 600).`);
   }
 
-  const { RingApi } = require('ring-client-api');
+  // ring-client-api v14+ is an ES module, so it cannot be require()d from this
+  // CommonJS file — Node throws ERR_REQUIRE_ESM. A dynamic import() works from
+  // CommonJS and is available in every supported Node version. This function is
+  // already async, so awaiting it costs nothing.
+  const { RingApi } = await import('ring-client-api');
   const api = new RingApi({
     refreshToken: token,
     // No camera status polling: we only need snapshots, and polling wakes a

@@ -274,6 +274,17 @@ test('the Worker refuses to serve a stale frame', () => {
   assert.ok(/status: 404/.test(w), 'stale frames should 404 so the site hides the card');
 });
 
+test('the ESM-only Ring package is imported, not required', () => {
+  // ring-client-api v14+ ships as an ES module. require()ing it from this
+  // CommonJS file throws ERR_REQUIRE_ESM at runtime — and because the tests stub
+  // the Ring API entirely, only a real run on the Pi surfaced it.
+  const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
+  assert.ok(!/require\(['"]ring-client-api['"]\)/.test(src),
+    'ring-client-api must not be require()d — it is ESM-only');
+  assert.ok(/await import\(['"]ring-client-api['"]\)/.test(src),
+    'ring-client-api should be loaded with a dynamic import()');
+});
+
 test('secrets and captures are gitignored', () => {
   const gi = fs.readFileSync(path.join(__dirname, '..', '.gitignore'), 'utf8');
   for (const pattern of ['camera/env', 'ring-token', '*.jpg']) {
