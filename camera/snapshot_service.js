@@ -86,6 +86,11 @@ function validateConfig(cfg = CONFIG) {
   if (!cfg.uploadUrl) problems.push('CAMERA_UPLOAD_URL is not set');
   else if (!/^https:\/\//.test(cfg.uploadUrl)) {
     problems.push('CAMERA_UPLOAD_URL must be https (the secret is sent as a header)');
+  } else if (/YOUR-SUBDOMAIN|YOUR_SUBDOMAIN|example\.com|CHANGEME/i.test(cfg.uploadUrl)) {
+    // An unedited placeholder from the setup guide. Without this check --check
+    // cheerfully reports "Configuration looks valid" and the failure only
+    // surfaces later as a DNS error during an upload, which is far less obvious.
+    problems.push('CAMERA_UPLOAD_URL still contains a placeholder — edit it to the real URL');
   }
   if (!cfg.uploadSecret) problems.push('CAMERA_UPLOAD_SECRET is not set');
   else if (cfg.uploadSecret.length < 16) {

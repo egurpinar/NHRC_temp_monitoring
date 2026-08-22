@@ -70,6 +70,20 @@ test('a plaintext http upload URL is rejected', () => {
   assert.ok(p.some(x => /https/.test(x)), p.join('; '));
 });
 
+test('an unedited placeholder upload URL is rejected', () => {
+  // Regression: --check once reported "Configuration looks valid" for the
+  // literal setup-guide placeholder, so the real failure only appeared later as
+  // an opaque DNS error mid-upload.
+  for (const u of ['https://nhrc-camera.YOUR-SUBDOMAIN.workers.dev/latest.jpg',
+                   'https://cam.example.com/latest.jpg',
+                   'https://CHANGEME/latest.jpg']) {
+    const p = S.validateConfig({ ...baseCfg, uploadUrl: u });
+    assert.ok(p.some(x => /placeholder/.test(x)), `accepted placeholder URL: ${u}`);
+  }
+  // The real URL must still pass.
+  assert.deepStrictEqual(S.validateConfig({ ...baseCfg, uploadUrl: 'https://cam.roworno.com/latest.jpg' }), []);
+});
+
 test('a short upload secret is rejected', () => {
   const p = S.validateConfig({ ...baseCfg, uploadSecret: 'short' });
   assert.ok(p.some(x => /too short/.test(x)));
