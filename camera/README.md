@@ -213,6 +213,12 @@ ExecStart=/usr/local/bin/node /opt/nhrc-camera/snapshot_service.js
 Restart=always
 RestartSec=60
 
+# IPv6 is disabled at the router (so all DNS goes through Pi-hole), but DNS
+# still returns AAAA records for Cloudflare. Without this, every upload first
+# attempts an unroutable IPv6 address and waits for it to fail before falling
+# back. Harmless once; wasteful every 15 minutes for months.
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first
+
 # This box also serves DNS. Cap memory so a leak here can never take Pi-hole
 # down with it — systemd kills this service instead of the OOM killer choosing.
 # 200M sits comfortably above the ~80-120M the service actually uses (including
