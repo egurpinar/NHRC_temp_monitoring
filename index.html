@@ -319,6 +319,19 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       </div>
     </div>
 
+    <!-- BOATHOUSE CAMERA -->
+    <!-- Hidden until a snapshot actually loads, so it never shows a broken
+         image. Configure the source in CAMERA_SNAPSHOT_URL near the bottom
+         of this file. -->
+    <div class="river-card" id="camera-card" style="display:none;">
+      <div class="section-label">Boathouse Camera &mdash; River View</div>
+      <div style="border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);line-height:0;background:var(--navy3);">
+        <img id="camera-img" alt="Latest view of the river from the boathouse"
+             style="width:100%;height:auto;display:block;"/>
+      </div>
+      <div class="note-text" id="camera-note">Updates automatically through the day.</div>
+    </div>
+
     <!-- RIVER NAVIGATION & SAFETY MAP -->
     <div class="river-card">
       <div class="section-label">River Navigation &amp; Safety Map</div>
@@ -403,6 +416,57 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 // ─────────────────────────────────────────────────────────────────────────
 const ZONE_OVERRIDE = null;
 
+// ─────────────────────────────────────────────────────────────────────────
+// BOATHOUSE CAMERA
+// ─────────────────────────────────────────────────────────────────────────
+// URL of the latest camera snapshot. Leave empty to hide the camera card.
+//
+// The camera should be framed on the WATER, not the dock. That keeps the
+// conditions information useful without publishing images of people, which
+// avoids needing access control on a public site.
+//
+// Point this at a single file that the camera OVERWRITES each time — do not
+// accumulate snapshots, and do not commit them into this repository. This
+// repo is public and git history is permanent, so committed images could
+// never truly be removed. An external host, or a file served outside git,
+// keeps only the current frame in existence.
+//
+// Example: 'https://cam.roworno.com/latest.jpg'
+const CAMERA_SNAPSHOT_URL = '';
+
+// How often the page re-fetches the snapshot, in minutes. The camera itself
+// decides how often a new image is produced; this only controls the browser.
+const CAMERA_REFRESH_MINUTES = 5;
+
+function loadCameraSnapshot() {
+  const card = document.getElementById('camera-card');
+  const img  = document.getElementById('camera-img');
+  const note = document.getElementById('camera-note');
+  if (!card || !img) return;
+
+  // No source configured yet — leave the card hidden entirely.
+  if (!CAMERA_SNAPSHOT_URL) return;
+
+  // Cache-busting: without this, browsers and CDNs happily serve a stale
+  // frame for hours, which on a conditions page is worse than showing nothing.
+  const bust = CAMERA_SNAPSHOT_URL + (CAMERA_SNAPSHOT_URL.includes('?') ? '&' : '?') + '_=' + Date.now();
+
+  const probe = new Image();
+  probe.onload = () => {
+    img.src = probe.src;
+    card.style.display = '';
+    if (note) {
+      const t = new Date().toLocaleTimeString('en-US',
+        { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
+      note.textContent = `View of the river from the boathouse. Loaded ${t} ${nyTzAbbr(Date.now())}.`;
+    }
+  };
+  // Any failure (offline camera, missing file, network) hides the card rather
+  // than leaving a broken image on a page people rely on for safety calls.
+  probe.onerror = () => { card.style.display = 'none'; };
+  probe.src = bust;
+}
+
 const state = {
   allHistory: [],
   currentRange: 1,
@@ -423,9 +487,11 @@ window.addEventListener('DOMContentLoaded', () => {
   loadData();
   loadWeather();
   loadRiverData();
+  loadCameraSnapshot();
   setInterval(loadData, 60_000);
   setInterval(loadWeather, 600_000);
   setInterval(loadRiverData, 900_000); // refresh river every 15 min
+  setInterval(loadCameraSnapshot, CAMERA_REFRESH_MINUTES * 60_000);
 });
 
 async function loadData() {
