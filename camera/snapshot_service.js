@@ -126,6 +126,17 @@ function validateConfig(cfg = CONFIG) {
   if (!cfg.uploadSecret) problems.push('CAMERA_UPLOAD_SECRET is not set');
   else if (cfg.uploadSecret.length < 16) {
     problems.push('CAMERA_UPLOAD_SECRET is too short — use at least 16 random characters');
+  } else if (/\s/.test(cfg.uploadSecret)) {
+    problems.push('CAMERA_UPLOAD_SECRET contains whitespace — it was probably pasted with a stray space or newline');
+  } else if (/^[a-z]+(-[a-z]+){2,}$/.test(cfg.uploadSecret)) {
+    // Three or more lowercase words joined by hyphens is descriptive prose, not
+    // a random secret — e.g. "the-same-secret-as-the-worker" from the README.
+    // This exact mistake reached the Pi and cost a debugging round trip: the
+    // only symptom was an opaque HTTP 401 from the Worker, which is also what a
+    // missing binding looks like. A real secret from `openssl rand -hex 32` is
+    // 64 hex characters and cannot match this pattern.
+    problems.push('CAMERA_UPLOAD_SECRET looks like placeholder text, not a secret — ' +
+      'paste the real value (openssl rand -hex 32 gives 64 hex characters)');
   }
   if (!(cfg.intervalMinutes >= 5)) {
     // Ring throttles battery cameras to roughly one snapshot per 10 minutes and

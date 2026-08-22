@@ -41,7 +41,10 @@ const baseCfg = {
   tokenFile: '/tmp/nhrc-test-token',
   cameraName: '',
   uploadUrl: 'https://cam.roworno.com/latest.jpg',
-  uploadSecret: 'a-sufficiently-long-secret',
+  // A realistic value: 64 hex characters, as `openssl rand -hex 32` produces.
+  // This was once 'a-sufficiently-long-secret', which the placeholder-prose
+  // guard now correctly rejects — the fixture itself was unrealistic.
+  uploadSecret: '9f3c1e7d2b8a4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d',
   intervalMinutes: 15,
   activeStartHour: 5,
   activeEndHour: 21,
@@ -87,6 +90,43 @@ test('an unedited placeholder upload URL is rejected', () => {
 test('a short upload secret is rejected', () => {
   const p = S.validateConfig({ ...baseCfg, uploadSecret: 'short' });
   assert.ok(p.some(x => /too short/.test(x)));
+});
+
+test('placeholder prose is rejected as a secret', () => {
+  // Regression: the Pi ran for several cycles with the literal text
+  // "the-secret-i-generated-earlier" as its secret. It passed the length check,
+  // so the only symptom was an HTTP 401 — identical to a missing Worker binding.
+  for (const s of ['the-same-secret-as-the-worker',
+                   'the-secret-i-generated-earlier',
+                   'paste-the-value-from-cloudflare']) {
+    const p = S.validateConfig({ ...baseCfg, uploadSecret: s });
+    assert.ok(p.some(x => /placeholder/.test(x)), `accepted prose secret: ${s}`);
+  }
+});
+
+test('a real random secret is not mistaken for prose', () => {
+  // The guard must not reject legitimate values. Hex, base64 and a two-word
+  // hyphenated value all have to survive.
+  const real = [
+    'a'.repeat(64),
+    require('crypto').randomBytes(32).toString('hex'),
+    require('crypto').randomBytes(24).toString('base64'),
+    require('crypto').randomBytes(24).toString('base64url'),
+    'correct-horsebatterystaple',   // two words: not the prose pattern
+  ];
+  for (const s of real) {
+    assert.deepStrictEqual(S.validateConfig({ ...baseCfg, uploadSecret: s }), [],
+      `rejected a valid secret: ${s.slice(0, 8)}...`);
+  }
+});
+
+test('a secret with whitespace is rejected', () => {
+  // A trailing newline or space survives a copy-paste and is invisible in a
+  // terminal, but changes the bytes and produces the same opaque 401.
+  for (const s of ['abcdefghijklmnop qrstuvwxyz012345', 'abcdefghijklmnopqrstuvwxyz\t0123']) {
+    assert.ok(S.validateConfig({ ...baseCfg, uploadSecret: s })
+      .some(x => /whitespace/.test(x)), `accepted secret with whitespace: ${JSON.stringify(s)}`);
+  }
 });
 
 test('an interval below 5 minutes is rejected', () => {
