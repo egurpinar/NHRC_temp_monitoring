@@ -80,6 +80,37 @@ function logError(...args) {
   console.error(new Date().toISOString(), '- ERROR:', ...args);
 }
 
+/** Hostname only, for error messages — never log the URL with its secret nearby. */
+function hostOf(url) {
+  try { return new URL(url).host; } catch (e) { return String(url); }
+}
+
+/**
+ * Node's fetch throws a bare "fetch failed" and buries the real transport error
+ * on `.cause` (often nested one more level for aggregate connect errors). Walk
+ * it so the log names the actual problem: ENOTFOUND, ENETUNREACH, cert failure.
+ */
+function describeCause(err) {
+  const parts = [];
+  let e = err;
+  for (let depth = 0; e && depth < 4; depth++) {
+    const code = e.code ? `${e.code} ` : '';
+    const msg = e.message || String(e);
+    const line = (code + msg).trim();
+    if (line && !parts.includes(line)) parts.push(line);
+    // AggregateError from a multi-address connect attempt keeps the per-address
+    // failures in .errors — that is where an IPv6-only route failure shows up.
+    if (Array.isArray(e.errors) && e.errors.length) {
+      for (const sub of e.errors.slice(0, 3)) {
+        const s = ((sub.code ? sub.code + ' ' : '') + (sub.message || '')).trim();
+        if (s && !parts.includes(s)) parts.push(s);
+      }
+    }
+    e = e.cause;
+  }
+  return parts.join(' <- ') || 'unknown error';
+}
+
 /** Validates configuration up front so failures are obvious, not mysterious. */
 function validateConfig(cfg = CONFIG) {
   const problems = [];
@@ -168,15 +199,24 @@ function writeToken(token, cfg = CONFIG) {
  * this keeps the Pi outbound-only — nothing inbound is ever exposed.
  */
 async function uploadSnapshot(buffer, cfg = CONFIG, fetchImpl = globalThis.fetch) {
-  const res = await fetchImpl(cfg.uploadUrl, {
-    method: 'PUT',
-    headers: {
-      'Authorization': `Bearer ${cfg.uploadSecret}`,
-      'Content-Type': 'image/jpeg',
-      'Content-Length': String(buffer.length),
-    },
-    body: buffer,
-  });
+  let res;
+  try {
+    res = await fetchImpl(cfg.uploadUrl, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${cfg.uploadSecret}`,
+        'Content-Type': 'image/jpeg',
+        'Content-Length': String(buffer.length),
+      },
+      body: buffer,
+    });
+  } catch (e) {
+    // Node's fetch reports every transport failure as the useless string
+    // "fetch failed" and hides the real reason on err.cause. On this host the
+    // likely causes are DNS (the Pi resolves through its own Pi-hole, and some
+    // blocklists cover *.workers.dev) or TLS. Surface it, or debugging is guesswork.
+    throw new Error(`upload to ${hostOf(cfg.uploadUrl)} failed: ${describeCause(e)}`);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`upload failed: HTTP ${res.status} ${text.slice(0, 200)}`);
@@ -262,7 +302,7 @@ async function captureWithRetry(camera, cfg = CONFIG) {
       return buf;
     } catch (e) {
       lastErr = e;
-      logError(`snapshot attempt ${attempt}/${cfg.retries} failed: ${e.message}`);
+      logError(`snapshot attempt ${attempt}/${cfg.retries} failed: ${describeCause(e)}`);
       if (attempt < cfg.retries) await sleep(cfg.retryDelaySeconds * 1000);
     }
   }
@@ -278,8 +318,20 @@ async function runCycle(camera, cfg = CONFIG) {
     log('Outside active hours — skipping capture.');
     return false;
   }
-  const buf = await captureWithRetry(camera, cfg);
-  await uploadSnapshot(buf, cfg);
+  // Label the stage: "fetch failed" alone cannot be told apart from a Ring
+  // download failure, and the two have completely different fixes.
+  let buf;
+  try {
+    buf = await captureWithRetry(camera, cfg);
+  } catch (e) {
+    throw new Error(`CAPTURE stage — ${describeCause(e)}`);
+  }
+  log(`Captured ${buf.length} bytes; uploading to ${hostOf(cfg.uploadUrl)}`);
+  try {
+    await uploadSnapshot(buf, cfg);
+  } catch (e) {
+    throw new Error(`UPLOAD stage — ${describeCause(e)}`);
+  }
   log(`Snapshot uploaded (${(buf.length / 1024).toFixed(0)} KB).`);
   return true;
 }
@@ -332,6 +384,7 @@ async function main() {
 module.exports = {
   CONFIG, validateConfig, isWithinActiveHours,
   readToken, writeToken, uploadSnapshot, captureWithRetry, runCycle,
+  describeCause, hostOf,
 };
 
 if (require.main === module) {

@@ -188,6 +188,40 @@ test('a successful upload sends the secret and the image', async () => {
   assert.strictEqual(seen.opts.headers['Content-Type'], 'image/jpeg');
 });
 
+test('a transport failure names the real cause, not just "fetch failed"', async () => {
+  // Node's fetch throws a bare "fetch failed" and buries the reason on .cause.
+  // A log line that only says "fetch failed" cost a full debugging round trip.
+  const inner = Object.assign(new Error('connect ENETUNREACH 2606:4700:3035::ac43:ba62:443'),
+    { code: 'ENETUNREACH' });
+  const outer = Object.assign(new Error('fetch failed'), { cause: inner });
+  const fakeFetch = async () => { throw outer; };
+  await assert.rejects(
+    () => S.uploadSnapshot(Buffer.from('x'), baseCfg, fakeFetch),
+    (e) => {
+      assert.ok(/ENETUNREACH/.test(e.message), `cause not surfaced: ${e.message}`);
+      assert.ok(/cam\.roworno\.com/.test(e.message), `host not named: ${e.message}`);
+      return true;
+    });
+});
+
+test('a nested AggregateError surfaces the per-address failures', async () => {
+  // Multi-address connects (A + AAAA) fail as an AggregateError; the useful
+  // detail is in .errors, which a plain .cause walk would miss.
+  const agg = Object.assign(new AggregateError(
+    [Object.assign(new Error('connect EHOSTUNREACH ipv6'), { code: 'EHOSTUNREACH' })],
+    'all attempts failed'), {});
+  const outer = Object.assign(new Error('fetch failed'), { cause: agg });
+  assert.ok(/EHOSTUNREACH/.test(S.describeCause(outer)), S.describeCause(outer));
+});
+
+test('error messages name the host but never the secret', () => {
+  // The upload secret sits next to the URL in config; a careless log leaks it.
+  assert.strictEqual(S.hostOf('https://cam.roworno.com/latest.jpg'), 'cam.roworno.com');
+  const msg = S.describeCause(Object.assign(new Error('fetch failed'),
+    { cause: new Error('boom') }));
+  assert.ok(!msg.includes(baseCfg.uploadSecret));
+});
+
 test('a rejected upload throws with the status', async () => {
   const fakeFetch = async () => ({ ok: false, status: 401, text: async () => 'Unauthorized' });
   await assert.rejects(
