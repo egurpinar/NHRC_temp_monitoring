@@ -83,10 +83,25 @@ onward is compiled for it).
 uname -m          # armv6l confirms this applies to you
 cd /tmp
 wget https://unofficial-builds.nodejs.org/download/release/v20.18.1/node-v20.18.1-linux-armv6l.tar.gz
+ls -la node-v20.18.1-linux-armv6l.tar.gz   # a few KB means the download failed
 tar -xzf node-v20.18.1-linux-armv6l.tar.gz
-sudo cp -r node-v20.18.1-linux-armv6l/* /usr/local/
+
+# cp -a, NOT cp -r. In the tarball bin/npm and bin/npx are symlinks into
+# lib/node_modules/npm/. Plain `cp -r` dereferences symlinks, which leaves npm
+# either missing or broken while `node` (a real file) copies fine — producing a
+# confusing "npm: command not found" after an apparently successful install.
+sudo cp -a node-v20.18.1-linux-armv6l/bin/* /usr/local/bin/
+sudo cp -a node-v20.18.1-linux-armv6l/lib/* /usr/local/lib/
+sudo cp -a node-v20.18.1-linux-armv6l/include/* /usr/local/include/ 2>/dev/null
+sudo cp -a node-v20.18.1-linux-armv6l/share/* /usr/local/share/ 2>/dev/null
+
+hash -r           # clear bash's cached command lookups
 node --version    # v20.18.1
+npm --version     # ~10.8.x — if this fails, the symlinks did not survive
 ```
+
+Verify both `node` and `npm` before continuing; `npm` is the one that breaks
+quietly.
 
 ## 3. Install the service
 
