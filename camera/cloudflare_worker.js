@@ -1,6 +1,6 @@
 /**
- * cam.roworno.com — snapshot receiver and server
- * ==============================================
+ * Boathouse snapshot receiver and server
+ * ======================================
  * A Cloudflare Worker backed by an R2 bucket. The Pi PUTs the latest JPEG here;
  * everyone else GETs it.
  *
@@ -25,10 +25,13 @@
  *        UPLOAD_SECRET  (secret)  same value as CAMERA_UPLOAD_SECRET on the Pi
  *      Settings -> Bindings:
  *        R2 bucket, variable name BUCKET, bucket "nhrc-camera"
- *   4. Triggers -> Custom domain -> cam.roworno.com
+ *   4. Use the workers.dev URL Cloudflare assigns automatically:
+ *        https://nhrc-camera.<your-account>.workers.dev/latest.jpg
  *
- * Requires roworno.com to be on Cloudflare DNS. If it is not, the same design
- * works on any host that can accept an authenticated PUT; only this file changes.
+ * NOTE: a cam.roworno.com custom domain is NOT available. roworno.com is on
+ * GoDaddy nameservers, and Worker custom domains require the zone to be hosted
+ * on Cloudflare. The workers.dev hostname has valid TLS and needs no DNS change,
+ * so the live site is never put at risk. See README.md "Which URL".
  */
 
 const OBJECT_KEY = 'latest.jpg';

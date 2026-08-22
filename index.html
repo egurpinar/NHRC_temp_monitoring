@@ -431,7 +431,9 @@ const ZONE_OVERRIDE = null;
 // never truly be removed. An external host, or a file served outside git,
 // keeps only the current frame in existence.
 //
-// Example: 'https://cam.roworno.com/latest.jpg'
+// Example: 'https://nhrc-camera.<account>.workers.dev/latest.jpg'
+// (not cam.roworno.com — the domain is on GoDaddy DNS, and Cloudflare Worker
+// custom domains require the zone to be hosted on Cloudflare.)
 const CAMERA_SNAPSHOT_URL = '';
 
 // How often the page re-fetches the snapshot, in minutes. The camera itself
