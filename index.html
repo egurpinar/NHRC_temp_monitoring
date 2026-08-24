@@ -440,6 +440,13 @@ const CAMERA_SNAPSHOT_URL = 'https://nhrc-camera.gurpinar-emre.workers.dev/lates
 // decides how often a new image is produced; this only controls the browser.
 const CAMERA_REFRESH_MINUTES = 5;
 
+// The capture window running on the Pi (CAMERA_ACTIVE_START_HOUR / _END_HOUR in
+// /opt/nhrc-camera/env), boathouse local time. Kept here only so the page can
+// explain an overnight gap rather than looking broken. If the Pi's window
+// changes, change these to match — they do not control the camera.
+const CAMERA_ACTIVE_START_HOUR = 4;
+const CAMERA_ACTIVE_END_HOUR = 21;
+
 function loadCameraSnapshot() {
   const card = document.getElementById('camera-card');
   const img  = document.getElementById('camera-img');
@@ -456,6 +463,7 @@ function loadCameraSnapshot() {
   const probe = new Image();
   probe.onload = () => {
     img.src = probe.src;
+    if (img.parentElement) img.parentElement.style.display = '';
     card.style.display = '';
     if (note) {
       const t = new Date().toLocaleTimeString('en-US',
@@ -463,13 +471,43 @@ function loadCameraSnapshot() {
       // "Loaded" described when the browser fetched the image, which reads as
       // when the photo was taken. It can be up to a capture interval older, so
       // say so rather than implying a live view.
-      note.textContent = `View of the river from the boathouse. Checked ${t} ${nyTzAbbr(Date.now())}; image may be up to 15 min older.`;
+      note.textContent = `View of the river from the boathouse. Checked ${t} ${nyTzAbbr(Date.now())}; `
+        + `image may be up to 15 min older. Captured 4am-9pm only.`;
     }
   };
-  // Any failure (offline camera, missing file, network) hides the card rather
-  // than leaving a broken image on a page people rely on for safety calls.
-  probe.onerror = () => { card.style.display = 'none'; };
+  // Any failure (offline camera, missing file, network) hides the IMAGE rather
+  // than leaving a broken one on a page people rely on for safety calls.
+  //
+  // Overnight is a failure by design, not a fault: the camera stops capturing at
+  // 9pm and the server refuses any frame over 45 minutes old, so between roughly
+  // 9:45pm and 4am there is nothing to show. Hiding the card outright in that
+  // window makes a deliberate pause look like a broken feature, so say what is
+  // happening instead. Outside those hours a failure really is a failure, and
+  // the card disappears as before.
+  probe.onerror = () => {
+    if (isCameraOffHours()) {
+      if (img.parentElement) img.parentElement.style.display = 'none';
+      card.style.display = '';
+      if (note) {
+        note.textContent = 'Camera paused overnight — captures run 4am to 9pm. '
+          + 'The river view returns at 4:00 AM.';
+      }
+      return;
+    }
+    card.style.display = 'none';
+  };
   probe.src = bust;
+}
+
+// True between the last capture of the evening and the first of the morning,
+// in boathouse local time. hourCycle h23 rather than hour12:false: the latter
+// reports midnight as "24" in some locales, which would make this read false
+// for the one hour it most needs to be true.
+function isCameraOffHours(now = new Date()) {
+  const h = parseInt(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: '2-digit', hourCycle: 'h23',
+  }).format(now), 10);
+  return h < CAMERA_ACTIVE_START_HOUR || h >= CAMERA_ACTIVE_END_HOUR;
 }
 
 const state = {
