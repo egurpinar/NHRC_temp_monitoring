@@ -61,7 +61,7 @@ const CONFIG = {
   // Optional daylight window in the boathouse timezone. A night-time frame from
   // an unlit river is a black rectangle, which is worse than showing nothing —
   // and each capture costs battery. Set both to 0 to disable the window.
-  activeStartHour: Number(process.env.CAMERA_ACTIVE_START_HOUR ?? 5),
+  activeStartHour: Number(process.env.CAMERA_ACTIVE_START_HOUR ?? 4),
   activeEndHour: Number(process.env.CAMERA_ACTIVE_END_HOUR ?? 21),
 
   timeZone: process.env.CAMERA_TIMEZONE || 'America/New_York',

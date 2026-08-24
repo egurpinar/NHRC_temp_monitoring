@@ -179,7 +179,7 @@ RING_CAMERA_NAME=boathouse
 CAMERA_UPLOAD_URL=https://nhrc-camera.YOUR-ACCOUNT.workers.dev/latest.jpg
 CAMERA_UPLOAD_SECRET=the-same-secret-as-the-worker
 CAMERA_INTERVAL_MINUTES=15
-CAMERA_ACTIVE_START_HOUR=5
+CAMERA_ACTIVE_START_HOUR=4
 CAMERA_ACTIVE_END_HOUR=21
 EOF
 chmod 600 /opt/nhrc-camera/env
@@ -289,7 +289,7 @@ people use for safety decisions.
 | Variable | Default | Notes |
 |---|---|---|
 | `CAMERA_INTERVAL_MINUTES` | 15 | Minimum 5. Ring throttles battery cameras to roughly one snapshot per 10 min |
-| `CAMERA_ACTIVE_START_HOUR` / `_END_HOUR` | 5 / 21 | Boathouse local time. Both `0` disables. Night frames are black and still cost battery |
+| `CAMERA_ACTIVE_START_HOUR` / `_END_HOUR` | 4 / 21 | Boathouse local time. Both `0` disables. Night frames are black and still cost battery |
 | `CAMERA_RETRIES` | 3 | Battery cameras cannot snapshot *while recording*, so motion events cause failures worth retrying |
 | `RING_TOKEN_FILE` | `~/.nhrc-ring-token` | Must persist across reboots |
 
