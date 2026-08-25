@@ -171,6 +171,36 @@ test('setting both hours to 0 disables the window', () => {
   }
 });
 
+test('a half-hour start is honoured to the minute', () => {
+  // "4:30" must not round down to 4:00 — that would capture 30 minutes early,
+  // every day, on a battery camera.
+  const cfg = { ...baseCfg, activeStartHour: S.parseHourSetting('4:30'), activeEndHour: 19 };
+  assert.strictEqual(cfg.activeStartHour, 4.5, 'parsed value');
+  const et = (h, m) => new Date(Date.UTC(2026, 6, 15, h, m, 0)); // July = EDT (UTC-4)
+  assert.strictEqual(S.isWithinActiveHours(et(8, 29), cfg), false, '04:29 ET');
+  assert.strictEqual(S.isWithinActiveHours(et(8, 30), cfg), true,  '04:30 ET');
+  assert.strictEqual(S.isWithinActiveHours(et(22, 59), cfg), true, '18:59 ET');
+  assert.strictEqual(S.isWithinActiveHours(et(23, 0), cfg), false, '19:00 ET');
+});
+
+test('hour settings accept both "19" and "4:30"', () => {
+  assert.strictEqual(S.parseHourSetting('19'), 19);
+  assert.strictEqual(S.parseHourSetting('4:30'), 4.5);
+  assert.strictEqual(S.parseHourSetting('04:45'), 4.75);
+  assert.strictEqual(S.parseHourSetting(21), 21);
+  assert.strictEqual(S.parseHourSetting('', 4.5), 4.5, 'empty falls back');
+  assert.strictEqual(S.parseHourSetting(undefined, 7), 7, 'unset falls back');
+  assert.ok(Number.isNaN(S.parseHourSetting('half past four')), 'garbage is NaN, not 0');
+  // NaN must be rejected by validation rather than silently becoming a window.
+  assert.ok(S.validateConfig({ ...baseCfg, activeStartHour: NaN }).length > 0);
+});
+
+test('fractional hours render readably in --check', () => {
+  assert.strictEqual(S.formatHourSetting(4.5), '4:30');
+  assert.strictEqual(S.formatHourSetting(19), '19:00');
+  assert.strictEqual(S.formatHourSetting(4.75), '4:45');
+});
+
 test('a window wrapping midnight works', () => {
   const cfg = { ...baseCfg, activeStartHour: 22, activeEndHour: 4 };
   assert.strictEqual(S.isWithinActiveHours(at(3), cfg), true, '23:00 ET');

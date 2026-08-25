@@ -62,7 +62,7 @@ const CONFIG = {
   // an unlit river is a black rectangle, which is worse than showing nothing —
   // and each capture costs battery. Set both to 0 to disable the window.
   // Accepts "4" or "4:30". Defined below CONFIG but hoisted, so usable here.
-  activeStartHour: parseHourSetting(process.env.CAMERA_ACTIVE_START_HOUR, 4.5),
+  activeStartHour: parseHourSetting(process.env.CAMERA_ACTIVE_START_HOUR, 4),
   activeEndHour: parseHourSetting(process.env.CAMERA_ACTIVE_END_HOUR, 19),
 
   timeZone: process.env.CAMERA_TIMEZONE || 'America/New_York',
