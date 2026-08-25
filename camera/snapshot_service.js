@@ -61,8 +61,9 @@ const CONFIG = {
   // Optional daylight window in the boathouse timezone. A night-time frame from
   // an unlit river is a black rectangle, which is worse than showing nothing —
   // and each capture costs battery. Set both to 0 to disable the window.
-  activeStartHour: Number(process.env.CAMERA_ACTIVE_START_HOUR ?? 4),
-  activeEndHour: Number(process.env.CAMERA_ACTIVE_END_HOUR ?? 21),
+  // Accepts "4" or "4:30". Defined below CONFIG but hoisted, so usable here.
+  activeStartHour: parseHourSetting(process.env.CAMERA_ACTIVE_START_HOUR, 4.5),
+  activeEndHour: parseHourSetting(process.env.CAMERA_ACTIVE_END_HOUR, 19),
 
   timeZone: process.env.CAMERA_TIMEZONE || 'America/New_York',
 
@@ -148,7 +149,12 @@ function validateConfig(cfg = CONFIG) {
   if (!hoursDisabled) {
     for (const [k, v] of [['CAMERA_ACTIVE_START_HOUR', cfg.activeStartHour],
                           ['CAMERA_ACTIVE_END_HOUR', cfg.activeEndHour]]) {
-      if (!Number.isInteger(v) || v < 0 || v > 23) problems.push(`${k} must be an integer 0-23`);
+      // Fractional values are legitimate now (4.5 === "4:30"), so this checks
+      // the range rather than integer-ness. 24 is excluded: "24:00" would never
+      // match, since the clock reads 0 at midnight.
+      if (!Number.isFinite(v) || v < 0 || v >= 24) {
+        problems.push(`${k} must be an hour from 0 to 23, optionally with minutes (e.g. 4 or 4:30)`);
+      }
     }
   }
   return problems;
@@ -165,11 +171,41 @@ function validateConfig(cfg = CONFIG) {
  */
 function isWithinActiveHours(now = new Date(), cfg = CONFIG) {
   if (cfg.activeStartHour === 0 && cfg.activeEndHour === 0) return true;
-  const hour = parseInt(new Intl.DateTimeFormat('en-US', {
-    timeZone: cfg.timeZone, hour: 'numeric', hour12: false,
-  }).format(now), 10);
+  // Minutes matter: the window may start on a half hour (4:30). Reading only the
+  // hour would round 4:30 down to 4:00 and capture half an hour early.
+  //
+  // hourCycle 'h23' rather than hour12:false — the latter renders midnight as
+  // "24" in some locales, which would place it after every window boundary
+  // instead of before.
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: cfg.timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(now);
+  const h = Number(parts.find(p => p.type === 'hour').value);
+  const m = Number(parts.find(p => p.type === 'minute').value);
+  const hour = h + m / 60;
   const { activeStartHour: s, activeEndHour: e } = cfg;
   return s <= e ? (hour >= s && hour < e) : (hour >= s || hour < e);
+}
+
+/**
+ * Accepts either a plain hour ("19") or an hour with minutes ("4:30") and
+ * returns a fractional hour, so 4:30 becomes 4.5. Returning a number rather
+ * than a {h,m} pair keeps every comparison downstream a single `<`.
+ */
+function parseHourSetting(raw, fallback) {
+  if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+  const s = String(raw).trim();
+  const hhmm = s.match(/^(\d{1,2}):([0-5]\d)$/);
+  if (hhmm) return Number(hhmm[1]) + Number(hhmm[2]) / 60;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+/** Renders a fractional hour back as "4:30" / "19:00" for the --check output. */
+function formatHourSetting(v) {
+  const h = Math.floor(v);
+  const m = Math.round((v - h) * 60);
+  return `${h}:${String(m).padStart(2, '0')}`;
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -363,7 +399,9 @@ async function main() {
     log('Configuration looks valid.');
     log(`  interval     : every ${CONFIG.intervalMinutes} min`);
     log(`  active hours : ${CONFIG.activeStartHour === 0 && CONFIG.activeEndHour === 0
-      ? 'always' : CONFIG.activeStartHour + ':00-' + CONFIG.activeEndHour + ':00 ' + CONFIG.timeZone}`);
+      ? 'always'
+      : formatHourSetting(CONFIG.activeStartHour) + '-' + formatHourSetting(CONFIG.activeEndHour)
+        + ' ' + CONFIG.timeZone}`);
     log(`  token file   : ${CONFIG.tokenFile} (${readToken() ? 'present' : 'MISSING'})`);
     log(`  upload to    : ${CONFIG.uploadUrl}`);
     return;
@@ -397,7 +435,7 @@ async function main() {
 module.exports = {
   CONFIG, validateConfig, isWithinActiveHours,
   readToken, writeToken, uploadSnapshot, captureWithRetry, runCycle,
-  describeCause, hostOf,
+  describeCause, hostOf, parseHourSetting, formatHourSetting,
 };
 
 if (require.main === module) {

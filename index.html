@@ -268,7 +268,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
          image. Configure the source in CAMERA_SNAPSHOT_URL near the bottom
          of this file. -->
     <div class="river-card" id="camera-card" style="display:none;">
-      <div class="section-label">Boathouse Camera &mdash; Still Image, Updates ~Every 15 Min</div>
+      <div class="section-label">Boathouse Camera &mdash; Still Image, Updates ~Every 15 Min, 4:30am&ndash;7pm</div>
       <div style="border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);line-height:0;background:var(--navy3);">
         <img id="camera-img" alt="Latest view of the river from the boathouse"
              style="width:100%;height:auto;display:block;"/>
@@ -444,8 +444,14 @@ const CAMERA_REFRESH_MINUTES = 5;
 // /opt/nhrc-camera/env), boathouse local time. Kept here only so the page can
 // explain an overnight gap rather than looking broken. If the Pi's window
 // changes, change these to match — they do not control the camera.
+// Fractional hours are supported here (4.5 means 4:30), but the Pi's validator
+// only accepts whole hours, so keep these integral unless that changes too.
 const CAMERA_ACTIVE_START_HOUR = 4;
-const CAMERA_ACTIVE_END_HOUR = 21;
+const CAMERA_ACTIVE_END_HOUR = 19;
+const CAMERA_WINDOW_LABEL = '4am to 7pm';
+// Written once, used in both captions below. The window and the wording
+// describing it drifted apart the first time the hours changed.
+const CAMERA_RESUME_LABEL = '4:00 AM';
 
 function loadCameraSnapshot() {
   const card = document.getElementById('camera-card');
@@ -472,25 +478,26 @@ function loadCameraSnapshot() {
       // when the photo was taken. It can be up to a capture interval older, so
       // say so rather than implying a live view.
       note.textContent = `View of the river from the boathouse. Checked ${t} ${nyTzAbbr(Date.now())}; `
-        + `image may be up to 15 min older. Captured 4am-9pm only.`;
+        + `image may be up to 15 min older. Captured ${CAMERA_WINDOW_LABEL} only.`;
     }
   };
   // Any failure (offline camera, missing file, network) hides the IMAGE rather
   // than leaving a broken one on a page people rely on for safety calls.
   //
   // Overnight is a failure by design, not a fault: the camera stops capturing at
-  // 9pm and the server refuses any frame over 45 minutes old, so between roughly
-  // 9:45pm and 4am there is nothing to show. Hiding the card outright in that
-  // window makes a deliberate pause look like a broken feature, so say what is
-  // happening instead. Outside those hours a failure really is a failure, and
-  // the card disappears as before.
+  // the end of the window and the server refuses any frame over 45 minutes old,
+  // so from roughly 45 minutes after the last capture until the window reopens
+  // there is nothing to show. Hiding the card outright in that period makes a
+  // deliberate pause look like a broken feature, so say what is happening
+  // instead. Outside those hours a failure really is a failure, and the card
+  // disappears as before.
   probe.onerror = () => {
     if (isCameraOffHours()) {
       if (img.parentElement) img.parentElement.style.display = 'none';
       card.style.display = '';
       if (note) {
-        note.textContent = 'Camera paused overnight — captures run 4am to 9pm. '
-          + 'The river view returns at 4:00 AM.';
+        note.textContent = `Camera paused overnight — captures run ${CAMERA_WINDOW_LABEL}. `
+          + `The river view returns at ${CAMERA_RESUME_LABEL}.`;
       }
       return;
     }
@@ -504,10 +511,14 @@ function loadCameraSnapshot() {
 // reports midnight as "24" in some locales, which would make this read false
 // for the one hour it most needs to be true.
 function isCameraOffHours(now = new Date()) {
-  const h = parseInt(new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York', hour: '2-digit', hourCycle: 'h23',
-  }).format(now), 10);
-  return h < CAMERA_ACTIVE_START_HOUR || h >= CAMERA_ACTIVE_END_HOUR;
+  // Minutes are read too, because the window can start on a half hour (4:30).
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(now);
+  const h = Number(parts.find(p => p.type === 'hour').value);
+  const m = Number(parts.find(p => p.type === 'minute').value);
+  const hour = h + m / 60;
+  return hour < CAMERA_ACTIVE_START_HOUR || hour >= CAMERA_ACTIVE_END_HOUR;
 }
 
 const state = {
