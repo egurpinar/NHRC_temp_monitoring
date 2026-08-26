@@ -58,6 +58,13 @@ const CONFIG = {
 
   intervalMinutes: Number(process.env.CAMERA_INTERVAL_MINUTES || 15),
 
+  // Two-speed schedule. Most rowing happens early, so capture often through the
+  // morning and back off afterwards — the afternoon frames still cost battery on
+  // a camera the solar panel is not comfortably keeping up with.
+  // Set CAMERA_SLOW_AFTER_HOUR equal to the window start to disable.
+  slowAfterHour: parseHourSetting(process.env.CAMERA_SLOW_AFTER_HOUR, 10),
+  slowIntervalMinutes: Number(process.env.CAMERA_SLOW_INTERVAL_MINUTES || 30),
+
   // Optional daylight window in the boathouse timezone. A night-time frame from
   // an unlit river is a black rectangle, which is worse than showing nothing —
   // and each capture costs battery. Set both to 0 to disable the window.
@@ -145,6 +152,18 @@ function validateConfig(cfg = CONFIG) {
     problems.push('CAMERA_INTERVAL_MINUTES must be at least 5');
   }
   if (!(cfg.retries >= 1)) problems.push('CAMERA_RETRIES must be at least 1');
+  if (!(cfg.slowIntervalMinutes >= 5)) {
+    problems.push('CAMERA_SLOW_INTERVAL_MINUTES must be at least 5');
+  }
+  if (!Number.isFinite(cfg.slowAfterHour) || cfg.slowAfterHour < 0 || cfg.slowAfterHour >= 24) {
+    problems.push('CAMERA_SLOW_AFTER_HOUR must be an hour from 0 to 23, optionally with minutes (e.g. 10 or 10:30)');
+  } else if (cfg.slowAfterHour > cfg.activeStartHour && cfg.slowAfterHour >= cfg.activeEndHour) {
+    // Switching to the slow rate at or after the window closes means the slow
+    // rate never applies — almost certainly a typo, and silently ignoring it
+    // would leave the camera on the fast rate all day, draining the battery
+    // this setting exists to protect.
+    problems.push('CAMERA_SLOW_AFTER_HOUR is at or after CAMERA_ACTIVE_END_HOUR, so the slower rate would never take effect');
+  }
   const hoursDisabled = cfg.activeStartHour === 0 && cfg.activeEndHour === 0;
   if (!hoursDisabled) {
     for (const [k, v] of [['CAMERA_ACTIVE_START_HOUR', cfg.activeStartHour],
@@ -177,14 +196,40 @@ function isWithinActiveHours(now = new Date(), cfg = CONFIG) {
   // hourCycle 'h23' rather than hour12:false — the latter renders midnight as
   // "24" in some locales, which would place it after every window boundary
   // instead of before.
+  const hour = localHour(now, cfg);
+  const { activeStartHour: s, activeEndHour: e } = cfg;
+  return s <= e ? (hour >= s && hour < e) : (hour >= s || hour < e);
+}
+
+/**
+ * Fractional local hour (13:30 -> 13.5) in the boathouse timezone. Shared by the
+ * window check and the interval schedule so they can never read the clock
+ * differently.
+ */
+function localHour(now = new Date(), cfg = CONFIG) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: cfg.timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }).formatToParts(now);
   const h = Number(parts.find(p => p.type === 'hour').value);
   const m = Number(parts.find(p => p.type === 'minute').value);
-  const hour = h + m / 60;
-  const { activeStartHour: s, activeEndHour: e } = cfg;
-  return s <= e ? (hour >= s && hour < e) : (hour >= s || hour < e);
+  return h + m / 60;
+}
+
+/**
+ * Minutes to wait before the next capture. Fast through the early morning when
+ * crews are deciding whether to go out, slower afterwards to save battery.
+ *
+ * Deliberately evaluated fresh before every wait rather than fixed at startup:
+ * the process runs for months, so a rate chosen once at 4am would still be in
+ * force at 6pm, and would survive a DST change with the wrong offset baked in.
+ */
+function intervalForTime(now = new Date(), cfg = CONFIG) {
+  const slowAfter = cfg.slowAfterHour;
+  const slow = cfg.slowIntervalMinutes;
+  if (!Number.isFinite(slowAfter) || !Number.isFinite(slow)) return cfg.intervalMinutes;
+  // Equal to (or before) the window start means the two-speed schedule is off.
+  if (slowAfter <= cfg.activeStartHour) return cfg.intervalMinutes;
+  return localHour(now, cfg) >= slowAfter ? slow : cfg.intervalMinutes;
 }
 
 /**
@@ -199,6 +244,14 @@ function parseHourSetting(raw, fallback) {
   if (hhmm) return Number(hhmm[1]) + Number(hhmm[2]) / 60;
   const n = Number(s);
   return Number.isFinite(n) ? n : NaN;
+}
+
+/** One-line summary of the capture schedule, for --check and the startup log. */
+function describeSchedule(cfg = CONFIG) {
+  const twoSpeed = Number.isFinite(cfg.slowAfterHour) && cfg.slowAfterHour > cfg.activeStartHour;
+  if (!twoSpeed) return `Capturing every ${cfg.intervalMinutes} min.`;
+  return `Capturing every ${cfg.intervalMinutes} min until `
+    + `${formatHourSetting(cfg.slowAfterHour)}, then every ${cfg.slowIntervalMinutes} min.`;
 }
 
 /** Renders a fractional hour back as "4:30" / "19:00" for the --check output. */
@@ -397,7 +450,7 @@ async function main() {
   }
   if (args.includes('--check')) {
     log('Configuration looks valid.');
-    log(`  interval     : every ${CONFIG.intervalMinutes} min`);
+    log(`  interval     : ${describeSchedule(CONFIG)}`);
     log(`  active hours : ${CONFIG.activeStartHour === 0 && CONFIG.activeEndHour === 0
       ? 'always'
       : formatHourSetting(CONFIG.activeStartHour) + '-' + formatHourSetting(CONFIG.activeEndHour)
@@ -416,7 +469,12 @@ async function main() {
     process.exit(0);
   }
 
-  log(`Starting. Capturing every ${CONFIG.intervalMinutes} minutes.`);
+  log(`Starting. ${describeSchedule(CONFIG)}`);
+
+  // setTimeout that reschedules itself, not setInterval: the gap between
+  // captures is no longer a constant, so it has to be recomputed after each
+  // cycle. This also means a slow cycle delays the next one rather than letting
+  // them pile up, which setInterval would happily do on a Pi Zero W.
   const tick = async () => {
     try {
       await runCycle(camera);
@@ -426,16 +484,18 @@ async function main() {
       // simply ages, and the website hides a snapshot it cannot load.
       logError('cycle failed:', e.message);
     }
+    const mins = intervalForTime(new Date(), CONFIG);
+    setTimeout(tick, mins * 60 * 1000);
   };
 
   await tick();
-  setInterval(tick, CONFIG.intervalMinutes * 60 * 1000);
 }
 
 module.exports = {
   CONFIG, validateConfig, isWithinActiveHours,
   readToken, writeToken, uploadSnapshot, captureWithRetry, runCycle,
   describeCause, hostOf, parseHourSetting, formatHourSetting,
+  intervalForTime, localHour, describeSchedule,
 };
 
 if (require.main === module) {

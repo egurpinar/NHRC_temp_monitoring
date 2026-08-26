@@ -36,12 +36,17 @@
 
 const OBJECT_KEY = 'latest.jpg';
 
-// A frame older than this is treated as stale. The Pi captures every 15 minutes,
-// so 45 minutes means roughly three missed cycles before we stop serving it —
-// tolerant of a transient failure, but unwilling to present a badly outdated
-// river as current. A stale image is more dangerous than no image, because
-// people trust a photograph more than a number.
-const MAX_AGE_MS = 45 * 60 * 1000;
+// A frame older than this is treated as stale. The Pi captures every 15 minutes
+// before 10am and every 30 minutes after, so this has to clear the slower rate:
+// at 45 minutes a SINGLE missed afternoon cycle (60 minutes) would hide the
+// camera, turning one dropped capture into an apparently broken feature. 75
+// minutes tolerates one miss at the slow rate and four at the fast rate, while
+// still refusing to present a badly outdated river as current. A stale image is
+// more dangerous than no image, because people trust a photograph more than a
+// number.
+//
+// If the capture interval changes, this must change with it.
+const MAX_AGE_MS = 75 * 60 * 1000;
 
 export default {
   async fetch(request, env) {

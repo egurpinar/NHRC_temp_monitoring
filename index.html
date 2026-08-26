@@ -477,8 +477,12 @@ function loadCameraSnapshot() {
       // "Loaded" described when the browser fetched the image, which reads as
       // when the photo was taken. It can be up to a capture interval older, so
       // say so rather than implying a live view.
+      // "up to 30 min" is the worst case across the whole day: captures run
+      // every 15 minutes before 10am and every 30 after. Stating the slower
+      // figure is always true, and avoids restating the schedule on this page
+      // where it would drift out of step with the Pi.
       note.textContent = `View of the river from the boathouse. Checked ${t} ${nyTzAbbr(Date.now())}; `
-        + `image may be up to 15 min older. Captured ${CAMERA_WINDOW_LABEL} only.`;
+        + `image may be up to 30 min older. Captured ${CAMERA_WINDOW_LABEL} only.`;
     }
   };
   // Any failure (offline camera, missing file, network) hides the IMAGE rather

@@ -46,6 +46,8 @@ const baseCfg = {
   // guard now correctly rejects — the fixture itself was unrealistic.
   uploadSecret: '9f3c1e7d2b8a4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d',
   intervalMinutes: 15,
+  slowAfterHour: 10,
+  slowIntervalMinutes: 30,
   activeStartHour: 5,
   activeEndHour: 21,
   timeZone: 'America/New_York',
@@ -205,6 +207,90 @@ test('a window wrapping midnight works', () => {
   const cfg = { ...baseCfg, activeStartHour: 22, activeEndHour: 4 };
   assert.strictEqual(S.isWithinActiveHours(at(3), cfg), true, '23:00 ET');
   assert.strictEqual(S.isWithinActiveHours(at(16), cfg), false, '12:00 ET');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('2b. Two-speed capture schedule');
+// ═══════════════════════════════════════════════════════════════════════════
+
+const schedCfg = { ...baseCfg, activeStartHour: 4, activeEndHour: 19,
+                   intervalMinutes: 15, slowAfterHour: 10, slowIntervalMinutes: 30 };
+// 2026-08-15 is EDT (UTC-4), so ET hour = UTC hour - 4.
+const etAt = (h, m = 0) => new Date(Date.UTC(2026, 7, 15, h + 4, m, 0));
+
+test('mornings capture every 15 minutes', () => {
+  for (const [h, m] of [[4, 0], [6, 30], [9, 59]]) {
+    assert.strictEqual(S.intervalForTime(etAt(h, m), schedCfg), 15, `${h}:${m}`);
+  }
+});
+
+test('after 10am the interval drops to 30 minutes', () => {
+  for (const [h, m] of [[10, 0], [12, 0], [18, 59]]) {
+    assert.strictEqual(S.intervalForTime(etAt(h, m), schedCfg), 30, `${h}:${m}`);
+  }
+});
+
+test('the switch happens exactly at 10:00, not 9:59', () => {
+  assert.strictEqual(S.intervalForTime(etAt(9, 59), schedCfg), 15);
+  assert.strictEqual(S.intervalForTime(etAt(10, 0), schedCfg), 30);
+});
+
+test('the rate is read in boathouse time, not UTC', () => {
+  // 14:00 UTC is 10:00 ET in summer. A naive UTC read would call it 14:00 and
+  // still say "slow", so use 13:00 UTC = 09:00 ET, where the two disagree.
+  const d = new Date(Date.UTC(2026, 7, 15, 13, 0, 0));
+  assert.strictEqual(d.getUTCHours(), 13, 'sanity');
+  assert.strictEqual(S.intervalForTime(d, schedCfg), 15,
+    '09:00 ET is still the fast rate even though UTC reads 13:00');
+});
+
+test('the rate follows DST rather than a fixed offset', () => {
+  // In EST (UTC-5), 10:00 ET is 15:00 UTC. The same wall-clock hour must switch.
+  const estNine = new Date(Date.UTC(2026, 0, 15, 14, 0, 0)); // 09:00 EST
+  const estTen  = new Date(Date.UTC(2026, 0, 15, 15, 0, 0)); // 10:00 EST
+  assert.strictEqual(S.intervalForTime(estNine, schedCfg), 15);
+  assert.strictEqual(S.intervalForTime(estTen, schedCfg), 30);
+});
+
+test('the two-speed schedule can be turned off', () => {
+  const off = { ...schedCfg, slowAfterHour: 4 }; // equal to window start
+  for (const h of [4, 10, 18]) {
+    assert.strictEqual(S.intervalForTime(etAt(h), off), 15, `hour ${h}`);
+  }
+});
+
+test('a slow-after hour past the window close is rejected', () => {
+  // It would silently never apply, leaving the fast rate running all day —
+  // exactly the battery drain the setting exists to prevent.
+  const p = S.validateConfig({ ...schedCfg, slowAfterHour: 20 });
+  assert.ok(p.some(x => /never take effect/.test(x)), p.join('; '));
+});
+
+test('a nonsense slow interval is rejected', () => {
+  assert.ok(S.validateConfig({ ...schedCfg, slowIntervalMinutes: 1 }).length > 0);
+  assert.ok(S.validateConfig({ ...schedCfg, slowAfterHour: NaN }).length > 0);
+});
+
+test('the daily capture count matches the intended schedule', () => {
+  // 4am-10am at 15 min = 24, 10am-7pm at 30 min = 18. Guards against an
+  // off-by-one in the boundary that would quietly double the afternoon load.
+  let n = 0;
+  for (let m = 0; m < 1440; m++) {
+    const d = new Date(Date.UTC(2026, 7, 15, 4, 0, 0) + m * 60000);
+    if (!S.isWithinActiveHours(d, schedCfg)) continue;
+    const iv = S.intervalForTime(d, schedCfg);
+    const local = S.localHour(d, schedCfg);
+    const mins = Math.round(local * 60);
+    if (mins % iv === 0) n++;
+  }
+  assert.strictEqual(n, 42, `expected 42 captures a day, got ${n}`);
+});
+
+test('the schedule description reads correctly', () => {
+  assert.strictEqual(S.describeSchedule(schedCfg),
+    'Capturing every 15 min until 10:00, then every 30 min.');
+  assert.strictEqual(S.describeSchedule({ ...schedCfg, slowAfterHour: 4 }),
+    'Capturing every 15 min.');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
