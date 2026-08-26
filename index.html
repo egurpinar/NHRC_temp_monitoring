@@ -268,7 +268,9 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
          image. Configure the source in CAMERA_SNAPSHOT_URL near the bottom
          of this file. -->
     <div class="river-card" id="camera-card" style="display:none;">
-      <div class="section-label">Boathouse Camera &mdash; Still Image, Updates ~Every 15 Min, 4:30am&ndash;7pm</div>
+      <!-- Text is set from the constants in the script below, so the stated
+           schedule cannot drift out of step with the camera again. -->
+      <div class="section-label" id="camera-title">Boathouse Camera</div>
       <div style="border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);line-height:0;background:var(--navy3);">
         <img id="camera-img" alt="Latest view of the river from the boathouse"
              style="width:100%;height:auto;display:block;"/>
@@ -448,7 +450,15 @@ const CAMERA_REFRESH_MINUTES = 5;
 // only accepts whole hours, so keep these integral unless that changes too.
 const CAMERA_ACTIVE_START_HOUR = 4;
 const CAMERA_ACTIVE_END_HOUR = 19;
-const CAMERA_WINDOW_LABEL = '4am to 7pm';
+// Every piece of wording about the camera schedule is built from these three
+// strings. The card title, the caption and the overnight message have each been
+// wrong at least once by being edited separately from the hours above.
+const CAMERA_START_LABEL = '4am';
+const CAMERA_END_LABEL = '7pm';
+// Worst case across the day: 15 min before 10am, 30 min after (CAMERA_SLOW_*
+// on the Pi). Stating a range keeps this true at every hour.
+const CAMERA_CADENCE_LABEL = 'every 15–30 min';
+const CAMERA_WINDOW_LABEL = `${CAMERA_START_LABEL} to ${CAMERA_END_LABEL}`;
 // Written once, used in both captions below. The window and the wording
 // describing it drifted apart the first time the hours changed.
 const CAMERA_RESUME_LABEL = '4:00 AM';
@@ -458,6 +468,12 @@ function loadCameraSnapshot() {
   const img  = document.getElementById('camera-img');
   const note = document.getElementById('camera-note');
   if (!card || !img) return;
+
+  const title = document.getElementById('camera-title');
+  if (title) {
+    title.textContent = `Boathouse Camera — Still Image, Updates ${CAMERA_CADENCE_LABEL}, `
+      + `${CAMERA_START_LABEL}–${CAMERA_END_LABEL}`;
+  }
 
   // No source configured yet — leave the card hidden entirely.
   if (!CAMERA_SNAPSHOT_URL) return;
@@ -477,12 +493,11 @@ function loadCameraSnapshot() {
       // "Loaded" described when the browser fetched the image, which reads as
       // when the photo was taken. It can be up to a capture interval older, so
       // say so rather than implying a live view.
-      // "up to 30 min" is the worst case across the whole day: captures run
-      // every 15 minutes before 10am and every 30 after. Stating the slower
-      // figure is always true, and avoids restating the schedule on this page
-      // where it would drift out of step with the Pi.
+      // The title already states the cadence and the window, so the caption
+      // only needs the freshness caveat: "checked" is when the browser fetched
+      // the file, which reads as when the photo was taken.
       note.textContent = `View of the river from the boathouse. Checked ${t} ${nyTzAbbr(Date.now())}; `
-        + `image may be up to 30 min older. Captured ${CAMERA_WINDOW_LABEL} only.`;
+        + `the photo itself may be up to 30 min older.`;
     }
   };
   // Any failure (offline camera, missing file, network) hides the IMAGE rather
