@@ -448,20 +448,20 @@ const CAMERA_REFRESH_MINUTES = 5;
 // changes, change these to match — they do not control the camera.
 // Fractional hours are supported here (4.5 means 4:30), but the Pi's validator
 // only accepts whole hours, so keep these integral unless that changes too.
-const CAMERA_ACTIVE_START_HOUR = 4;
-const CAMERA_ACTIVE_END_HOUR = 19;
+const CAMERA_ACTIVE_START_HOUR = 5;
+const CAMERA_ACTIVE_END_HOUR = 16;
 // Every piece of wording about the camera schedule is built from these three
 // strings. The card title, the caption and the overnight message have each been
 // wrong at least once by being edited separately from the hours above.
-const CAMERA_START_LABEL = '4am';
-const CAMERA_END_LABEL = '7pm';
-// Worst case across the day: 15 min before 10am, 30 min after (CAMERA_SLOW_*
+const CAMERA_START_LABEL = '5am';
+const CAMERA_END_LABEL = '4pm';
+// Worst case across the day: 30 min before 10am, 60 min after (CAMERA_SLOW_*
 // on the Pi). Stating a range keeps this true at every hour.
-const CAMERA_CADENCE_LABEL = 'every 15–30 min';
+const CAMERA_CADENCE_LABEL = 'every 30–60 min';
 const CAMERA_WINDOW_LABEL = `${CAMERA_START_LABEL} to ${CAMERA_END_LABEL}`;
 // Written once, used in both captions below. The window and the wording
 // describing it drifted apart the first time the hours changed.
-const CAMERA_RESUME_LABEL = '4:00 AM';
+const CAMERA_RESUME_LABEL = '5:00 AM';
 
 function loadCameraSnapshot() {
   const card = document.getElementById('camera-card');
@@ -497,7 +497,7 @@ function loadCameraSnapshot() {
       // only needs the freshness caveat: "checked" is when the browser fetched
       // the file, which reads as when the photo was taken.
       note.textContent = `View of the river from the boathouse. Checked ${t} ${nyTzAbbr(Date.now())}; `
-        + `the photo itself may be up to 30 min older.`;
+        + `the photo itself may be up to 60 min older.`;
     }
   };
   // Any failure (offline camera, missing file, network) hides the IMAGE rather

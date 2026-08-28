@@ -56,21 +56,21 @@ const CONFIG = {
   uploadUrl: process.env.CAMERA_UPLOAD_URL || '',
   uploadSecret: process.env.CAMERA_UPLOAD_SECRET || '',
 
-  intervalMinutes: Number(process.env.CAMERA_INTERVAL_MINUTES || 15),
+  intervalMinutes: Number(process.env.CAMERA_INTERVAL_MINUTES || 30),
 
   // Two-speed schedule. Most rowing happens early, so capture often through the
   // morning and back off afterwards — the afternoon frames still cost battery on
   // a camera the solar panel is not comfortably keeping up with.
   // Set CAMERA_SLOW_AFTER_HOUR equal to the window start to disable.
   slowAfterHour: parseHourSetting(process.env.CAMERA_SLOW_AFTER_HOUR, 10),
-  slowIntervalMinutes: Number(process.env.CAMERA_SLOW_INTERVAL_MINUTES || 30),
+  slowIntervalMinutes: Number(process.env.CAMERA_SLOW_INTERVAL_MINUTES || 60),
 
   // Optional daylight window in the boathouse timezone. A night-time frame from
   // an unlit river is a black rectangle, which is worse than showing nothing —
   // and each capture costs battery. Set both to 0 to disable the window.
   // Accepts "4" or "4:30". Defined below CONFIG but hoisted, so usable here.
-  activeStartHour: parseHourSetting(process.env.CAMERA_ACTIVE_START_HOUR, 4),
-  activeEndHour: parseHourSetting(process.env.CAMERA_ACTIVE_END_HOUR, 19),
+  activeStartHour: parseHourSetting(process.env.CAMERA_ACTIVE_START_HOUR, 5),
+  activeEndHour: parseHourSetting(process.env.CAMERA_ACTIVE_END_HOUR, 16),
 
   timeZone: process.env.CAMERA_TIMEZONE || 'America/New_York',
 

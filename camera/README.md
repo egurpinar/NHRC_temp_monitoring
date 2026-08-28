@@ -1,8 +1,8 @@
 # Boathouse Camera
 
-Captures a snapshot from the Ring camera (every 15 minutes to 10am, every 30
-minutes after) and publishes it via
-a Cloudflare Worker, so the website can show current river conditions.
+Captures a snapshot from the Ring camera (every 30 minutes to 10am, every 60
+minutes after, 5am-4pm) and publishes it via a Cloudflare Worker, so the website
+can show current river conditions.
 
 ```
 Ring cloud  <--  Pi Zero W (snapshot_service.js)  -->  Cloudflare Worker + R2
@@ -21,8 +21,8 @@ static site cannot actually be enforced, so the framing *is* the privacy
 control.
 
 **Never commit snapshots to this repository.** It is public and git history is
-permanent: a frame every 15 minutes would build an irreversible public archive
-of ~35,000 images a year. R2 holds exactly one object, overwritten each cycle.
+permanent: a frame every 30 minutes would build an irreversible public archive
+of thousands of images a year. R2 holds exactly one object, overwritten each cycle.
 
 ## Why a service and not a cron job
 
@@ -179,11 +179,11 @@ cat > /opt/nhrc-camera/env <<'EOF'
 RING_CAMERA_NAME=boathouse
 CAMERA_UPLOAD_URL=https://nhrc-camera.YOUR-ACCOUNT.workers.dev/latest.jpg
 CAMERA_UPLOAD_SECRET=the-same-secret-as-the-worker
-CAMERA_INTERVAL_MINUTES=15
+CAMERA_INTERVAL_MINUTES=30
 CAMERA_SLOW_AFTER_HOUR=10
-CAMERA_SLOW_INTERVAL_MINUTES=30
-CAMERA_ACTIVE_START_HOUR=4
-CAMERA_ACTIVE_END_HOUR=19
+CAMERA_SLOW_INTERVAL_MINUTES=60
+CAMERA_ACTIVE_START_HOUR=5
+CAMERA_ACTIVE_END_HOUR=16
 EOF
 chmod 600 /opt/nhrc-camera/env
 
@@ -293,8 +293,8 @@ people use for safety decisions.
 |---|---|---|
 | `CAMERA_INTERVAL_MINUTES` | 15 | Minimum 5. Ring throttles battery cameras to roughly one snapshot per 10 min |
 | `CAMERA_SLOW_AFTER_HOUR` | 10 | Local hour the slower rate starts. Set equal to the window start to disable |
-| `CAMERA_SLOW_INTERVAL_MINUTES` | 30 | Interval used after that hour. Must clear the Worker's MAX_AGE_MS |
-| `CAMERA_ACTIVE_START_HOUR` / `_END_HOUR` | 4 / 19 | Boathouse local time. Both `0` disables. Night frames are black and still cost battery |
+| `CAMERA_SLOW_INTERVAL_MINUTES` | 60 | Interval used after that hour. Must clear the Worker's MAX_AGE_MS |
+| `CAMERA_ACTIVE_START_HOUR` / `_END_HOUR` | 5 / 16 | Boathouse local time. Both `0` disables. Night frames are black and still cost battery |
 | `CAMERA_RETRIES` | 3 | Battery cameras cannot snapshot *while recording*, so motion events cause failures worth retrying |
 | `RING_TOKEN_FILE` | `~/.nhrc-ring-token` | Must persist across reboots |
 
