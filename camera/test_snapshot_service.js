@@ -402,6 +402,22 @@ test('Content-Length is never set by hand', () => {
     'uploadSnapshot sets Content-Length; undici rejects it with UND_ERR_INVALID_ARG');
 });
 
+test('Ring status polling is explicitly disabled', () => {
+  // The camera runs on battery and solar with very little margin, so it must be
+  // contacted only when a snapshot is actually wanted. ring-client-api skips
+  // polling when these are falsy, but relying on that default means a library
+  // update could silently start regular traffic against a camera we are trying
+  // hard not to wake.
+  const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
+  const start = src.indexOf('new RingApi(');
+  assert.ok(start > 0, 'RingApi construction not found — test needs updating');
+  const opts = src.slice(start, src.indexOf('})', start));
+  assert.ok(/cameraStatusPollingSeconds:\s*0/.test(opts),
+    'cameraStatusPollingSeconds must be explicitly 0');
+  assert.ok(/locationModePollingSeconds:\s*0/.test(opts),
+    'locationModePollingSeconds must be explicitly 0');
+});
+
 test('a transport failure names the real cause, not just "fetch failed"', async () => {
   // Node's fetch throws a bare "fetch failed" and buries the reason on .cause.
   // A log line that only says "fetch failed" cost a full debugging round trip.

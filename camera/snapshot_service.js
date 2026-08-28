@@ -346,8 +346,16 @@ async function connectRing(cfg = CONFIG) {
   const { RingApi } = await import('ring-client-api');
   const api = new RingApi({
     refreshToken: token,
-    // No camera status polling: we only need snapshots, and polling wakes a
-    // battery camera unnecessarily.
+    // Explicitly OFF. ring-client-api only sets up status polling when this is
+    // truthy (api.js: `if (!cameraStatusPollingSeconds) return`), so leaving it
+    // unset happens to work — but it makes us dependent on a library default we
+    // do not control, and the battery here has no margin for a version that
+    // changes it. We need snapshots and nothing else; polling would add regular
+    // traffic for status we never read.
+    cameraStatusPollingSeconds: 0,
+    // Likewise: no alarm/location mode polling. This account exists only to
+    // pull frames from one shared camera.
+    locationModePollingSeconds: 0,
     controlCenterDisplayName: 'NHRC Boathouse Camera',
   });
 
