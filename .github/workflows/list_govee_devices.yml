@@ -1,0 +1,49 @@
+name: List Govee Devices
+
+# Run this by hand after swapping or re-pairing a sensor, to find the device ID
+# that fetch_temp.yml needs. It only reads: no files are written or committed.
+#
+# The device ID is not a secret on its own -- it is useless without the API key,
+# and fetch_temp.yml already echoes it in its "Raw response" line. The API key
+# itself stays masked by GitHub Actions and is never printed.
+on:
+  workflow_dispatch:
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    steps:
+      - name: List every device on the Govee account
+        env:
+          GOVEE_API_KEY: ${{ secrets.GOVEE_API_KEY }}
+        run: |
+          if [ -z "$GOVEE_API_KEY" ]; then
+            echo "GOVEE_API_KEY secret is not set."
+            exit 1
+          fi
+
+          RESPONSE=$(curl -s -H "Govee-API-Key: $GOVEE_API_KEY" \
+            https://openapi.api.govee.com/router/api/v1/user/devices)
+
+          echo "=================================================="
+          echo "TEMPERATURE SENSORS (copy the device line you want)"
+          echo "=================================================="
+          echo "$RESPONSE" | jq -r '
+            .data[]?
+            | select(any(.capabilities[]?; .instance == "sensorTemperature"))
+            | "deviceName : \(.deviceName)\nsku        : \(.sku)\ndevice     : \(.device)\n---"
+          ' 2>/dev/null || echo "(could not parse -- see raw response below)"
+
+          echo
+          echo "=================================================="
+          echo "ALL DEVICES"
+          echo "=================================================="
+          echo "$RESPONSE" | jq -r '
+            .data[]? | "\(.deviceName)  |  sku=\(.sku)  |  device=\(.device)"
+          ' 2>/dev/null || true
+
+          echo
+          echo "=================================================="
+          echo "RAW RESPONSE"
+          echo "=================================================="
+          echo "$RESPONSE"
