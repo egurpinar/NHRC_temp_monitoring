@@ -20,7 +20,11 @@ jobs:
         run: |
           FETCHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           TIMESTAMP=$(date +%s%3N)
-          DEVICE="03:48:01:69:00:00:00:0F:FF:FF:00:57:FF:FF:00:45"
+          # Sensor replaced 2026-08-29. Each physical sensor has its own ID, so
+          # this changes whenever the float is swapped. Find the new one by
+          # running the "List Govee Devices" workflow.
+          # Previous sensor: 03:48:01:69:00:00:00:0F:FF:FF:00:57:FF:FF:00:45
+          DEVICE="03:48:01:69:00:00:00:0F:FF:FF:00:45:FF:FF:00:45"
 
           # Official Govee OpenAPI - permanent API key, no Bearer token, no expiry
           RESPONSE=$(curl -s -X POST "https://openapi.api.govee.com/router/api/v1/device/state" \
