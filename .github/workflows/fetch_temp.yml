@@ -6,13 +6,11 @@ on:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
       contents: write
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v5
 
       - name: Fetch temperature from Govee OpenAPI
         env:
