@@ -775,6 +775,40 @@ function downloadCSV() {
 }
 
 /* ── CHART ── */
+
+// Longest gap between readings that still gets a connecting line. Beyond this
+// the line is broken and the chart shows empty space.
+//
+// Drawing a straight line across a week of missing data — as happened when the
+// sensor was lost in August 2026 — asserts a temperature history nobody
+// measured, on a page people use to decide whether it is safe to row. Six hours
+// is well clear of the normal cadence (a reading every 15-30 minutes) and of the
+// routine two-to-three hour dropouts when the sensor loses its gateway link, so
+// ordinary outages still join up. Water temperature moves slowly enough that
+// interpolating across a few hours is fair; across days it is invention.
+const GAP_BREAK_MS = 6 * 3600000;
+
+/**
+ * Inserts null points wherever consecutive readings are further apart than
+ * `thresholdMs`. Chart.js breaks a line at a null y value, so this leaves a
+ * visible blank instead of a fabricated straight line.
+ *
+ * Two nulls are inserted rather than one, immediately after the last real
+ * reading and immediately before the next, so neither segment is drawn
+ * stretching into the empty region.
+ */
+function withGapBreaks(points, thresholdMs = GAP_BREAK_MS) {
+  const out = [];
+  for (let i = 0; i < points.length; i++) {
+    if (i > 0 && (points[i].x - points[i-1].x) > thresholdMs) {
+      out.push({ x: points[i-1].x + 1, y: null });
+      out.push({ x: points[i].x - 1, y: null });
+    }
+    out.push(points[i]);
+  }
+  return out;
+}
+
 function getSubset() {
   const hist = state.allHistory;
   if (!hist.length) return [];
@@ -793,6 +827,9 @@ function initChart() {
     data:{ datasets:[{
       data:[], borderColor:'#f0b429', backgroundColor:grad,
       borderWidth:1.5, fill:true, tension:0.3,
+      // Explicit, though it is also the Chart.js default: a null reading must
+      // leave a blank, never a line bridging data we do not have.
+      spanGaps:false,
       pointRadius: 1.5,        // small, consistent marker on every data point
       pointHoverRadius: 3,     // slightly larger on hover
       pointBackgroundColor:'#f0b429',
@@ -851,7 +888,7 @@ function renderChartData(subset) {
     chart.options.scales.x.time.unit = days<=1?'hour':days<=14?'day':days<=90?'week':'month';
   }
 
-  chart.data.datasets[0].data = subset.map(h=>({x:h.ts,y:h.tempF}));
+  chart.data.datasets[0].data = withGapBreaks(subset.map(h=>({x:h.ts,y:h.tempF})));
   chart.update('none');
 }
 
