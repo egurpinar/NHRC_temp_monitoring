@@ -1,2 +1,6 @@
 # NHRC_temp_monitoring
-This is the source code to monitor water temperature on Lake Housatonic in Connecticut. 
+Source code for roworno.com, the New Haven Rowing Club's rowing conditions and
+safety page for Lake Housatonic in Connecticut: water temperature, boat-class
+restrictions, river level and forecast, weather, the boathouse camera, a hazard
+map, and a daily conditions email.
+
