@@ -500,27 +500,28 @@ function loadCameraSnapshot() {
         + `the photo itself may be up to 60 min older.`;
     }
   };
-  // Any failure (offline camera, missing file, network) hides the IMAGE rather
-  // than leaving a broken one on a page people rely on for safety calls.
+  // Any failure — offline camera, stale frame, network — hides the IMAGE, never
+  // leaving a broken one on a page people rely on for safety calls. But the card
+  // itself stays, saying why.
   //
-  // Overnight is a failure by design, not a fault: the camera stops capturing at
-  // the end of the window and the server refuses any frame over 45 minutes old,
-  // so from roughly 45 minutes after the last capture until the window reopens
-  // there is nothing to show. Hiding the card outright in that period makes a
-  // deliberate pause look like a broken feature, so say what is happening
-  // instead. Outside those hours a failure really is a failure, and the card
-  // disappears as before.
+  // A card that simply vanishes is indistinguishable from a page that is broken,
+  // or from a feature that was removed. Neither is true, and members should not
+  // have to guess: "no image, and here is why" is more useful than silence, and
+  // it makes clear the rest of the page is still trustworthy.
+  //
+  // Two different reasons, because they need different responses. Overnight is a
+  // failure by design — the camera stops at the end of the window and the server
+  // refuses a frame over 130 minutes old — and nothing is wrong. During the
+  // capture window it is a real fault worth someone looking at.
   probe.onerror = () => {
-    if (isCameraOffHours()) {
-      if (img.parentElement) img.parentElement.style.display = 'none';
-      card.style.display = '';
-      if (note) {
-        note.textContent = `Camera paused overnight — captures run ${CAMERA_WINDOW_LABEL}. `
-          + `The river view returns at ${CAMERA_RESUME_LABEL}.`;
-      }
-      return;
-    }
-    card.style.display = 'none';
+    if (img.parentElement) img.parentElement.style.display = 'none';
+    card.style.display = '';
+    if (!note) return;
+    note.textContent = isCameraOffHours()
+      ? `Camera paused overnight — captures run ${CAMERA_WINDOW_LABEL}. `
+        + `The river view returns at ${CAMERA_RESUME_LABEL}.`
+      : 'No image available — the boathouse camera could not be reached. '
+        + 'The water temperature, river level and weather on this page are unaffected.';
   };
   probe.src = bust;
 }
