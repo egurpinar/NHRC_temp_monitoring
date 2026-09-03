@@ -1,25 +1,40 @@
 name: Daily Conditions Email
 
-# Sends the daily conditions digest at 1:00 AM Eastern LOCAL time, year-round,
-# so it is always in inboxes well before anyone leaves for a dawn practice.
+# Sends the daily conditions digest at 1:00 AM Eastern, year-round, so it is in
+# inboxes well before anyone leaves for a dawn practice.
 #
-# WHY TWO CRON TIMES
-# ------------------
-# GitHub Actions cron is always UTC and has no timezone support. 1:00 AM Eastern
-# is 05:00 UTC during EDT (summer) and 06:00 UTC during EST (winter). We trigger
-# at BOTH and let the job check the actual Eastern hour, so the send tracks
-# local time across daylight saving. Verified by the DST test in
-# scripts/test_daily_email.js.
+# WHY THE JOB WAITS INSTEAD OF CHECKING THE CLOCK AND GIVING UP
+# -------------------------------------------------------------
+# GitHub Actions cron is best effort, and the delays here are severe: a 05:00
+# UTC trigger (1:00 AM Eastern) was observed starting at 5:00 AM Eastern, four
+# hours late. The old gate then correctly refused to send, because a digest
+# arriving after 5 AM helps nobody already at the boathouse -- so members got no
+# email at all and the run still reported success. We widened that window once
+# before, after the 2026-08-06 miss; widening it again would just trade away
+# another hour of usefulness.
 #
-# The twin cron doubles as a free retry: in summer the 06:00 UTC run lands at
-# 2 AM Eastern, inside the send window, so if the 1 AM attempt failed it tries
-# again an hour later. Duplicates are impossible because the send is idempotent
-# (per-day slug, see dailySlug in scripts/daily_email.js).
+# So the trigger no longer decides when we send. The job is scheduled hours
+# EARLY and scripts/send_window.sh works out what to do:
+#
+#   before 1 AM  -> sleep until 1 AM, then send
+#   1 AM - 5 AM  -> send now (on time, or late but still useful)
+#   after 5 AM   -> skip; too late to be worth sending
+#
+# A punctual start waits; a four-hour delay lands on time. Both send at 1 AM.
+#
+# The four triggers are independent chances for GitHub to start us at all. The
+# first two land in the evening and wait; the last two are safety nets that send
+# immediately if they happen to be punctual. Duplicates are prevented by
+# scripts/daily_email.js, which asks Buttondown what has already gone out today
+# before sending (a slug alone does NOT prevent duplicates -- that assumption
+# once sent everyone two copies).
 
 on:
   schedule:
-    - cron: '0 5 * * *'   # 1:00 AM EDT (summer)
-    - cron: '0 6 * * *'   # 1:00 AM EST (winter)
+    - cron: '0 1 * * *'   # 9 PM EDT / 8 PM EST  -> waits for 1 AM
+    - cron: '0 2 * * *'   # 10 PM EDT / 9 PM EST -> waits for 1 AM
+    - cron: '0 5 * * *'   # 1 AM EDT / midnight EST
+    - cron: '0 6 * * *'   # 2 AM EDT / 1 AM EST
   workflow_dispatch:
     inputs:
       dry_run:
@@ -31,9 +46,19 @@ on:
         type: boolean
         default: false
 
+# Queue rather than cancel. A run that is sleeping until 1 AM must not be killed
+# mid-send by a later trigger; the queued run simply starts afterwards, finds
+# the digest already sent, and exits.
+concurrency:
+  group: daily-email
+  cancel-in-progress: false
+
 jobs:
   send:
     runs-on: ubuntu-latest
+    # Long enough for the maximum 5-hour wait plus the build and send, and still
+    # inside GitHub's 6-hour ceiling.
+    timeout-minutes: 330
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
@@ -43,54 +68,48 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Decide whether this run should proceed
+      - name: Wait for the send window
         id: gate
         run: |
-          # Manual runs always proceed.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual run - proceeding immediately."
             echo "proceed=true" >> "$GITHUB_OUTPUT"
-            echo "Manual run — proceeding."
             exit 0
           fi
 
-          # Scheduled runs: proceed during the 01:00-04:59 Eastern window.
-          #
-          # This used to require exactly the 4 AM hour, which silently dropped
-          # the whole day's email whenever GitHub started the job late —
-          # scheduled runs on shared runners are routinely delayed by tens of
-          # minutes, and the job still reported success, so the failure was
-          # invisible. That is why no email arrived on 2026-08-06.
-          #
-          # The window ends at 04:59 deliberately: a digest arriving after 5 AM
-          # is too late to be useful to anyone heading out for a dawn practice,
-          # so it is better to skip and be visibly missing than to send stale
-          # advice to someone already at the boathouse.
-          #
-          # A wide window is safe because the send is idempotent: the email
-          # carries a per-day slug (nhrc-YYYY-MM-DD) that Buttondown rejects as
-          # a duplicate, so the twin cron, a delayed run and a manual retry can
-          # all fire and members still receive exactly one email.
-          ET_HOUR=$(TZ=America/New_York date +%H)
-          echo "Current Eastern hour: $ET_HOUR"
-          if [ "$ET_HOUR" -ge 1 ] && [ "$ET_HOUR" -le 4 ]; then
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-            echo "Within the 1-4 AM Eastern send window — proceeding."
-          else
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            echo "Outside the 1-4 AM Eastern send window — skipping."
-          fi
+          echo "Started at $(TZ=America/New_York date '+%Y-%m-%d %H:%M %Z')"
+          DECISION=$(bash scripts/send_window.sh)
+          echo "Decision: $DECISION"
+
+          case "$DECISION" in
+            SEND)
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+              ;;
+            WAIT*)
+              SECS=$(echo "$DECISION" | awk '{print $2}')
+              echo "Sleeping ${SECS}s until 1:00 AM Eastern..."
+              sleep "$SECS"
+              echo "Woke at $(TZ=America/New_York date '+%H:%M %Z')"
+              echo "proceed=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
       - name: Run test suite
         if: steps.gate.outputs.proceed == 'true'
         # The rules logic is safety-critical. If the tests fail, do not send.
-        run: node scripts/test_daily_email.js
+        run: |
+          bash scripts/test_send_window.sh
+          node scripts/test_daily_email.js
 
       - name: Build email (dry run preview)
         if: steps.gate.outputs.proceed == 'true'
         run: |
           node scripts/daily_email.js --json > /tmp/digest.json
           echo "Computed digest:"
-          cat /tmp/digest.json | head -40
+          head -40 /tmp/digest.json
 
       - name: Send via Buttondown
         # The script applies the rowing-season gate itself and exits quietly

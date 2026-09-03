@@ -1002,32 +1002,75 @@ test('slug uses the Eastern date, not UTC', () => {
     'slug must follow the boathouse date, not UTC');
 });
 
-test('the send window covers every scheduled cron across DST', () => {
-  // Crons fire at 05:00 and 06:00 UTC; the job proceeds when the Eastern hour
-  // is 1-4. Every date must have at least one eligible run.
-  function etHour(utcHour, y, mo, dy) {
-    const d = new Date(Date.UTC(y, mo, dy, utcHour, 0, 0));
-    return parseInt(new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York', hour: 'numeric', hour12: false,
-    }).format(d), 10);
-  }
+test('every scheduled cron leads to a 1am send across DST', () => {
+  // The job no longer depends on the trigger being punctual: it is scheduled
+  // early and waits. So the requirement is not "a cron lands inside the window"
+  // but "every cron either sends or waits", for both EDT and EST.
+  const { execFileSync } = require('child_process');
+  const script = path.join(__dirname, 'send_window.sh');
+  const crons = [1, 2, 5, 6]; // UTC hours, must match daily_email.yml
   const dates = [[2026,0,15],[2026,2,7],[2026,2,8],[2026,5,15],[2026,7,6],[2026,10,1],[2026,10,2],[2026,11,25]];
   for (const [y, mo, dy] of dates) {
-    const eligible = [5, 6].filter(h => {
-      const et = etHour(h, y, mo, dy);
-      return et >= 1 && et <= 4;
-    });
-    assert.ok(eligible.length >= 1,
-      `${y}-${mo+1}-${dy}: no run falls inside the 1-4am ET window`);
+    for (const h of crons) {
+      const epoch = Math.floor(Date.UTC(y, mo, dy, h, 0, 0) / 1000);
+      const out = execFileSync('bash', [script], {
+        env: { ...process.env, NOW_OVERRIDE: String(epoch) }, encoding: 'utf8',
+      }).trim();
+      assert.ok(/^(SEND|WAIT )/.test(out),
+        `${y}-${mo+1}-${dy} ${h}:00 UTC produced "${out}" - no send would happen`);
+    }
   }
+});
+
+test('a run delayed by hours still sends, up to the 5am cutoff', () => {
+  // The real failure: a 1am trigger that started at 5am Eastern, which the old
+  // gate refused outright, so no email went out and the run stayed green.
+  const { execFileSync } = require('child_process');
+  const script = path.join(__dirname, 'send_window.sh');
+  const decide = (epoch) => execFileSync('bash', [script], {
+    env: { ...process.env, NOW_OVERRIDE: String(epoch) }, encoding: 'utf8' }).trim();
+
+  const base = Math.floor(Date.UTC(2026, 6, 15, 1, 0, 0) / 1000); // 9pm EDT trigger
+  for (const delayHours of [0, 1, 2, 3, 4, 5, 6]) {
+    const out = decide(base + delayHours * 3600);
+    assert.ok(/^(SEND|WAIT )/.test(out),
+      `a ${delayHours}h delay produced "${out}"`);
+    if (out.startsWith('WAIT ')) {
+      // Waiting must actually land inside the window, not merely defer.
+      const after = base + delayHours * 3600 + Number(out.split(' ')[1]);
+      assert.strictEqual(decide(after), 'SEND',
+        `after waiting from a ${delayHours}h delay, the run still would not send`);
+    }
+  }
+  // Eight hours late is 5am: genuinely too late to help anyone.
+  assert.ok(decide(base + 8 * 3600).startsWith('SKIP'),
+    'a run starting at 5am should skip rather than send stale advice');
 });
 
 test('the send window never extends past 5am', () => {
   // A digest arriving after 5am is too late to be useful before dawn practice.
+  const { execFileSync } = require('child_process');
+  const script = path.join(__dirname, 'send_window.sh');
+  for (const [h, expect] of [[4, 'SEND'], [5, 'SKIP'], [9, 'SKIP']]) {
+    const epoch = Math.floor(Date.UTC(2026, 6, 15, h + 4, 0, 0) / 1000); // EDT
+    const out = execFileSync('bash', [script], {
+      env: { ...process.env, NOW_OVERRIDE: String(epoch) }, encoding: 'utf8' }).trim();
+    assert.ok(out.startsWith(expect), `${h}:00 ET gave "${out}", expected ${expect}`);
+  }
+});
+
+test('the workflow crons match what the tests assume', () => {
+  // These tests are only meaningful if they check the schedule that is actually
+  // deployed. Pin them together so editing one without the other fails here.
   const fs2 = require('fs');
   const wf = fs2.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'daily_email.yml'), 'utf8');
-  assert.ok(/-ge 1 \] && \[ "\$ET_HOUR" -le 4/.test(wf),
-    'workflow gate should accept only the 1-4am Eastern hours');
+  const crons = [...wf.matchAll(/cron:\s*'(\d+)\s+(\d+)\s+\*\s+\*\s+\*'/g)].map(m => Number(m[2]));
+  assert.deepStrictEqual(crons.sort((a,b)=>a-b), [1, 2, 5, 6],
+    'daily_email.yml cron hours changed; update the tests above to match');
+  assert.ok(/scripts\/send_window\.sh/.test(wf),
+    'the workflow should delegate the timing decision to send_window.sh');
+  assert.ok(/cancel-in-progress:\s*false/.test(wf),
+    'a sleeping run must not be cancelled mid-send by a later trigger');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
