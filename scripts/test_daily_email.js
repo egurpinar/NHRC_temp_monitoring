@@ -1896,7 +1896,7 @@ section('13. Website rendering (index.html in a DOM stub)');
 // separate code. Run the real page script with a DOM that remembers what was
 // written, at a fixed clock, and read the result back.
 
-function loadSite(nowMs) {
+function loadSite(nowMs, fetchImpl) {
   const src = fsT.readFileSync(INDEX_PATH, 'utf8').match(/<script>([\s\S]*)<\/script>\s*<\/body>/)[1];
   const els = {};
   const el = id => els[id] || (els[id] = {
@@ -1909,17 +1909,28 @@ function loadSite(nowMs) {
     constructor(...a) { if (a.length) super(...a); else super(nowMs); }
     static now() { return nowMs; }
   }
+  // The chart's range buttons, so their click handlers get attached and can be
+  // fired - without them nothing tests that clicking "7 days" updates anything.
+  const rangeButtons = [1, 7, 30, 90, 0].map(d => ({
+    dataset: { d: String(d) }, classList: { add() {}, remove() {}, toggle() {} }, handlers: {},
+    addEventListener(type, fn) { this.handlers[type] = fn; },
+  }));
+  els.__rangeButtons = rangeButtons;
   const sandbox = {
-    document: { getElementById: el, querySelectorAll: () => [], querySelector: () => null,
-                addEventListener() {}, createElement: () => el('__created') },
-    window: { addEventListener() {} }, fetch: () => new Promise(() => {}),
-    Chart: function () { return { destroy() {}, update() {} }; }, moment: {},
+    document: { getElementById: el, querySelectorAll: (sel) => (/#range-btns/.test(sel) ? rangeButtons : []),
+                querySelector: () => null, addEventListener() {}, createElement: () => el('__created') },
+    window: { addEventListener() {} }, fetch: fetchImpl || (() => new Promise(() => {})),
+    // Shaped like Chart.js where the page touches it: data and options come
+    // from the config it was built with.
+    Chart: function (ctx, cfg) { return { data: cfg && cfg.data, options: (cfg && cfg.options) || {}, destroy() {}, update() {} }; },
+    moment: {},
     setInterval() {}, setTimeout() {}, console: { log() {}, warn() {}, error() {} },
     URL: { createObjectURL() {}, revokeObjectURL() {} }, Blob: function () {}, Image: function () {},
     Intl, Date: FixedDate, Math, JSON, isNaN, parseInt, parseFloat, Number, Array, Object, String,
   };
   const ctx = vmT.createContext(sandbox);
-  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, renderFogOutlook, renderFloodGrid, renderDashboard };',
+  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, renderFogOutlook, renderFloodGrid, renderDashboard,' +
+    ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -2047,6 +2058,201 @@ test('site: the steam-fog check uses the river temperature once it arrives', () 
   site.renderFogOutlook();
   assert.ok(/Fog possible at dawn this morning/.test(els['fog-outlook'].innerHTML));
   assert.ok(/steam fog/.test(els['fog-outlook'].innerHTML));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('13b. Conditions summary and history stats');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Top of the page: a snapshot at first sight - water, weather (with a fog
+// line), river - each tile from its own source. Min/max/avg moved into the
+// Temperature History card and follow its range buttons.
+
+const okJson = (body) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+const WEATHER_NOW = { current: { temperature_2m: 63.4, apparent_temperature: 63, weather_code: 0,
+  wind_speed_10m: 3.2, wind_gusts_10m: 6.1, wind_direction_10m: 190, precipitation: 0 },
+  daily: { sunrise: ['2026-10-03T06:53'], sunset: ['2026-10-03T18:32'] } };
+
+test('layout: summary at the top, stats inside the history chart, nothing left in between', () => {
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8').replace(/<!--[\s\S]*?-->/g, '');
+  const markup = html.slice(0, html.indexOf('<script>'));
+  const at = (s) => markup.indexOf(s);
+  assert.ok(/<h2>Conditions Summary<\/h2>/.test(markup), 'heading');
+  assert.ok(at('class="summary-grid"') > 0 && at('class="summary-grid"') < at('class="rowing-status-card"'),
+    'the summary must sit above the rules card');
+  for (const id of ['current-f', 'sum-weather', 'sum-fog', 'sum-river']) {
+    assert.ok(at(`id="${id}"`) > at('class="summary-grid"') && at(`id="${id}"`) < at('class="rowing-status-card"'), id);
+  }
+  for (const id of ['min-val', 'max-val', 'avg-val', 'min-label']) {
+    assert.ok(at(`id="${id}"`) > at('class="chart-card"'), `${id} must live in the Temperature History card`);
+  }
+  assert.ok(!/temp-hero|id="device-name"/.test(markup), 'old hero box and sensor-name heading are gone');
+});
+
+test('summary water tile: shows the reading, and still turns red when the sensor is stale', () => {
+  const now = Date.now();
+  const tempC = (66.3 - 32) * 5 / 9;
+  let { site, els } = loadSite(now);
+  site.state.allHistory = historyAtTemp(66);
+  site.renderDashboard(tempC, makeRaw(66.3, new Date(now - 10 * 60000)));
+  assert.strictEqual(String(els['current-f'].textContent), '66.3');
+  assert.strictEqual(els['current-f'].style.color, 'var(--white)');
+  assert.ok(/^Water sensor reading: /.test(els['last-updated'].textContent), els['last-updated'].textContent);
+  ({ site, els } = loadSite(now));
+  site.state.allHistory = historyAtTemp(66);
+  site.renderDashboard(tempC, makeRaw(66.3, new Date(now - 4 * 3600000)));
+  assert.strictEqual(els['current-f'].style.color, '#f07070', 'stale water reading must still be flagged red');
+});
+
+test('summary weather tile: filled by the real weather loader - temp, condition, wind', async () => {
+  const { site, els } = loadSite(Date.now(), () => okJson(WEATHER_NOW));
+  await site.loadWeather();
+  const t = els['sum-weather'].innerHTML;
+  assert.ok(/63°F/.test(t) && /Clear sky/.test(t) && /Wind 3 mph S, gusts 6/.test(t), t);
+  assert.ok(!/summary-alert/.test(t), 'no alert in calm weather');
+  assert.ok(/63°F/.test(els['weather-content'].innerHTML), 'the detailed weather card still renders too');
+});
+
+test('summary weather tile: carries the same alert as the weather card (wind, storms)', async () => {
+  const windy = JSON.parse(JSON.stringify(WEATHER_NOW));
+  windy.current.wind_speed_10m = 22; windy.current.wind_gusts_10m = 31;
+  const { site, els } = loadSite(Date.now(), () => okJson(windy));
+  await site.loadWeather();
+  assert.ok(/summary-alert danger/.test(els['sum-weather'].innerHTML), els['sum-weather'].innerHTML);
+  assert.ok(/High wind/.test(els['sum-weather'].innerHTML));
+  assert.ok(/High wind/.test(els['weather-content'].innerHTML), 'and the card below agrees');
+});
+
+test('summary weather tile: an outage says "Weather unavailable" and breaks nothing', async () => {
+  const { site, els } = loadSite(Date.now(), () => Promise.reject(new Error('offline')));
+  await site.loadWeather();
+  assert.ok(/Weather unavailable/.test(els['sum-weather'].innerHTML));
+  assert.ok(/Could not load weather/.test(els['weather-content'].innerHTML));
+  assert.doesNotThrow(() => site.renderSummaryWeather({ get tempF() { throw new Error('boom'); } }));
+});
+
+test('summary river tile: filled by the real river loader - level, gauge, restriction', async () => {
+  const now = Date.now();
+  const series = (dir) => ({ data: Array.from({ length: 12 }, (_, i) => ({
+    validTime: new Date(now + dir * (11 - i) * 3600e3).toISOString(), primary: 3.1 })) });
+  const { site, els } = loadSite(now, (url) => okJson(/observed$/.test(url) ? series(-1) : series(1)));
+  await site.loadRiverData();
+  const r = els['sum-river'].innerHTML;
+  assert.ok(/3\.1 ft/.test(r) && /Stevenson Dam gauge/.test(r) && /No river-level restrictions/.test(r), r);
+  assert.ok(/river-status-pill rp-normal/.test(r));
+});
+
+test('summary river tile: restrictions, forecast estimates and outages are all stated', () => {
+  const { site, els } = loadSite(Date.now());
+  Object.assign(site.state, { riverLevel: 10.4, riverLevelIsEstimate: false });
+  site.renderSummaryRiver();
+  assert.ok(/10\.4 ft/.test(els['sum-river'].innerHTML));
+  assert.ok(els['sum-river'].innerHTML.includes(logic.floodSummaryLabel(10.4).text), 'same words as the river card');
+  Object.assign(site.state, { riverLevel: 3.1, riverLevelIsEstimate: true });
+  site.renderSummaryRiver();
+  assert.ok(/Forecast estimate/.test(els['sum-river'].innerHTML), 'an estimate must never look like a live gauge');
+  // After a failed refresh state.riverLevel still holds the OLD reading; the
+  // summary must not keep showing it as current.
+  site.renderRiverCardUnavailable('Could not load river data.');
+  assert.ok(/River level unavailable/.test(els['sum-river'].innerHTML));
+  assert.ok(!/3\.1 ft/.test(els['sum-river'].innerHTML));
+  Object.assign(site.state, { riverLevel: null });
+  site.renderSummaryRiver();
+  assert.ok(/River level unavailable/.test(els['sum-river'].innerHTML));
+});
+
+test('summary fog line: same verdict as the fog outlook, naming which morning', () => {
+  let { site, els } = loadSite(etDate('2026-10-02', 5).getTime());
+  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.likely_2026_10_02.response, fogAlerts: null, lastTempF: 65.7 });
+  site.renderFogOutlook();
+  assert.ok(/Fog this morning:/.test(els['sum-fog'].innerHTML) && /fog-pill likely">Likely/.test(els['sum-fog'].innerHTML),
+    els['sum-fog'].innerHTML);
+  ({ site, els } = loadSite(etDate('2026-10-01', 14).getTime()));
+  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.likely_2026_10_02.response, fogAlerts: null, lastTempF: 65.7 });
+  site.renderFogOutlook();
+  assert.ok(/Fog tomorrow morning:/.test(els['sum-fog'].innerHTML), els['sum-fog'].innerHTML);
+  ({ site, els } = loadSite(etDate('2026-10-02', 5).getTime()));
+  Object.assign(site.state, { fogLoaded: true, fogResponse: null, fogAlerts: null });
+  site.renderFogOutlook();
+  assert.ok(/fog-pill unknown">Unavailable/.test(els['sum-fog'].innerHTML), 'an outage is stated in the summary too');
+});
+
+// Readings at known temperatures in known age bands, so every range has a
+// different correct answer.
+function bandedHistory(now) {
+  const out = [];
+  const band = (fromH, toH, tempF) => { for (let h = fromH; h < toH; h += 1) out.push({ ts: now - h * 3600e3, tempF }); };
+  band(1, 23, 72);        // last day
+  band(30, 160, 60);      // 2-7 days ago
+  band(200, 700, 50);     // 8-30 days ago
+  band(800, 2100, 40);    // 1-3 months ago
+  band(2300, 3000, 30);   // older than 3 months
+  out.push({ ts: now - 2 * 3600e3, tempF: 74 });
+  return out.sort((a, b) => a.ts - b.ts);
+}
+
+test('history stats follow the chart range, and say which range', () => {
+  const now = Date.now();
+  const { site, els } = loadSite(now);
+  site.state.allHistory = bandedHistory(now);
+  const expect = { 1: ['24h', 72, 74], 7: ['7 days', 60, 74], 30: ['30 days', 50, 74], 90: ['3 months', 40, 74], 0: ['all time', 30, 74] };
+  for (const [range, [label, min, max]] of Object.entries(expect)) {
+    site.state.currentRange = Number(range);
+    site.updateStats();
+    assert.strictEqual(els['min-label'].textContent, `Min (${label})`);
+    assert.strictEqual(els['avg-label'].textContent, `Avg (${label})`);
+    assert.strictEqual(els['min-val'].textContent, `${min.toFixed(1)}°F`, `min over ${label}`);
+    assert.strictEqual(els['max-val'].textContent, `${max.toFixed(1)}°F`, `max over ${label}`);
+  }
+});
+
+test('clicking a range button updates the stats, not just the chart', () => {
+  const now = Date.now();
+  const { site, els } = loadSite(now);
+  site.state.allHistory = bandedHistory(now);
+  site.state.currentRange = 1;
+  site.updateStats();
+  assert.strictEqual(els['min-val'].textContent, '72.0°F', 'sanity: 24h');
+  const seven = els.__rangeButtons.find(b => b.dataset.d === '7');
+  assert.strictEqual(typeof seven.handlers.click, 'function', 'the page must wire a click handler to the range buttons');
+  seven.handlers.click();
+  assert.strictEqual(els['min-label'].textContent, 'Min (7 days)');
+  assert.strictEqual(els['min-val'].textContent, '60.0°F');
+});
+
+test('the email sign-up box tells members about the fog outlook', () => {
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8');
+  const box = html.slice(html.indexOf('<div class="section-label">Daily Conditions Email</div>'), html.indexOf('<form action="https://buttondown.com'));
+  assert.ok(/dawn fog outlook/.test(box), 'the sign-up box should say the email includes fog');
+  assert.ok(/FOG RISK/.test(box), 'and what a FOG RISK subject line means');
+  assert.ok(!/rowing status/i.test(box));
+});
+
+test('history stats: "all time" survives the full 525,600-reading history cap', () => {
+  // Math.min(...readings) throws past ~65,000 values in Safari and ~120,000 in
+  // Chrome; the history file is allowed to reach 525,600.
+  const now = Date.now();
+  const { site, els } = loadSite(now);
+  const big = new Array(525600);
+  for (let i = 0; i < big.length; i++) big[i] = { ts: now - (big.length - i) * 60000, tempF: 50 + (i % 200) / 10 };
+  site.state.allHistory = big;
+  site.state.currentRange = 0;
+  assert.doesNotThrow(() => site.updateStats());
+  assert.strictEqual(els['min-val'].textContent, '50.0°F');
+  assert.strictEqual(els['max-val'].textContent, '69.9°F');
+});
+
+test('history stats: an empty range shows "--", never the previous numbers', () => {
+  const now = Date.now();
+  const { site, els } = loadSite(now);
+  site.state.allHistory = bandedHistory(now);
+  site.state.currentRange = 1;
+  site.updateStats();
+  assert.notStrictEqual(els['min-val'].textContent, '--', 'sanity');
+  site.state.allHistory = [];
+  site.updateStats();
+  assert.strictEqual(els['min-val'].textContent, '--');
+  assert.strictEqual(els['avg-val'].textContent, '--');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

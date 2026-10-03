@@ -19,7 +19,7 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (149 tests) |
+| `test_daily_email.js` | Test suite (162 tests) |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
 

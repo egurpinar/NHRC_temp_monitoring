@@ -76,14 +76,34 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
 
 /* HERO TEMP */
-.temp-hero{background:var(--navy2);border:1px solid var(--border);border-radius:16px;padding:24px 22px;display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:20px;position:relative;overflow:hidden;}
-.temp-hero::after{content:'';position:absolute;top:-30px;right:-30px;width:140px;height:140px;background:radial-gradient(circle,rgba(240,180,41,.07),transparent 70%);border-radius:50%;}
-.temp-main{}
 .temp-value{font-family:var(--fserif);font-size:clamp(3rem,10vw,4.5rem);font-weight:700;line-height:1;color:var(--white);}
 .temp-value .unit{font-family:var(--fserif);font-size:clamp(3rem,10vw,4.5rem);font-weight:700;color:var(--white);}
 .temp-celsius{font-family:var(--fserif);font-size:clamp(.9rem,2.5vw,1.1rem);color:var(--muted);margin-top:4px;}
 .temp-meta{font-family:var(--fsans);font-size:.72rem;color:var(--muted);margin-top:5px;}
 .temp-stats{display:flex;gap:20px;flex-wrap:wrap;}
+/* Conditions summary: a snapshot at first sight - water, weather, river - with
+   the detail for each further down the page. Three across on wider screens; on
+   phones the water tile takes the full width and the other two sit beneath. */
+.summary-grid{display:grid;grid-template-columns:1.3fr 1fr 1fr;gap:10px;margin-bottom:16px;}
+@media(max-width:640px){.summary-grid{grid-template-columns:1fr 1fr;}.summary-water{grid-column:1 / -1;}}
+.summary-tile{background:var(--navy2);border:1px solid var(--border);border-radius:14px;padding:16px;min-width:0;position:relative;overflow:hidden;}
+.summary-tile .section-label{margin-bottom:8px;}
+.summary-water::after{content:'';position:absolute;top:-30px;right:-30px;width:140px;height:140px;background:radial-gradient(circle,rgba(240,180,41,.07),transparent 70%);border-radius:50%;}
+.summary-big{font-family:var(--fserif);font-size:1.55rem;font-weight:700;color:var(--white);line-height:1.15;}
+.summary-big .wicon{font-size:1.15rem;margin-right:5px;}
+.summary-line{font-size:.74rem;color:var(--muted);margin-top:4px;line-height:1.45;}
+.summary-alert{font-size:.72rem;font-weight:600;margin-top:6px;line-height:1.4;}
+.summary-alert.warn{color:#ffd166;}
+.summary-alert.danger{color:#f07070;}
+.summary-fog{margin-top:8px;font-size:.72rem;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.summary-fog:empty{display:none;}
+.summary-river-status{margin-top:8px;}
+/* In the river card this pill sits in a flex row, which makes it a single box.
+   Here it would be inline, and on a phone the longer labels ("Singles & doubles
+   restricted, 4x / 8+ caution") wrap - each line then drew its own separate
+   rounded background. One block that wraps inside itself instead. */
+.summary-river-status .river-status-pill{display:inline-block;border-radius:10px;line-height:1.35;}
+.chart-stats{margin:2px 0 14px;}
 .temp-stat label{display:block;font-family:var(--fsans);font-size:.63rem;color:var(--muted);letter-spacing:.09em;text-transform:uppercase;margin-bottom:3px;}
 .temp-stat span{font-family:var(--fserif);font-size:1.4rem;font-weight:700;color:var(--white);}
 
@@ -252,7 +272,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
     <div class="dash-top">
       <div>
-        <h2 id="device-name">Water Temperature</h2>
+        <h2>Conditions Summary</h2>
         <div class="dash-sub" id="last-updated">—</div>
       </div>
       <div class="dash-top-btns">
@@ -262,16 +282,25 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     </div>
 
 
-    <div class="temp-hero">
-      <div class="temp-main">
+    <!-- CONDITIONS SUMMARY - a snapshot at first sight, with the detail for each
+         further down the page. Each tile is filled by its own data source and
+         fails on its own: a weather or river outage never blanks the water
+         temperature, or each other. -->
+    <div class="summary-grid">
+      <div class="summary-tile summary-water">
+        <div class="section-label">Water</div>
         <div class="temp-value"><span id="current-f">--</span><span class="unit">°F</span></div>
         <div class="temp-celsius" id="current-c">-- °C</div>
         <div class="temp-meta" id="temp-meta">—</div>
       </div>
-      <div class="temp-stats">
-        <div class="temp-stat"><label>Min (24h)</label><span id="min-val">--</span></div>
-        <div class="temp-stat"><label>Max (24h)</label><span id="max-val">--</span></div>
-        <div class="temp-stat"><label>Avg (24h)</label><span id="avg-val">--</span></div>
+      <div class="summary-tile">
+        <div class="section-label">Weather</div>
+        <div id="sum-weather"><div class="summary-line">Loading…</div></div>
+        <div id="sum-fog" class="summary-fog"></div>
+      </div>
+      <div class="summary-tile">
+        <div class="section-label">River level</div>
+        <div id="sum-river"><div class="summary-line">Loading…</div></div>
       </div>
     </div>
 
@@ -328,6 +357,14 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         </div>
       </div>
 
+      <!-- Moved here from the top of the page. They follow the range buttons
+           above, so the labels say which period they cover. -->
+      <div class="temp-stats chart-stats">
+        <div class="temp-stat"><label id="min-label">Min (24h)</label><span id="min-val">--</span></div>
+        <div class="temp-stat"><label id="max-label">Max (24h)</label><span id="max-val">--</span></div>
+        <div class="temp-stat"><label id="avg-label">Avg (24h)</label><span id="avg-val">--</span></div>
+      </div>
+
       <div class="data-info-bar">
         <span style="display:flex;align-items:center;gap:5px;"><span id="info-dot" class="dot-live"></span><span id="info-last">Loading…</span></span>
         
@@ -375,7 +412,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     <div class="river-card">
       <div class="section-label">Daily Conditions Email</div>
       <div style="font-size:.85rem;color:var(--white);line-height:1.6;margin-bottom:14px;">
-        Get the rowing status, boat restrictions, river level, and weather sent to your inbox every morning — waiting for you before you head to the boathouse.
+        Get the water temperature, boat restrictions, river level, weather, and a <strong>dawn fog outlook</strong> sent to your inbox every morning — waiting for you before you head to the boathouse.
+        On mornings when fog is likely, the subject line starts with <strong>FOG RISK</strong>.
       </div>
       <!-- Buttondown embed form: a plain POST to their public endpoint, so members
            sign up without leaving the site. No API key is involved here — that
@@ -641,14 +679,31 @@ async function loadHistory() {
   } catch(e) { console.error('history.json:', e); }
 }
 
+// Labels for the chart's range buttons (data-d values), used by the stats.
+const RANGE_LABELS = { 1: '24h', 7: '7 days', 30: '30 days', 90: '3 months', 0: 'all time' };
+
+/**
+ * Min / max / average for whatever range the Temperature History chart shows.
+ * Recomputed when the range changes, and labelled with the period it covers.
+ */
 function updateStats() {
-  const now  = Date.now();
-  const day  = state.allHistory.filter(h => h.ts >= now - 86400000);
-  if (!day.length) return; // no history yet — leave showing current reading
-  const vals = day.map(h => h.tempF);
-  document.getElementById('min-val').textContent = `${Math.min(...vals).toFixed(1)}°F`;
-  document.getElementById('max-val').textContent = `${Math.max(...vals).toFixed(1)}°F`;
-  document.getElementById('avg-val').textContent = `${(vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(1)}°F`;
+  const period = RANGE_LABELS[state.currentRange] || `${state.currentRange} days`;
+  for (const k of ['min', 'max', 'avg']) {
+    const el = document.getElementById(k + '-label');
+    if (el) el.textContent = `${k.charAt(0).toUpperCase() + k.slice(1)} (${period})`;
+  }
+  const show = (id, v) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = v === null ? '--' : `${v.toFixed(1)}°F`;
+  };
+  const vals = getSubset().map(h => h.tempF).filter(v => typeof v === 'number' && Number.isFinite(v));
+  if (!vals.length) { show('min-val', null); show('max-val', null); show('avg-val', null); return; }
+  // A loop, not Math.min(...vals): spreading every reading into one call throws
+  // past ~65,000 values in Safari (~120,000 in Chrome), and "all time" history
+  // is allowed to grow to 525,600 readings.
+  let min = Infinity, max = -Infinity, sum = 0;
+  for (const v of vals) { if (v < min) min = v; if (v > max) max = v; sum += v; }
+  show('min-val', min); show('max-val', max); show('avg-val', sum / vals.length);
 }
 
 function parseLastDeviceData(device) {
@@ -725,7 +780,6 @@ function renderDashboard(tempC, raw) {
   const hum        = extractHumidity(raw);
   const isOnline   = extractOnlineStatus(raw);
   state.sensorOnline = isOnline;
-  const name      = extractDeviceName(raw);
   const fetchedAt = raw.fetchedAt ? new Date(raw.fetchedAt) : new Date();
   state.lastFetchedAt = fetchedAt;
 
@@ -733,7 +787,6 @@ function renderDashboard(tempC, raw) {
   document.getElementById('loading').style.display    = 'none';
   document.getElementById('error-view').style.display = 'none';
   document.getElementById('dashboard').style.display  = 'block';
-  document.getElementById('device-name').textContent  = name;
   document.getElementById('current-f').textContent    = tempF;
   document.getElementById('current-c').textContent    = `${tempCDisp} °C`;
   document.getElementById('temp-meta').textContent    = hum!==null ? `Humidity ${hum.toFixed(0)}%` : 'Lake Housatonic, NHRC Boathouse';
@@ -743,7 +796,10 @@ function renderDashboard(tempC, raw) {
     const ageHrs = (Date.now() - fetchedAt.getTime()) / 3600000;
     heroEl.style.color = (ageHrs > 3) ? '#f07070' : 'var(--white)';
   }
-  document.getElementById('last-updated').textContent = `Updated: ${fetchedAt.toLocaleString()}`;
+  // The heading now covers water, weather and river, which update on their own
+  // clocks - so say which reading this time belongs to.
+  document.getElementById('last-updated').textContent = `Water sensor reading: ${fetchedAt.toLocaleString('en-US',
+    { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} ${nyTzAbbr(fetchedAt.getTime())}`;
 
   const ageMs   = Date.now() - fetchedAt.getTime();
   const ageMins = Math.round(ageMs/60000);
@@ -786,6 +842,7 @@ document.querySelectorAll('#range-btns .rb:not(.rb-csv)').forEach(btn => {
     btn.classList.add('active');
     state.currentRange = parseInt(btn.dataset.d);
     updateChart();
+    updateStats();
   });
 });
 
@@ -1468,6 +1525,7 @@ async function loadWeather() {
     const alert   = rowingWeatherAlert(windMph, gustMph, code);
     const icon    = WMO_ICONS[code] || '&#127777;';
     const cond    = WMO_CODES[code] || 'Unknown';
+    renderSummaryWeather({ tempF, cond, icon, windMph, gustMph, dir, alert });
     document.getElementById('weather-content').innerHTML = `
       <div class="weather-main-row">
         <div class="weather-icon-block">
@@ -1498,8 +1556,58 @@ async function loadWeather() {
         </a>
       </div>`;
   } catch(e) {
+    renderSummaryWeather(null);
     document.getElementById('weather-content').innerHTML =
       '<div style="font-size:.78rem;color:#f07070;padding:8px 0;">Could not load weather data.</div>';
+  }
+}
+
+/* ── CONDITIONS SUMMARY (top of page) ─────────────────────────────────────────
+ * The water tile is filled by renderDashboard; these fill the other two, each
+ * from its own loader. None of them may throw: they are called from inside
+ * the weather and river loaders, and a summary hiccup must never stop the
+ * detailed cards further down from rendering - or blank another tile.
+ */
+function setSummary(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+
+// w: { tempF, cond, icon, windMph, gustMph, dir, alert } from loadWeather, or
+// null when the weather could not be loaded.
+function renderSummaryWeather(w) {
+  try {
+    if (!w) { setSummary('sum-weather', '<div class="summary-line">Weather unavailable</div>'); return; }
+    // The same alert the weather card shows (high wind, rain, storms): a
+    // snapshot reading "Clear sky" while hiding "High wind" would mislead.
+    const alert = w.alert ? `<div class="summary-alert ${w.alert.cls}">${w.alert.text}</div>` : '';
+    setSummary('sum-weather', `
+      <div class="summary-big"><span class="wicon">${w.icon}</span>${w.tempF}°F</div>
+      <div class="summary-line">${w.cond}</div>
+      <div class="summary-line">Wind ${w.windMph} mph ${w.dir}, gusts ${w.gustMph}</div>${alert}`);
+  } catch (e) {
+    console.warn('weather summary failed:', e);
+  }
+}
+
+function renderSummaryRiver() {
+  try {
+    const level = state.riverLevel;
+    if (typeof level !== 'number' || !Number.isFinite(level)) {
+      setSummary('sum-river', '<div class="summary-line">River level unavailable &mdash; flood restrictions not applied</div>');
+      return;
+    }
+    const s = floodSummaryLabel(level);
+    // Same honesty as the river card: a forecast stand-in is never shown as a
+    // live gauge reading.
+    const source = state.riverLevelIsEstimate
+      ? '<div class="summary-line" style="color:#ffd166;">Forecast estimate &mdash; gauge not reporting</div>'
+      : '<div class="summary-line">Stevenson Dam gauge</div>';
+    setSummary('sum-river', `
+      <div class="summary-big">${level.toFixed(1)} ft</div>${source}
+      <div class="summary-river-status"><span class="river-status-pill ${s.cls}">${s.text}</span></div>`);
+  } catch (e) {
+    console.warn('river summary failed:', e);
   }
 }
 
@@ -1792,6 +1900,11 @@ function renderFogOutlook() {
     <div class="fog-detail">${t.detail}</div>
     <div class="fog-rule">Club rule: ${FOG_LAUNCH_RULE}</div>`;
 
+  // The one-line version for the summary at the top of the page. Same verdict,
+  // same moment, so the two can never disagree. Names the morning, because
+  // after 10 AM the outlook is about tomorrow.
+  setSummary('sum-fog', `<span>Fog ${target.label}:</span><span class="fog-pill ${a.level}">${pill}</span>`);
+
   const banner = document.getElementById('warn-fog');
   if (banner) {
     if (a.level === 'likely') {
@@ -1966,6 +2079,10 @@ async function loadRiverData() {
 function renderRiverCardUnavailable(msg) {
   const el = document.getElementById('river-content');
   if (el) el.innerHTML = `<div class="river-unavailable">${msg}</div>`;
+  // Explicitly, not via state.riverLevel: after a failed refresh that still
+  // holds the previous reading, and the summary must not show it as current
+  // while the card below says the data could not be loaded.
+  setSummary('sum-river', '<div class="summary-line">River level unavailable &mdash; flood restrictions not applied</div>');
 }
 
 function renderRiverCard() {
@@ -2035,6 +2152,9 @@ function renderRiverCard() {
       </a>
     </div>`;
 
+  // Before the chart: renderSummaryRiver cannot throw, and the summary should
+  // update even if the chart library fails.
+  renderSummaryRiver();
   renderFloodGrid(level);
   initRiverChart(obs, fc, level);
 }
