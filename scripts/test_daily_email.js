@@ -2204,7 +2204,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
   vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, renderFogOutlook, renderFloodGrid, renderDashboard,' +
     ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData,' +
     ' loadData, loadHistory, refreshAll, loadFogOutlook, loadCameraSnapshot, historyNeedsRefresh, pickRiverLevel,' +
-    ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraOffHours,' +
+    ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraBackupAsleep,' +
     ' cameraCaption, cameraMissingMessage, CAMERA_SNAPSHOT_URL, nearestReading, downloadCSV, withGapBreaks };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
@@ -2987,8 +2987,10 @@ const imageThat = (ok) => function () {
   Object.defineProperty(self, 'src', { get: () => src,
     set: (v) => { src = v; Promise.resolve().then(() => (ok(v) ? self.onload && self.onload() : self.onerror && self.onerror())); } });
 };
-const frameReply = (lastModified) => Promise.resolve({ ok: true, status: 200,
-  headers: { get: (h) => (/^last-modified$/i.test(h) ? lastModified : null) },
+// The Worker's answer: the frame, when it was taken, and (from the current
+// Worker) which camera took it.
+const frameReply = (lastModified, role, name) => Promise.resolve({ ok: true, status: 200,
+  headers: { get: (h) => ({ 'last-modified': lastModified, 'x-camera-role': role, 'x-camera-name': name })[h.toLowerCase()] || null },
   blob: () => Promise.resolve({ size: 48213, type: 'image/jpeg' }) });
 const camUrl = /nhrc-camera\./;
 
@@ -3023,22 +3025,71 @@ test('camera: if the fetch route fails, the plain image route still shows the ph
   assert.ok(/can be up to 2 hours older/.test(els['camera-note'].textContent), els['camera-note'].textContent);
 });
 
-test('camera: no photo explains itself - overnight, first capture on its way, or a fault', async () => {
+test('camera: no photo explains itself - at night the backup is asleep by design, by day it is a fault', async () => {
   const msg = async (h, m) => {
     const { site, els } = loadSite(etDate('2026-10-03', h, m).getTime(),
       fakeNet([[camUrl, () => reply({}, 404)]]).fetch);
     await site.loadCameraSnapshot();
     assert.strictEqual(els['camera-img__parent'].style.display, 'none', 'no broken image');
     assert.strictEqual(els['camera-card'].style.display, '', 'but the card stays');
+    assert.strictEqual(els['camera-badge'].style.display, 'none');
     return els['camera-note'].textContent;
   };
-  assert.ok(/paused overnight/.test(await msg(4, 59)), 'before 5');
-  assert.ok(/first photo of the day is on its way/.test(await msg(5, 0)), '5:00 - the Pi is capturing now');
-  assert.ok(/first photo of the day is on its way/.test(await msg(5, 14)), '5:14');
-  assert.ok(/could not be reached/.test(await msg(5, 15)), 'from 5:15 it is a real fault');
-  assert.ok(/could not be reached/.test(await msg(12, 0)));
-  assert.ok(/paused overnight/.test(await msg(16, 0)), 'from 4 PM');
-  assert.ok(/paused overnight/.test(await msg(23, 30)));
+  for (const [h, m] of [[0, 30], [4, 59], [16, 0], [23, 30]]) {
+    const t = await msg(h, m);
+    assert.ok(/dock camera is not responding, and the backup camera only runs 5am–4pm/.test(t), `${h}:${m} ${t}`);
+  }
+  for (const [h, m] of [[5, 0], [9, 0], [15, 59]]) {
+    const t = await msg(h, m);
+    assert.ok(/the boathouse cameras could not be reached/.test(t), `${h}:${m} ${t}`);
+  }
+  assert.ok(/water temperature, river level and weather on this page are unaffected/.test(await msg(12, 0)));
+});
+
+test('camera: the dock camera\'s photo is captioned as the dock\'s, with no badge', async () => {
+  const t = etDate('2026-10-03', 2, 20).getTime();   // around the clock: a 2 AM photo is normal
+  const taken = new Date(etDate('2026-10-03', 2, 15).getTime()).toUTCString();
+  const { site, els } = loadSite(t, fakeNet([[camUrl, () => frameReply(taken, 'primary', 'Dock Wired')]]).fetch,
+    { Image: imageThat(() => true) });
+  await site.loadCameraSnapshot();
+  assert.ok(/^View from the dock camera, taken 2:15(\u202f| )AM EDT \(5 min ago\)\.$/.test(els['camera-note'].textContent),
+    els['camera-note'].textContent);
+  assert.strictEqual(els['camera-badge'].style.display, 'none');
+});
+
+test('camera: a backup photo is labelled as the backup - on the photo and in the caption', async () => {
+  let t = etDate('2026-10-03', 9, 20).getTime(), role = 'backup';
+  const net = fakeNet([[camUrl, () => frameReply(new Date(t - 5 * 60000).toUTCString(), role, role === 'backup' ? 'Downstream Lot' : 'Dock Wired')]]);
+  const { site, els } = loadSite(() => t, net.fetch, { Image: imageThat(() => true) });
+  await site.loadCameraSnapshot();
+  const note = els['camera-note'].textContent;
+  assert.ok(/^Backup view from the Downstream Lot camera, taken 9:15(\u202f| )AM EDT \(5 min ago\) — the dock camera is not responding\.$/.test(note), note);
+  assert.strictEqual(els['camera-badge'].style.display, '', 'the badge is shown');
+  assert.strictEqual(els['camera-badge'].textContent, 'Backup view — Downstream Lot');
+  // The dock camera answers again: the badge goes.
+  role = 'primary'; t += 15 * 60000;
+  await site.loadCameraSnapshot();
+  assert.strictEqual(els['camera-badge'].style.display, 'none');
+  assert.ok(/^View from the dock camera/.test(els['camera-note'].textContent));
+});
+
+test('camera: an unknown or missing role is never presented as the dock camera', async () => {
+  for (const role of [null, '', 'admin']) {
+    const t = etDate('2026-10-03', 9, 20).getTime();
+    const { site, els } = loadSite(t, fakeNet([[camUrl, () => frameReply(new Date(t).toUTCString(), role, 'X')]]).fetch,
+      { Image: imageThat(() => true) });
+    await site.loadCameraSnapshot();
+    assert.ok(/^View from the boathouse camera, taken/.test(els['camera-note'].textContent), `${role}: ${els['camera-note'].textContent}`);
+    assert.strictEqual(els['camera-badge'].style.display, 'none');
+  }
+});
+
+test('camera: the title states the around-the-clock cadence, and no daylight window', () => {
+  const { site, els } = loadSite(Date.now());
+  site.loadCameraSnapshot();
+  assert.strictEqual(els['camera-title'].textContent, 'Boathouse Camera — Still Image, Updates every 15 min');
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8');
+  assert.ok(!/paused overnight|first photo of the day|returns at 5:00/.test(html), 'no leftovers from the daylight-only camera');
 });
 
 test('camera: each new photo releases the previous one\'s memory', async () => {

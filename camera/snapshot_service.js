@@ -3,8 +3,20 @@
  * NHRC Boathouse Camera — Ring snapshot service
  * =============================================
  * Runs continuously on a Raspberry Pi (Pi Zero W / ARMv6 supported). Captures a
- * snapshot from the Ring camera on a schedule and uploads it to the endpoint
- * that serves cam.roworno.com.
+ * snapshot on a timetable and uploads it to the Cloudflare Worker the website
+ * reads from.
+ *
+ * TWO CAMERAS
+ * -----------
+ * The PRIMARY camera (RING_CAMERA_NAME, the hardwired "Dock Wired") is captured
+ * every 15 minutes, around the clock. The BACKUP (RING_BACKUP_CAMERA_NAME, the
+ * battery-powered "Downstream Lot") is never used routinely, to spare its
+ * battery: only once the primary has missed BACKUP_AFTER_MISSES captures in a
+ * row (two, ~30 minutes), and then only on its own battery-friendly daylight
+ * timetable (5am-4pm, every 30 minutes until 10am, then hourly). As soon as
+ * the primary answers again the backup goes back to sleep. Each upload says
+ * which camera and role it came from, so the website can label a backup view
+ * as one.
  *
  * WHY A LONG-RUNNING SERVICE AND NOT A CRON JOB
  * ---------------------------------------------
@@ -27,9 +39,11 @@
  * here and at the destination.
  *
  * Usage:
- *   node camera/snapshot_service.js            run the service
- *   node camera/snapshot_service.js --once     capture and upload a single frame
- *   node camera/snapshot_service.js --check    validate config, no Ring calls
+ *   node camera/snapshot_service.js                run the service
+ *   node camera/snapshot_service.js --once         capture and upload one frame from the primary
+ *   node camera/snapshot_service.js --once-backup  the same from the backup (it then shows on the
+ *                                                  website until the next primary capture)
+ *   node camera/snapshot_service.js --check        validate config, no Ring calls
  */
 
 'use strict';
@@ -48,29 +62,44 @@ const CONFIG = {
   // is as sensitive as the Ring account password.
   tokenFile: process.env.RING_TOKEN_FILE || path.join(os.homedir(), '.nhrc-ring-token'),
 
-  // Substring match against the Ring camera name, so the right camera is picked
-  // when the account has several. Case-insensitive.
+  // Ring camera names. The full name is matched first (case-insensitive), then
+  // a unique part of a name; a part that matches several cameras is refused
+  // rather than guessed, since a wrong guess could run the battery camera
+  // every 15 minutes.
   cameraName: process.env.RING_CAMERA_NAME || '',
+  backupCameraName: process.env.RING_BACKUP_CAMERA_NAME || '',
 
   // Upload destination and shared secret.
   uploadUrl: process.env.CAMERA_UPLOAD_URL || '',
   uploadSecret: process.env.CAMERA_UPLOAD_SECRET || '',
 
-  intervalMinutes: Number(process.env.CAMERA_INTERVAL_MINUTES || 30),
+  // The PRIMARY camera's timetable. The defaults suit a hardwired camera:
+  // every 15 minutes, around the clock (both window hours 0 = always).
+  intervalMinutes: Number(process.env.CAMERA_INTERVAL_MINUTES || 15),
 
-  // Two-speed schedule. Most rowing happens early, so capture often through the
-  // morning and back off afterwards — the afternoon frames still cost battery on
-  // a camera the solar panel is not comfortably keeping up with.
-  // Set CAMERA_SLOW_AFTER_HOUR equal to the window start to disable.
-  slowAfterHour: parseHourSetting(process.env.CAMERA_SLOW_AFTER_HOUR, 10),
+  // Optional two-speed schedule: every CAMERA_INTERVAL_MINUTES until this
+  // hour, then every CAMERA_SLOW_INTERVAL_MINUTES. Off when it is not after
+  // the window start (the default, 0).
+  slowAfterHour: parseHourSetting(process.env.CAMERA_SLOW_AFTER_HOUR, 0),
   slowIntervalMinutes: Number(process.env.CAMERA_SLOW_INTERVAL_MINUTES || 60),
 
-  // Optional daylight window in the boathouse timezone. A night-time frame from
-  // an unlit river is a black rectangle, which is worse than showing nothing —
-  // and each capture costs battery. Set both to 0 to disable the window.
-  // Accepts "4" or "4:30". Defined below CONFIG but hoisted, so usable here.
-  activeStartHour: parseHourSetting(process.env.CAMERA_ACTIVE_START_HOUR, 5),
-  activeEndHour: parseHourSetting(process.env.CAMERA_ACTIVE_END_HOUR, 16),
+  // Optional window in the boathouse timezone. Accepts "4" or "4:30". Both 0
+  // (the default) means always. Defined below CONFIG but hoisted, so usable here.
+  activeStartHour: parseHourSetting(process.env.CAMERA_ACTIVE_START_HOUR, 0),
+  activeEndHour: parseHourSetting(process.env.CAMERA_ACTIVE_END_HOUR, 0),
+
+  // The BACKUP camera: battery-powered, so used only after the primary has
+  // missed this many captures in a row, and only on its own timetable - the
+  // battery-friendly one: daylight, every 30 minutes until 10am, then hourly.
+  // A night-time frame from an unlit river is dark anyway.
+  backup: {
+    afterMisses: Number(process.env.BACKUP_AFTER_MISSES || 2),
+    intervalMinutes: Number(process.env.BACKUP_INTERVAL_MINUTES || 30),
+    slowAfterHour: parseHourSetting(process.env.BACKUP_SLOW_AFTER_HOUR, 10),
+    slowIntervalMinutes: Number(process.env.BACKUP_SLOW_INTERVAL_MINUTES || 60),
+    activeStartHour: parseHourSetting(process.env.BACKUP_ACTIVE_START_HOUR, 5),
+    activeEndHour: parseHourSetting(process.env.BACKUP_ACTIVE_END_HOUR, 16),
+  },
 
   timeZone: process.env.CAMERA_TIMEZONE || 'America/New_York',
 
@@ -146,30 +175,50 @@ function validateConfig(cfg = CONFIG) {
     problems.push('CAMERA_UPLOAD_SECRET looks like placeholder text, not a secret — ' +
       'paste the real value (openssl rand -hex 32 gives 64 hex characters)');
   }
-  if (!(cfg.intervalMinutes >= 5)) {
+  if (!(cfg.retries >= 1)) problems.push('CAMERA_RETRIES must be at least 1');
+  problems.push(...scheduleProblems(cfg, 'CAMERA_'));
+  if (cfg.backupCameraName) {
+    const b = cfg.backup || {};
+    problems.push(...scheduleProblems(b, 'BACKUP_'));
+    if (!(Number.isInteger(b.afterMisses) && b.afterMisses >= 1)) {
+      problems.push('BACKUP_AFTER_MISSES must be a whole number, at least 1');
+    }
+    if (cfg.cameraName && cfg.cameraName.trim().toLowerCase() === cfg.backupCameraName.trim().toLowerCase()) {
+      problems.push('RING_CAMERA_NAME and RING_BACKUP_CAMERA_NAME name the same camera');
+    }
+  }
+  return problems;
+}
+
+/**
+ * Problems with one camera's timetable. `prefix` names its settings in the
+ * messages: CAMERA_ for the primary, BACKUP_ for the backup.
+ */
+function scheduleProblems(s, prefix) {
+  const problems = [];
+  const always = s.activeStartHour === 0 && s.activeEndHour === 0;
+  if (!(s.intervalMinutes >= 5)) {
     // Ring throttles battery cameras to roughly one snapshot per 10 minutes and
     // every capture costs battery, so anything below 5 minutes is pointless.
-    problems.push('CAMERA_INTERVAL_MINUTES must be at least 5');
+    problems.push(`${prefix}INTERVAL_MINUTES must be at least 5`);
   }
-  if (!(cfg.retries >= 1)) problems.push('CAMERA_RETRIES must be at least 1');
-  if (!(cfg.slowIntervalMinutes >= 5)) {
-    problems.push('CAMERA_SLOW_INTERVAL_MINUTES must be at least 5');
+  if (!(s.slowIntervalMinutes >= 5)) {
+    problems.push(`${prefix}SLOW_INTERVAL_MINUTES must be at least 5`);
   }
-  if (!Number.isFinite(cfg.slowAfterHour) || cfg.slowAfterHour < 0 || cfg.slowAfterHour >= 24) {
-    problems.push('CAMERA_SLOW_AFTER_HOUR must be an hour from 0 to 23, optionally with minutes (e.g. 10 or 10:30)');
-  } else if (cfg.slowAfterHour > cfg.activeStartHour && cfg.slowAfterHour >= cfg.activeEndHour) {
+  if (!Number.isFinite(s.slowAfterHour) || s.slowAfterHour < 0 || s.slowAfterHour >= 24) {
+    problems.push(`${prefix}SLOW_AFTER_HOUR must be an hour from 0 to 23, optionally with minutes (e.g. 10 or 10:30)`);
+  } else if (!always && s.slowAfterHour > s.activeStartHour && s.slowAfterHour >= s.activeEndHour) {
     // Switching to the slow rate at or after the window closes means the slow
     // rate never applies — almost certainly a typo, and silently ignoring it
     // would leave the camera on the fast rate all day, draining the battery
-    // this setting exists to protect.
-    problems.push('CAMERA_SLOW_AFTER_HOUR is at or after CAMERA_ACTIVE_END_HOUR, so the slower rate would never take effect');
+    // this setting exists to protect. (An always-on window has no close.)
+    problems.push(`${prefix}SLOW_AFTER_HOUR is at or after ${prefix}ACTIVE_END_HOUR, so the slower rate would never take effect`);
   }
-  const hoursDisabled = cfg.activeStartHour === 0 && cfg.activeEndHour === 0;
-  if (!hoursDisabled) {
-    for (const [k, v] of [['CAMERA_ACTIVE_START_HOUR', cfg.activeStartHour],
-                          ['CAMERA_ACTIVE_END_HOUR', cfg.activeEndHour]]) {
-      // Fractional values are legitimate now (4.5 === "4:30"), so this checks
-      // the range rather than integer-ness. 24 is excluded: "24:00" would never
+  if (!always) {
+    for (const [k, v] of [[`${prefix}ACTIVE_START_HOUR`, s.activeStartHour],
+                          [`${prefix}ACTIVE_END_HOUR`, s.activeEndHour]]) {
+      // Fractional values are legitimate (4.5 === "4:30"), so this checks the
+      // range rather than integer-ness. 24 is excluded: "24:00" would never
       // match, since the clock reads 0 at midnight.
       if (!Number.isFinite(v) || v < 0 || v >= 24) {
         problems.push(`${k} must be an hour from 0 to 23, optionally with minutes (e.g. 4 or 4:30)`);
@@ -177,6 +226,11 @@ function validateConfig(cfg = CONFIG) {
     }
   }
   return problems;
+}
+
+/** The backup camera's timetable as a full config, for the shared window functions. */
+function backupConfig(cfg = CONFIG) {
+  return Object.assign({}, cfg, cfg.backup || {});
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -320,7 +374,18 @@ function secondsUntilNextSlot(now = new Date(), cfg = CONFIG) {
  * tests can run whole days - and daylight-saving days - on a fake clock.
  */
 function createScheduler(cfg, deps) {
-  let lastSlotKey = null;
+  // deps.cycle(role) captures and uploads from 'primary' or 'backup'.
+  // deps.hasPrimary / deps.hasBackup: whether each camera was found.
+  const hasPrimary = deps.hasPrimary !== false;
+  const hasBackup = !!deps.hasBackup;
+  const backupCfg = backupConfig(cfg);
+  const afterMisses = (cfg.backup && cfg.backup.afterMisses) || 2;
+  let lastSlotKey = null, lastBackupSlotKey = null;
+  // Primary captures missed in a row. Without a primary camera at all, the
+  // backup runs on its timetable from the first slot.
+  let misses = hasPrimary ? 0 : afterMisses;
+  let onBackup = false;
+
   const tick = async () => {
     const slot = captureSlot(deps.now(), cfg);
     if (slot && slot.key !== lastSlotKey) {
@@ -328,13 +393,45 @@ function createScheduler(cfg, deps) {
       // slot. captureWithRetry already retries within the cycle, and a slot
       // that keeps failing must not turn into a capture every wake-up.
       lastSlotKey = slot.key;
-      try {
-        await deps.cycle();
-      } catch (e) {
-        // Never exit on a failed cycle: a transient Ring or network error should
-        // not take the service down until someone notices days later. The image
-        // simply ages, and the website says why it has no current frame.
-        logError('cycle failed:', e.message);
+      let answered = false;
+      if (hasPrimary) {
+        try {
+          await deps.cycle('primary');
+          answered = true;
+        } catch (e) {
+          // Never exit on a failed cycle: a transient Ring or network error
+          // should not take the service down until someone notices days later.
+          logError('primary cycle failed:', e.message);
+          // A failed UPLOAD means the camera did answer - and the backup's
+          // frame would fail to upload the same way.
+          if (e.stage === 'upload') answered = true;
+        }
+      }
+      if (answered) {
+        if (onBackup) log('Primary camera is answering again; the backup goes back to sleep.');
+        misses = 0;
+        onBackup = false;
+      } else {
+        misses += 1;
+      }
+
+      if (!answered && hasBackup && misses >= afterMisses) {
+        if (!onBackup) {
+          log(`Primary camera has missed ${misses} capture${misses === 1 ? '' : 's'} in a row; using the backup on its own timetable.`);
+          onBackup = true;
+        }
+        // The backup's own slots (daylight, every 30-60 minutes): at most one
+        // capture per slot, and none outside its window, however long the
+        // primary stays down.
+        const bslot = captureSlot(deps.now(), backupCfg);
+        if (bslot && bslot.key !== lastBackupSlotKey) {
+          lastBackupSlotKey = bslot.key;
+          try {
+            await deps.cycle('backup');
+          } catch (e) {
+            logError('backup cycle failed:', e.message);
+          }
+        }
       }
     }
     // Half a second past the boundary, so the clock reads the new slot.
@@ -409,18 +506,30 @@ function writeToken(token, cfg = CONFIG) {
  * PUT rather than an S3 SDK: signing libraries are heavy for a Pi Zero W, and
  * this keeps the Pi outbound-only — nothing inbound is ever exposed.
  */
-async function uploadSnapshot(buffer, cfg = CONFIG, fetchImpl = globalThis.fetch) {
+/** A header value: printable ASCII only, bounded - a camera name is user-set text. */
+function headerSafe(s, max = 60) {
+  return String(s == null ? '' : s).replace(/[^\x20-\x7e]/g, '').trim().slice(0, max);
+}
+
+async function uploadSnapshot(buffer, cfg = CONFIG, fetchImpl = globalThis.fetch, meta = {}) {
+  const headers = {
+    'Authorization': `Bearer ${cfg.uploadSecret}`,
+    'Content-Type': 'image/jpeg',
+    // Do NOT set Content-Length. undici derives it from the body and
+    // rejects a caller-supplied value with UND_ERR_INVALID_ARG, so setting
+    // it here made every upload fail before a byte left the Pi.
+  };
+  // Which camera took the frame. The Worker stores these with it and the
+  // website labels a backup view as one - the backup looks at a different
+  // stretch of river, and members must know which view they are looking at.
+  if (meta.role === 'primary' || meta.role === 'backup') headers['X-Camera-Role'] = meta.role;
+  const name = headerSafe(meta.name);
+  if (name) headers['X-Camera-Name'] = name;
   let res;
   try {
     res = await fetchImpl(cfg.uploadUrl, {
       method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${cfg.uploadSecret}`,
-        'Content-Type': 'image/jpeg',
-        // Do NOT set Content-Length. undici derives it from the body and
-        // rejects a caller-supplied value with UND_ERR_INVALID_ARG, so setting
-        // it here made every upload fail before a byte left the Pi.
-      },
+      headers,
       body: buffer,
     });
   } catch (e) {
@@ -488,23 +597,72 @@ async function connectRing(cfg = CONFIG) {
   return api;
 }
 
-async function pickCamera(api, cfg = CONFIG) {
+const cameraList = (cameras) => cameras.map(c => `"${c.name}"`).join(', ');
+
+/**
+ * The camera a configured name refers to, or null when none does. The full
+ * name wins (case-insensitive); otherwise a part of a name that matches exactly
+ * one camera. A part matching several is an error, not a guess: "Dock" or
+ * "Lot" could otherwise pick the battery camera and run it every 15 minutes.
+ */
+function findCamera(cameras, name) {
+  const want = String(name || '').trim().toLowerCase();
+  if (!want) return null;
+  const nameOf = c => String(c.name || '').trim().toLowerCase();
+  const exact = cameras.filter(c => nameOf(c) === want);
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) throw new Error(`Several cameras are named "${name}": ${cameraList(exact)}`);
+  const partial = cameras.filter(c => nameOf(c).includes(want));
+  if (partial.length === 1) return partial[0];
+  if (partial.length > 1) {
+    throw new Error(`"${name}" matches several cameras (${cameraList(partial)}) — use the full name`);
+  }
+  return null;
+}
+
+/**
+ * The primary and backup cameras on the account. A missing backup only
+ * disables the fallback. A missing primary is logged loudly and the backup
+ * runs on its own (battery-friendly) timetable, so the website keeps a view;
+ * only when neither can be found does the service stop.
+ */
+async function pickCameras(api, cfg = CONFIG) {
   const cameras = await api.getCameras();
   if (!cameras.length) throw new Error('No cameras found on this Ring account.');
-  if (!cfg.cameraName) {
-    if (cameras.length > 1) {
-      log(`Note: ${cameras.length} cameras found and RING_CAMERA_NAME is unset; using "${cameras[0].name}".`);
-      log('Available:', cameras.map(c => c.name).join(', '));
-    }
-    return cameras[0];
+  log(`Cameras on this account: ${cameraList(cameras)}`);
+  let primary;
+  if (cfg.cameraName) {
+    primary = findCamera(cameras, cfg.cameraName);
+  } else if (cameras.length === 1) {
+    primary = cameras[0];
+  } else {
+    // Refuse to guess: the first camera on the list may be the battery one.
+    throw new Error(`${cameras.length} cameras on this Ring account and RING_CAMERA_NAME is unset. `
+      + `Set it to one of: ${cameraList(cameras)}`);
   }
-  const needle = cfg.cameraName.toLowerCase();
-  const match = cameras.find(c => String(c.name).toLowerCase().includes(needle));
-  if (!match) {
-    throw new Error(
-      `No camera matching "${cfg.cameraName}". Available: ${cameras.map(c => c.name).join(', ')}`);
+  const backup = cfg.backupCameraName ? findCamera(cameras, cfg.backupCameraName) : null;
+  if (primary && backup && primary === backup) {
+    throw new Error('RING_CAMERA_NAME and RING_BACKUP_CAMERA_NAME pick the same camera');
   }
-  return match;
+  if (!primary && !backup) {
+    throw new Error(`No camera matching "${cfg.cameraName}"`
+      + (cfg.backupCameraName ? ` or "${cfg.backupCameraName}"` : '') + `. Available: ${cameraList(cameras)}`);
+  }
+  if (!primary) {
+    logError(`No camera matching RING_CAMERA_NAME "${cfg.cameraName}" (available: ${cameraList(cameras)}). `
+      + 'The backup camera will run on its own timetable until this is fixed.');
+  }
+  if (cfg.backupCameraName && !backup) {
+    logError(`No camera matching RING_BACKUP_CAMERA_NAME "${cfg.backupCameraName}" `
+      + `(available: ${cameraList(cameras)}). Running without a backup.`);
+  }
+  return { primary, backup };
+}
+
+/** The single camera to use - kept for compatibility; the service uses pickCameras(). */
+async function pickCamera(api, cfg = CONFIG) {
+  const { primary, backup } = await pickCameras(api, cfg);
+  return primary || backup;
 }
 
 /**
@@ -534,27 +692,43 @@ async function captureWithRetry(camera, cfg = CONFIG) {
 // Main loop
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runCycle(camera, cfg = CONFIG, now = new Date(), fetchImpl = globalThis.fetch) {
+async function runCycle(camera, cfg = CONFIG, now = new Date(), fetchImpl = globalThis.fetch, role = 'primary') {
   if (!isWithinActiveHours(now, cfg)) {
     log('Outside active hours — skipping capture.');
     return false;
   }
   // Label the stage: "fetch failed" alone cannot be told apart from a Ring
-  // download failure, and the two have completely different fixes.
+  // download failure, and the two have completely different fixes. The
+  // scheduler also needs it: only a CAPTURE failure means the camera is down.
+  const fail = (stage, e) => Object.assign(
+    new Error(`${stage.toUpperCase()} stage (${role} "${camera.name}") — ${describeCause(e)}`), { stage });
   let buf;
   try {
     buf = await captureWithRetry(camera, cfg);
   } catch (e) {
-    throw new Error(`CAPTURE stage — ${describeCause(e)}`);
+    throw fail('capture', e);
   }
-  log(`Captured ${buf.length} bytes; uploading to ${hostOf(cfg.uploadUrl)}`);
+  log(`Captured ${buf.length} bytes from ${role} "${camera.name}"; uploading to ${hostOf(cfg.uploadUrl)}`);
   try {
-    await uploadSnapshot(buf, cfg, fetchImpl);
+    await uploadSnapshot(buf, cfg, fetchImpl, { role, name: camera.name });
   } catch (e) {
-    throw new Error(`UPLOAD stage — ${describeCause(e)}`);
+    throw fail('upload', e);
   }
   log(`Snapshot uploaded (${(buf.length / 1024).toFixed(0)} KB).`);
   return true;
+}
+
+/** "around the clock" or "5:00-16:00 America/New_York", for --check and the startup log. */
+function describeWindow(cfg = CONFIG) {
+  return cfg.activeStartHour === 0 && cfg.activeEndHour === 0
+    ? 'around the clock'
+    : formatHourSetting(cfg.activeStartHour) + '-' + formatHourSetting(cfg.activeEndHour) + ' ' + cfg.timeZone;
+}
+
+/** "every 15 min, around the clock" / "every 30 min until 10:00, then every 60 min, 5:00-16:00 ...". */
+function describeTimetable(cfg = CONFIG) {
+  const rate = describeSchedule(cfg).replace(/^Capturing /, '').replace(/\.$/, '');
+  return `${rate}, ${describeWindow(cfg)}`;
 }
 
 async function main() {
@@ -567,28 +741,43 @@ async function main() {
     console.error('\nSee camera/README.md for setup.');
     process.exit(1);
   }
+  const backupCfg = backupConfig(CONFIG);
   if (args.includes('--check')) {
     log('Configuration looks valid.');
-    log(`  interval     : ${describeSchedule(CONFIG)}`);
-    log(`  active hours : ${CONFIG.activeStartHour === 0 && CONFIG.activeEndHour === 0
-      ? 'always'
-      : formatHourSetting(CONFIG.activeStartHour) + '-' + formatHourSetting(CONFIG.activeEndHour)
-        + ' ' + CONFIG.timeZone}`);
+    log(`  primary      : ${CONFIG.cameraName ? `"${CONFIG.cameraName}"` : '(the only camera on the account)'} — `
+      + describeTimetable(CONFIG));
+    log(`  backup       : ${CONFIG.backupCameraName
+      ? `"${CONFIG.backupCameraName}" — only after ${CONFIG.backup.afterMisses} missed primary captures in a row; `
+        + `then ${describeTimetable(backupCfg)}`
+      : 'none'}`);
     log(`  token file   : ${CONFIG.tokenFile} (${readToken() ? 'present' : 'MISSING'})`);
     log(`  upload to    : ${CONFIG.uploadUrl}`);
     return;
   }
 
   const api = await connectRing();
-  const camera = await pickCamera(api);
-  log(`Using camera: ${camera.name}`);
+  const { primary, backup } = await pickCameras(api);
+  if (primary) log(`Primary camera: "${primary.name}" — ${describeTimetable(CONFIG)}`);
+  if (backup) {
+    log(`Backup camera: "${backup.name}" — only after ${CONFIG.backup.afterMisses} missed primary captures in a row; `
+      + `then ${describeTimetable(backupCfg)}`);
+  }
 
+  if (args.includes('--once-backup')) {
+    if (!backup) throw new Error('No backup camera configured or found.');
+    // A deliberate test: no window. The frame shows on the website, labelled
+    // as the backup, until the next primary capture replaces it.
+    await runCycle(backup, Object.assign({}, backupCfg, { activeStartHour: 0, activeEndHour: 0 }),
+      new Date(), globalThis.fetch, 'backup');
+    process.exit(0);
+  }
   if (args.includes('--once')) {
-    await runCycle(camera);
+    if (!primary) throw new Error('No primary camera found.');
+    await runCycle(primary, CONFIG, new Date(), globalThis.fetch, 'primary');
     process.exit(0);
   }
 
-  log(`Starting. ${describeSchedule(CONFIG)} Captures on the slot boundaries, from the window start.`);
+  log('Starting. Captures on the slot boundaries, from the window start.');
 
   // setTimeout that reschedules itself, not setInterval: the next wake-up is
   // the next slot boundary, recomputed from the clock every time. A slow cycle
@@ -596,7 +785,11 @@ async function main() {
   const tick = createScheduler(CONFIG, {
     now: () => new Date(),
     setTimer: (fn, ms) => setTimeout(fn, ms),
-    cycle: () => runCycle(camera),
+    hasPrimary: !!primary,
+    hasBackup: !!backup,
+    cycle: (role) => role === 'backup'
+      ? runCycle(backup, backupCfg, new Date(), globalThis.fetch, 'backup')
+      : runCycle(primary, CONFIG, new Date(), globalThis.fetch, 'primary'),
   });
   await tick();
 }
@@ -608,6 +801,8 @@ module.exports = {
   intervalForTime, localHour, describeSchedule,
   localSeconds, windowGeometry, captureSlot, secondsUntilNextSlot, createScheduler,
   MAX_SLEEP_SECONDS,
+  findCamera, pickCameras, pickCamera, backupConfig, scheduleProblems, headerSafe, describeWindow,
+  describeTimetable,
 };
 
 if (require.main === module) {

@@ -684,6 +684,441 @@ test('the service uses the timetable, not a fixed sleep after each cycle', () =>
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+section('6c. Two cameras: Dock Wired around the clock, Downstream Lot as a sparing backup');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The battery camera must never be woken while the dock camera is answering;
+// once the dock has missed two captures in a row it takes over, but only on
+// its own daylight timetable, and goes back to sleep the moment the dock
+// answers again. Whole days on a fake clock, as above.
+
+// The real defaults - what the Pi runs with the documented env file.
+const dualCfg = Object.assign({}, S.CONFIG, {
+  uploadUrl: baseCfg.uploadUrl, uploadSecret: baseCfg.uploadSecret, tokenFile: baseCfg.tokenFile,
+  cameraName: 'Dock Wired', backupCameraName: 'Downstream Lot', timeZone: 'America/New_York',
+  retries: 3, retryDelaySeconds: 0,
+});
+
+// cameras: { primaryDown(at), backupDown(at), uploadDown(at) } - each a
+// predicate on the time of the attempt.
+async function simulateDual(cfg, from, to, opts = {}) {
+  const { primaryDown = () => false, backupDown = () => false, uploadDown = () => false,
+          hasPrimary = true, hasBackup = true, cycleMs = 20000 } = opts;
+  let t = from.getTime();
+  const attempts = [];
+  let pending = null;
+  const tick = S.createScheduler(cfg, {
+    now: () => new Date(t),
+    setTimer: (fn, ms) => { pending = { fn, ms }; },
+    hasPrimary, hasBackup,
+    cycle: async (role) => {
+      const at = new Date(t);
+      t += cycleMs;
+      const down = role === 'backup' ? backupDown(at) : primaryDown(at);
+      attempts.push({ role, at, ok: !down });
+      if (down) throw Object.assign(new Error(`${role} offline`), { stage: 'capture' });
+      if (uploadDown(at)) throw Object.assign(new Error('worker unreachable'), { stage: 'upload' });
+    },
+  });
+  await tick();
+  while (pending && t + pending.ms <= to.getTime()) {
+    const p = pending; pending = null;
+    t += p.ms;
+    await p.fn();
+  }
+  return {
+    attempts,
+    primary: attempts.filter(a => a.role === 'primary'),
+    backup: attempts.filter(a => a.role === 'backup'),
+  };
+}
+const between = (fromH, toH) => (at) => { const h = Number(nyClock(at).slice(0, 2)) + Number(nyClock(at).slice(3, 5)) / 60;
+  return fromH <= toH ? (h >= fromH && h < toH) : (h >= fromH || h < toH); };
+const DAY = '2026-08-15', NEXT = '2026-08-16';
+
+test('the defaults are the agreed schedule', () => {
+  assert.strictEqual(S.describeSchedule(dualCfg), 'Capturing every 15 min.');
+  assert.strictEqual(S.describeWindow(dualCfg), 'around the clock');
+  const b = S.backupConfig(dualCfg);
+  assert.strictEqual(S.describeSchedule(b), 'Capturing every 30 min until 10:00, then every 60 min.');
+  assert.strictEqual(S.describeWindow(b), '5:00-16:00 America/New_York');
+  assert.strictEqual(dualCfg.backup.afterMisses, 2);
+  assert.deepStrictEqual(S.validateConfig(dualCfg), []);
+});
+
+test('a normal day: the dock camera every 15 minutes, the battery camera never woken', async () => {
+  const r = await simulateDual(dualCfg, ny(DAY, 0, 0), ny(NEXT, 0, 0));
+  assert.strictEqual(r.primary.length, 96, '96 dock captures');
+  assert.strictEqual(r.backup.length, 0, 'the battery camera must sleep');
+  assert.deepStrictEqual(r.primary.slice(0, 3).map(a => hhmm(a.at)), ['00:00', '00:15', '00:30']);
+  assert.strictEqual(hhmm(r.primary[95].at), '23:45');
+});
+
+test('one missed dock capture does not wake the battery camera', async () => {
+  const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 0), { primaryDown: between(9, 9.1) });
+  assert.strictEqual(r.backup.length, 0);
+  assert.strictEqual(r.primary.filter(a => !a.ok).length, 1);
+});
+
+test('two misses in a row: the backup takes over, on its own timetable', async () => {
+  const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 5), { primaryDown: between(9, 12) });
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['09:15', '09:30', '10:00', '11:00'],
+    'second miss at 9:15, then the 9:30 slot, then hourly after 10');
+  assert.ok(r.primary.every(a => Number(nyClock(a.at).slice(3, 5)) % 15 === 0), 'the dock is still tried every 15 minutes');
+  assert.ok(r.primary.filter(a => hhmm(a.at) === '12:00')[0].ok, 'and found again at 12:00');
+});
+
+test('the dock answering again sends the battery camera back to sleep', async () => {
+  const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 16, 0), { primaryDown: between(9, 10) });
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['09:15', '09:30']);
+});
+
+test('the miss count starts again after the dock answers: a later single miss does not wake the backup', async () => {
+  // Down 9:00-9:29 (two misses: backup at 9:15), fine from 9:30, then one
+  // failed capture at 11:00. That is one miss in a row, not three.
+  const down = (at) => between(9, 9.5)(at) || between(11, 11.1)(at);
+  const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 0), { primaryDown: down });
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['09:15']);
+});
+
+test('at night the battery camera stays asleep even with the dock down; it starts at 5:00', async () => {
+  const r = await simulateDual(dualCfg, ny(DAY, 21, 0), ny(NEXT, 6, 20), { primaryDown: between(22, 6) });
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['05:00', '05:30'],
+    'nothing from 22:00 to 4:59, then its 5:00 and 5:30 slots - and the dock is back at 6:00');
+  assert.ok(r.primary.find(a => hhmm(a.at) === '06:00').ok);
+});
+
+test('a whole day with the dock down: the battery camera is woken 16 times, all in daylight', async () => {
+  const r = await simulateDual(dualCfg, ny(DAY, 0, 0), ny(NEXT, 0, 0), { primaryDown: () => true });
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['05:00', '05:30', '06:00', '06:30', '07:00', '07:30', '08:00',
+    '08:30', '09:00', '09:30', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00']);
+  assert.strictEqual(r.primary.length, 96, 'the dock is still tried every slot');
+});
+
+test('a failed upload is not a camera outage: the battery camera is not woken', async () => {
+  const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 0), { uploadDown: () => true });
+  assert.strictEqual(r.backup.length, 0, 'its frame would fail to upload the same way');
+});
+
+test('if the backup fails too, each of its slots is tried once - no retry storm on a battery', async () => {
+  const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 5),
+    { primaryDown: () => true, backupDown: () => true });
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['08:15', '08:30', '09:00', '09:30', '10:00', '11:00', '12:00']);
+});
+
+test('without a backup camera, a dock outage is just a gap', async () => {
+  const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 0), { primaryDown: () => true, hasBackup: false });
+  assert.strictEqual(r.backup.length, 0);
+});
+
+test('dock camera missing from the account: the backup runs on its timetable from the first slot', async () => {
+  const r = await simulateDual(dualCfg, ny(DAY, 4, 50), ny(DAY, 7, 0), { hasPrimary: false });
+  assert.strictEqual(r.primary.length, 0);
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['05:00', '05:30', '06:00', '06:30']);
+});
+
+test('BACKUP_AFTER_MISSES=1 switches at the first miss', async () => {
+  const cfg = Object.assign({}, dualCfg, { backup: Object.assign({}, dualCfg.backup, { afterMisses: 1 }) });
+  const r = await simulateDual(cfg, ny(DAY, 8, 0), ny(DAY, 9, 20), { primaryDown: between(9, 10) });
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['09:00']);
+});
+
+test('camera names: the full name wins, a unique part is accepted, an ambiguous part is refused', () => {
+  const cams = [{ name: 'Dock' }, { name: 'Dock Wired' }, { name: 'Downstream Lot' }];
+  assert.strictEqual(S.findCamera(cams, 'Dock').name, 'Dock', 'exact beats the longer name containing it');
+  assert.strictEqual(S.findCamera(cams, 'dock wired').name, 'Dock Wired', 'case-insensitive');
+  assert.strictEqual(S.findCamera(cams, '  Downstream Lot ').name, 'Downstream Lot', 'surrounding spaces ignored');
+  assert.strictEqual(S.findCamera(cams, 'wired').name, 'Dock Wired', 'a unique part');
+  assert.throws(() => S.findCamera(cams, 'do'), /matches several cameras/, 'never guess between cameras');
+  assert.strictEqual(S.findCamera(cams, 'garage'), null);
+  assert.strictEqual(S.findCamera(cams, ''), null);
+});
+
+test('picking cameras on the account: every case states what it does', async () => {
+  const cams = [{ name: 'Dock Wired' }, { name: 'Downstream Lot' }, { name: 'Front Door' }];
+  const api = { getCameras: async () => cams };
+  const pick = (over) => S.pickCameras(api, Object.assign({}, dualCfg, over));
+  let r = await pick({});
+  assert.deepStrictEqual([r.primary.name, r.backup.name], ['Dock Wired', 'Downstream Lot']);
+  await assert.rejects(pick({ cameraName: '', backupCameraName: '' }), /RING_CAMERA_NAME is unset/,
+    'with several cameras, an unset name must not pick the first one (it may be the battery camera)');
+  r = await pick({ backupCameraName: 'Garage' });
+  assert.deepStrictEqual([r.primary.name, r.backup], ['Dock Wired', null], 'a missing backup only disables the fallback');
+  r = await pick({ cameraName: 'Dock Camera' });
+  assert.deepStrictEqual([r.primary, r.backup.name], [null, 'Downstream Lot'], 'a missing dock camera leaves the backup running');
+  await assert.rejects(pick({ cameraName: 'Garage', backupCameraName: 'Shed' }), /No camera matching "Garage" or "Shed"/);
+  await assert.rejects(pick({ cameraName: 'Dock Wired', backupCameraName: 'wired' }), /pick the same camera/);
+  const one = await S.pickCameras({ getCameras: async () => [{ name: 'Solo' }] }, Object.assign({}, dualCfg, { cameraName: '', backupCameraName: '' }));
+  assert.strictEqual(one.primary.name, 'Solo', 'a single camera needs no name');
+});
+
+test('the backup settings are validated like the primary\'s', () => {
+  const bad = (b, extra = {}) => S.validateConfig(Object.assign({}, dualCfg, extra, { backup: Object.assign({}, dualCfg.backup, b) }));
+  assert.ok(bad({ intervalMinutes: 2 }).some(p => /BACKUP_INTERVAL_MINUTES/.test(p)));
+  assert.ok(bad({ afterMisses: 0 }).some(p => /BACKUP_AFTER_MISSES/.test(p)));
+  assert.ok(bad({ afterMisses: 1.5 }).some(p => /BACKUP_AFTER_MISSES/.test(p)));
+  assert.ok(bad({ activeEndHour: 25 }).some(p => /BACKUP_ACTIVE_END_HOUR/.test(p)));
+  assert.ok(bad({ slowAfterHour: 17 }).some(p => /BACKUP_SLOW_AFTER_HOUR is at or after BACKUP_ACTIVE_END_HOUR/.test(p)));
+  assert.ok(bad({}, { backupCameraName: 'dock wired' }).some(p => /name the same camera/.test(p)));
+  assert.deepStrictEqual(bad({}, { backupCameraName: '' , backup: { intervalMinutes: 1 } }).filter(p => /BACKUP_/.test(p)), [],
+    'no backup configured: its settings are not checked');
+  // An always-on window has no close, so a slow-rate hour cannot be "after" it.
+  assert.deepStrictEqual(S.validateConfig(Object.assign({}, dualCfg, { slowAfterHour: 10 })), []);
+});
+
+test('every upload says which camera took it; odd characters never reach a header', async () => {
+  const calls = [];
+  const fakeFetch = async (url, opts) => { calls.push(opts.headers); return { ok: true }; };
+  await S.uploadSnapshot(JPEG, baseCfg, fakeFetch, { role: 'backup', name: 'Downstream Lot' });
+  await S.uploadSnapshot(JPEG, baseCfg, fakeFetch, { role: 'primary', name: 'Dock Wired™\n' });
+  await S.uploadSnapshot(JPEG, baseCfg, fakeFetch, { role: 'admin', name: '' });
+  assert.deepStrictEqual([calls[0]['X-Camera-Role'], calls[0]['X-Camera-Name']], ['backup', 'Downstream Lot']);
+  assert.deepStrictEqual([calls[1]['X-Camera-Role'], calls[1]['X-Camera-Name']], ['primary', 'DockWired']);
+  assert.ok(!('X-Camera-Role' in calls[2]) && !('X-Camera-Name' in calls[2]), 'unknown roles and empty names are not sent');
+});
+
+test('a cycle carries its role to the upload, and says which stage failed', async () => {
+  let headers;
+  const fakeFetch = async (url, opts) => { headers = opts.headers; return { ok: true }; };
+  await S.runCycle({ name: 'Downstream Lot', getSnapshot: async () => JPEG }, S.backupConfig(dualCfg),
+    ny(DAY, 9, 0), fakeFetch, 'backup');
+  assert.deepStrictEqual([headers['X-Camera-Role'], headers['X-Camera-Name']], ['backup', 'Downstream Lot']);
+  await assert.rejects(S.runCycle({ name: 'Dock Wired', getSnapshot: async () => { throw new Error('offline'); } },
+    dualCfg, ny(DAY, 9, 0), fakeFetch, 'primary'), (e) => e.stage === 'capture' && /Dock Wired/.test(e.message));
+  await assert.rejects(S.runCycle({ name: 'Dock Wired', getSnapshot: async () => JPEG },
+    dualCfg, ny(DAY, 9, 0), async () => { throw new Error('ECONNRESET'); }, 'primary'), (e) => e.stage === 'upload');
+  assert.strictEqual(await S.runCycle({ name: 'Downstream Lot', getSnapshot: async () => { throw new Error('woken!'); } },
+    S.backupConfig(dualCfg), ny(DAY, 23, 0), fakeFetch, 'backup'), false, 'outside its window the backup is never woken');
+});
+
+test('the service wires both cameras into the scheduler', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
+  const main = src.slice(src.indexOf('async function main()'));
+  assert.ok(/pickCameras\(api\)/.test(main));
+  assert.ok(/hasBackup: !!backup/.test(main) && /hasPrimary: !!primary/.test(main));
+  assert.ok(/runCycle\(backup, backupCfg/.test(main), 'the backup runs on its own timetable');
+});
+
+test('the timetables read the way they are written', () => {
+  assert.strictEqual(S.describeTimetable(dualCfg), 'every 15 min, around the clock');
+  assert.strictEqual(S.describeTimetable(S.backupConfig(dualCfg)),
+    'every 30 min until 10:00, then every 60 min, 5:00-16:00 America/New_York');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('6c2. End to end: the real service process, a stand-in Ring library and network');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// main() itself - argument handling, camera selection, the scheduler wiring
+// and the upload headers - run as a separate process. A fake ring-client-api
+// sits where npm would put the real one, and a preload replaces fetch, so
+// nothing leaves the machine.
+
+function e2eSandbox(cameras) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-cam-e2e-'));
+  fs.copyFileSync(path.join(__dirname, 'snapshot_service.js'), path.join(dir, 'snapshot_service.js'));
+  const pkg = path.join(dir, 'node_modules', 'ring-client-api');
+  fs.mkdirSync(pkg, { recursive: true });
+  fs.writeFileSync(path.join(pkg, 'package.json'),
+    JSON.stringify({ name: 'ring-client-api', type: 'module', exports: './index.js' }));
+  fs.writeFileSync(path.join(pkg, 'index.js'), `
+    const cams = ${JSON.stringify(cameras)};
+    const JPEG = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0, 16, 0xFF, 0xD9]);
+    export class RingApi {
+      constructor(opts) { this.opts = opts; this.onRefreshTokenUpdated = { subscribe() {} }; }
+      async getCameras() {
+        return cams.map(c => ({ name: c.name, async getSnapshot() {
+          if (c.down) throw new Error(c.name + ' is offline'); return JPEG; } }));
+      }
+    }`);
+  fs.writeFileSync(path.join(dir, 'token'), 'stand-in-refresh-token');
+  const uploads = path.join(dir, 'uploads.log');
+  fs.writeFileSync(path.join(dir, 'fakefetch.js'), `
+    const fs = require('fs');
+    globalThis.fetch = async (url, opts) => {
+      fs.appendFileSync(${JSON.stringify(uploads)}, JSON.stringify({ url, method: opts.method,
+        role: opts.headers['X-Camera-Role'] || null, name: opts.headers['X-Camera-Name'] || null,
+        bytes: opts.body.length }) + String.fromCharCode(10));
+      return { ok: true, status: 200, text: async () => 'OK' };
+    };`);
+  const read = () => (fs.existsSync(uploads) ? fs.readFileSync(uploads, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
+  // Runs the service; for the long-running mode, stops it once `stopAfter`
+  // uploads have arrived (or after a few seconds).
+  const run = (args, env, stopAfter = 0, settleMs = 0) => new Promise((resolve) => {
+    const { spawn } = require('child_process');
+    const child = spawn(process.execPath, ['-r', path.join(dir, 'fakefetch.js'), path.join(dir, 'snapshot_service.js'), ...args], {
+      cwd: dir,
+      env: Object.assign({ PATH: process.env.PATH, HOME: dir, RING_TOKEN_FILE: path.join(dir, 'token'),
+        CAMERA_UPLOAD_URL: 'https://nhrc-camera.club-acct.workers.dev/latest.jpg', CAMERA_UPLOAD_SECRET: baseCfg.uploadSecret,
+        RING_CAMERA_NAME: 'Dock Wired', RING_BACKUP_CAMERA_NAME: 'Downstream Lot',
+        CAMERA_RETRIES: '1', CAMERA_RETRY_DELAY_SECONDS: '0' }, env),
+    });
+    let out = '';
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { out += d; });
+    const started = Date.now();
+    let seenAt = null;
+    const poll = setInterval(() => {
+      if (stopAfter && read().length >= stopAfter && seenAt === null) seenAt = Date.now();
+      if ((seenAt !== null && Date.now() - seenAt >= settleMs) || Date.now() - started > 8000) child.kill();
+    }, 50);
+    child.on('exit', (code, signal) => { clearInterval(poll); resolve({ code, signal, out, uploads: read() }); });
+  });
+  const reset = () => { if (fs.existsSync(uploads)) fs.unlinkSync(uploads); };
+  return { dir, run, reset };
+}
+
+test('end to end: --once and --once-backup upload from the right camera, with its role', async () => {
+  const box = e2eSandbox([{ name: 'Front Door' }, { name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  let r = await box.run(['--once'], {});
+  assert.strictEqual(r.code, 0, r.out);
+  assert.deepStrictEqual(r.uploads.map(u => [u.method, u.role, u.name]), [['PUT', 'primary', 'Dock Wired']]);
+  assert.ok(/Cameras on this account: "Front Door", "Dock Wired", "Downstream Lot"/.test(r.out), r.out);
+  box.reset();
+  r = await box.run(['--once-backup'], {});
+  assert.strictEqual(r.code, 0, r.out);
+  assert.deepStrictEqual(r.uploads.map(u => [u.role, u.name]), [['backup', 'Downstream Lot']]);
+});
+
+test('end to end: the running service uploads the dock camera, and leaves the battery camera alone', async () => {
+  const box = e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  const r = await box.run([], {}, 1, 1500);
+  assert.deepStrictEqual(r.uploads.map(u => u.role), ['primary'], r.out);
+  assert.ok(/Primary camera: "Dock Wired" — every 15 min, around the clock/.test(r.out), r.out);
+  assert.ok(/Backup camera: "Downstream Lot" — only after 2 missed primary captures in a row/.test(r.out));
+});
+
+test('end to end: with the dock camera down, the running service switches to the backup', async () => {
+  const box = e2eSandbox([{ name: 'Dock Wired', down: true }, { name: 'Downstream Lot' }]);
+  // One miss is enough here, and the backup window is opened all day, so the
+  // test does not depend on the time it runs.
+  const r = await box.run([], { BACKUP_AFTER_MISSES: '1', BACKUP_ACTIVE_START_HOUR: '0', BACKUP_ACTIVE_END_HOUR: '0',
+                                BACKUP_SLOW_AFTER_HOUR: '0' }, 1, 300);
+  assert.deepStrictEqual(r.uploads.map(u => [u.role, u.name]), [['backup', 'Downstream Lot']], r.out);
+  assert.ok(/primary cycle failed: CAPTURE stage \(primary "Dock Wired"\)/.test(r.out), r.out);
+  assert.ok(/using the backup on its own timetable/.test(r.out));
+});
+
+test('end to end: a missing backup only disables the fallback; missing cameras stop it with a list', async () => {
+  let box = e2eSandbox([{ name: 'Dock Wired' }, { name: 'Garage' }]);
+  let r = await box.run([], {}, 1, 300);
+  assert.deepStrictEqual(r.uploads.map(u => u.role), ['primary']);
+  assert.ok(/No camera matching RING_BACKUP_CAMERA_NAME "Downstream Lot".*Running without a backup/.test(r.out), r.out);
+  box = e2eSandbox([{ name: 'Front Door' }, { name: 'Garage' }]);
+  r = await box.run([], {});
+  assert.strictEqual(r.code, 1);
+  assert.ok(/No camera matching "Dock Wired" or "Downstream Lot"\. Available: "Front Door", "Garage"/.test(r.out), r.out);
+  assert.strictEqual(r.uploads.length, 0);
+  box = e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  r = await box.run(['--once'], { RING_CAMERA_NAME: '', RING_BACKUP_CAMERA_NAME: '' });
+  assert.strictEqual(r.code, 1);
+  assert.ok(/RING_CAMERA_NAME is unset/.test(r.out), 'two cameras and no name: refuse to guess');
+  assert.strictEqual(r.uploads.length, 0);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('6d. The Worker, run for real (in-memory R2)');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The Worker's own fetch handler, with Node's Request/Response and an R2
+// bucket stand-in - so uploads, staleness and the headers the website reads
+// are exercised, not just pattern-matched.
+
+let workerModule = null;
+async function worker() {
+  if (workerModule) return workerModule;
+  const src = fs.readFileSync(path.join(__dirname, 'cloudflare_worker.js'), 'utf8');
+  const tmp = path.join(os.tmpdir(), `nhrc-worker-${process.pid}.mjs`);
+  fs.writeFileSync(tmp, src);
+  workerModule = (await import(require('url').pathToFileURL(tmp).href)).default;
+  fs.unlinkSync(tmp);
+  return workerModule;
+}
+function memoryR2() {
+  let stored = null;
+  return {
+    async put(key, body, opts) {
+      stored = { key, bytes: new Uint8Array(body), customMetadata: Object.assign({}, opts.customMetadata),
+                 uploaded: new Date(), size: body.byteLength };
+    },
+    async get(key) { return stored && stored.key === key ? Object.assign({}, stored, { body: stored.bytes }) : null; },
+    async head(key) { return stored && stored.key === key ? stored : null; },
+    stored: () => stored,
+  };
+}
+const W_URL = 'https://nhrc-camera.example.workers.dev/latest.jpg';
+const SECRET = baseCfg.uploadSecret;
+const env = () => ({ UPLOAD_SECRET: SECRET, BUCKET: memoryR2() });
+const put = async (e, headers, body = JPEG) => (await worker()).fetch(new Request(W_URL, { method: 'PUT',
+  headers: Object.assign({ Authorization: `Bearer ${SECRET}`, 'Content-Type': 'image/jpeg' }, headers), body }), e);
+const get = async (e, url = W_URL, method = 'GET') => (await worker()).fetch(new Request(url, { method }), e);
+const ageBy = (e, minutes) => { e.BUCKET.stored().customMetadata.capturedAt = new Date(Date.now() - minutes * 60000).toISOString(); };
+
+test('Worker: a frame keeps which camera took it, and the website may read that', async () => {
+  const e = env();
+  assert.strictEqual((await put(e, { 'X-Camera-Role': 'primary', 'X-Camera-Name': 'Dock Wired' })).status, 200);
+  const r = await get(e);
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.headers.get('X-Camera-Role'), 'primary');
+  assert.strictEqual(r.headers.get('X-Camera-Name'), 'Dock Wired');
+  assert.strictEqual(r.headers.get('Access-Control-Allow-Origin'), '*');
+  const exposed = r.headers.get('Access-Control-Expose-Headers') || '';
+  for (const h of ['X-Camera-Role', 'X-Camera-Name']) assert.ok(exposed.includes(h), `${h} must be exposed to the website`);
+  assert.ok(Number.isFinite(Date.parse(r.headers.get('Last-Modified'))), 'capture time');
+  assert.deepStrictEqual(Buffer.from(await r.arrayBuffer()), JPEG);
+  assert.strictEqual(r.headers.get('X-Content-Type-Options'), 'nosniff');
+});
+
+test('Worker: camera names and roles are reduced to safe values before storing', async () => {
+  const e = env();
+  await put(e, { 'X-Camera-Role': 'ADMIN', 'X-Camera-Name': 'Dock<script>alert(1)</script> "x"' });
+  const m = e.BUCKET.stored().customMetadata;
+  assert.strictEqual(m.role, '', 'unknown role dropped');
+  assert.ok(!/[<>"()]/.test(m.camera), m.camera);
+  await put(e, { 'X-Camera-Role': ' Backup ', 'X-Camera-Name': 'x'.repeat(200) });
+  assert.strictEqual(e.BUCKET.stored().customMetadata.role, 'backup');
+  assert.strictEqual(e.BUCKET.stored().customMetadata.camera.length, 60);
+});
+
+test('Worker: a dock frame is stale after an hour, a backup frame after 130 minutes', async () => {
+  const cases = [['primary', 59, 200], ['primary', 61, 404], ['backup', 61, 200], ['backup', 129, 200],
+                 ['backup', 131, 404], ['', 129, 200], ['', 131, 404]];
+  for (const [role, minutes, status] of cases) {
+    const e = env();
+    await put(e, role ? { 'X-Camera-Role': role } : {});
+    ageBy(e, minutes);
+    const r = await get(e);
+    assert.strictEqual(r.status, status, `${role || 'no role'} at ${minutes} min`);
+    assert.strictEqual(r.headers.get('Access-Control-Allow-Origin'), '*', 'a stale answer is readable by the page too');
+  }
+});
+
+test('Worker: /status says which camera, how old, and whether it is still served', async () => {
+  const e = env();
+  await put(e, { 'X-Camera-Role': 'backup', 'X-Camera-Name': 'Downstream Lot' });
+  ageBy(e, 90);
+  const st = await (await get(e, 'https://nhrc-camera.example.workers.dev/status')).json();
+  assert.deepStrictEqual([st.ok, st.camera, st.role, st.staleAfterSeconds], [true, 'Downstream Lot', 'backup', 7800]);
+  assert.ok(st.ageSeconds >= 5390 && st.ageSeconds <= 5410, String(st.ageSeconds));
+  await put(e, { 'X-Camera-Role': 'primary', 'X-Camera-Name': 'Dock Wired' });
+  ageBy(e, 90);
+  const st2 = await (await get(e, 'https://nhrc-camera.example.workers.dev/status')).json();
+  assert.deepStrictEqual([st2.ok, st2.staleAfterSeconds], [false, 3600]);
+});
+
+test('Worker: uploads still need the secret and real JPEG bytes', async () => {
+  const e = env();
+  const w = await worker();
+  const r1 = await w.fetch(new Request(W_URL, { method: 'PUT', headers: { Authorization: 'Bearer wrong', 'Content-Type': 'image/jpeg' }, body: JPEG }), e);
+  assert.strictEqual(r1.status, 401);
+  assert.strictEqual((await put(e, {}, Buffer.from('<svg onload=alert(1)>'))).status, 415);
+  assert.strictEqual((await put(e, {}, Buffer.alloc(0))).status, 400);
+  assert.strictEqual((await get(e)).status, 404, 'nothing stored by any of them');
+  const head = await get(env(), W_URL, 'HEAD');
+  assert.strictEqual(head.status, 404);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 section('7. Security guards');
 // ═══════════════════════════════════════════════════════════════════════════
 

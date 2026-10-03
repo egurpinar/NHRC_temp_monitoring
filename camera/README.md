@@ -1,9 +1,16 @@
 # Boathouse Camera
 
-Captures a snapshot from the Ring camera on a fixed timetable - 5:00, 5:30, ...
-9:30, then hourly 10:00 to 15:00 - and publishes it via a Cloudflare Worker, so
-the website can show current river conditions with the time each photo was
-taken.
+Publishes one photo of the river on the website, via a Cloudflare Worker, with
+the time it was taken and which camera took it. Two Ring cameras:
+
+| Camera | Power | Role | When it is captured |
+|---|---|---|---|
+| **Dock Wired** | Hardwired | Primary | Every 15 minutes, around the clock |
+| **Downstream Lot** | Battery + solar | Backup | Only after the dock camera has missed **two captures in a row**; then 5am-4pm, every 30 minutes until 10am and hourly after. Back to sleep as soon as the dock camera answers |
+
+The backup is never woken while the dock camera is answering, to spare its
+battery. When the website shows a backup photo it says so, on the photo and in
+the caption, because it looks at a different stretch of river.
 
 ```
 Ring cloud  <--  Pi Zero W (snapshot_service.js)  -->  Cloudflare Worker + R2
@@ -16,14 +23,17 @@ Tested on Raspbian GNU/Linux 12 (bookworm), 32-bit, Pi Zero W (ARMv6).
 
 ## Two things to get right
 
-**Frame the camera on the water, not the dock.** The image is public. Keeping
+**Keep identifiable people out of every view.** The image is public. Keeping
 people out of shot is what makes access control unnecessary — a password on a
 static site cannot actually be enforced, so the framing *is* the privacy
-control.
+control. Both current views were confirmed for public use by the Safety
+Committee in October 2026, with the Downstream Lot owner's permission. Re-check
+whenever a camera is moved or replaced.
 
 **Never commit snapshots to this repository.** It is public and git history is
-permanent: a frame every 30 minutes would build an irreversible public archive
-of thousands of images a year. R2 holds exactly one object, overwritten each cycle.
+permanent: a frame every 15 minutes would build an irreversible public archive
+of tens of thousands of images a year. R2 holds exactly one object, overwritten
+each capture.
 
 ## Why a service and not a cron job
 
@@ -175,26 +185,43 @@ itself — do not hand-edit it afterwards.
 
 ## 5. Configure and test
 
+Both cameras must be shared with the Ring account the Pi signs in with. At
+startup the journal lists every camera that account can see.
+
 ```bash
 cat > /opt/nhrc-camera/env <<'EOF'
-RING_CAMERA_NAME=boathouse
+RING_CAMERA_NAME="Dock Wired"
+RING_BACKUP_CAMERA_NAME="Downstream Lot"
 CAMERA_UPLOAD_URL=https://nhrc-camera.YOUR-ACCOUNT.workers.dev/latest.jpg
 CAMERA_UPLOAD_SECRET=the-same-secret-as-the-worker
-CAMERA_INTERVAL_MINUTES=30
-CAMERA_SLOW_AFTER_HOUR=10
-CAMERA_SLOW_INTERVAL_MINUTES=60
-CAMERA_ACTIVE_START_HOUR=5
-CAMERA_ACTIVE_END_HOUR=16
+CAMERA_INTERVAL_MINUTES=15
+CAMERA_ACTIVE_START_HOUR=0
+CAMERA_ACTIVE_END_HOUR=0
+CAMERA_SLOW_AFTER_HOUR=0
+BACKUP_AFTER_MISSES=2
+BACKUP_INTERVAL_MINUTES=30
+BACKUP_SLOW_AFTER_HOUR=10
+BACKUP_SLOW_INTERVAL_MINUTES=60
+BACKUP_ACTIVE_START_HOUR=5
+BACKUP_ACTIVE_END_HOUR=16
 EOF
 chmod 600 /opt/nhrc-camera/env
 
 set -a; . /opt/nhrc-camera/env; set +a
-node snapshot_service.js --check     # config only, no Ring calls
-node snapshot_service.js --once      # one real capture and upload
+node snapshot_service.js --check         # config only, no Ring calls
+node snapshot_service.js --once          # one real capture and upload from the dock camera
+node snapshot_service.js --once-backup   # the same from the backup (shows until the next dock capture)
 ```
 
-`RING_CAMERA_NAME` is a case-insensitive substring; if it matches nothing the
-error lists every camera on the account.
+The quotes around the camera names matter: without them the shell reads
+`Dock Wired` as a setting followed by a command called `Wired`. (systemd
+strips the quotes, so the same file works for the service.) The values shown
+are also the defaults, written out so the file says what the Pi does.
+
+A camera name is matched in full first (case-insensitive), then as a part of a
+name that only one camera has. A part shared by several cameras is refused
+rather than guessed, and a name that matches nothing makes the journal list
+every camera on the account.
 
 Then open the same URL in a browser — you should see the river.
 
@@ -282,12 +309,19 @@ Once the snapshot URL is live, set this near the bottom of
 const CAMERA_SNAPSHOT_URL = 'https://nhrc-camera.YOUR-ACCOUNT.workers.dev/latest.jpg';
 ```
 
-The card never shows a broken or badly stale image. The Worker refuses a frame
-over 130 minutes old, and when there is no image the card says why: paused
-overnight, the first photo of the day still on its way (the first 15 minutes of
-the window), or the camera could not be reached. When there is an image, the
-caption gives the time it was taken, read from the Worker's `Last-Modified`
-header.
+The card never shows a broken or badly stale image. The Worker refuses a dock
+frame over an hour old (four missed captures) and a backup frame over 130
+minutes old (one missed hourly capture). The caption gives the time the photo
+was taken and which camera took it, read from the Worker's `Last-Modified`,
+`X-Camera-Role` and `X-Camera-Name` headers; a backup photo is also badged on
+the image. With no photo the card says why: at night that the dock camera is not
+responding and the backup only runs 5am-4pm, by day that the cameras could not
+be reached.
+
+The page describes the Pi's settings in a few constants next to
+`CAMERA_SNAPSHOT_URL` (`CAMERA_CADENCE_LABEL`, `CAMERA_BACKUP_START_HOUR` /
+`_END_HOUR`). They do not control the cameras; change them when the Pi's
+settings change.
 
 ---
 
@@ -295,19 +329,34 @@ header.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `CAMERA_INTERVAL_MINUTES` | 30 | Minimum 5. Ring throttles battery cameras to roughly one snapshot per 10 min |
-| `CAMERA_SLOW_AFTER_HOUR` | 10 | Local hour the slower rate starts. Set equal to the window start to disable |
-| `CAMERA_SLOW_INTERVAL_MINUTES` | 60 | Interval used after that hour. Must clear the Worker's MAX_AGE_MS |
-| `CAMERA_ACTIVE_START_HOUR` / `_END_HOUR` | 5 / 16 | Boathouse local time. Both `0` disables. Night frames are black and still cost battery |
+| `RING_CAMERA_NAME` | — | The primary (dock) camera. May be omitted only if the account has a single camera |
+| `RING_BACKUP_CAMERA_NAME` | — | The backup camera. Omit to run without one |
+| `CAMERA_INTERVAL_MINUTES` | 15 | Primary. Minimum 5 |
+| `CAMERA_ACTIVE_START_HOUR` / `_END_HOUR` | 0 / 0 | Primary window, boathouse local time. Both `0` means around the clock |
+| `CAMERA_SLOW_AFTER_HOUR` / `CAMERA_SLOW_INTERVAL_MINUTES` | 0 / 60 | Optional slower primary rate after that hour; off when not after the window start |
+| `BACKUP_AFTER_MISSES` | 2 | Primary captures missed in a row before the backup is used |
+| `BACKUP_INTERVAL_MINUTES` | 30 | Backup rate until `BACKUP_SLOW_AFTER_HOUR` |
+| `BACKUP_SLOW_AFTER_HOUR` / `BACKUP_SLOW_INTERVAL_MINUTES` | 10 / 60 | Backup rate after that hour. Must stay under the Worker's backup limit (130 min) |
+| `BACKUP_ACTIVE_START_HOUR` / `_END_HOUR` | 5 / 16 | Backup window. Night frames are dark and still cost battery |
 | `CAMERA_RETRIES` | 3 | Battery cameras cannot snapshot *while recording*, so motion events cause failures worth retrying |
 | `RING_TOKEN_FILE` | `~/.nhrc-ring-token` | Must persist across reboots |
 
 ## The timetable
 
-Captures happen on fixed slots counted from the window start: every
-`CAMERA_INTERVAL_MINUTES` until `CAMERA_SLOW_AFTER_HOUR`, then every
-`CAMERA_SLOW_INTERVAL_MINUTES` until the window closes. With the settings above
-that is 16 a day: 5:00, 5:30, ... 9:30, 10:00, 11:00, ... 15:00.
+Captures happen on fixed slots counted from the window start. The dock camera:
+every 15 minutes from midnight, 96 a day. The backup, when it is in use: its own
+slots, 5:00, 5:30, ... 9:30, then 10:00, 11:00, ... 15:00 - at most 16 a day,
+and none at all on a day the dock camera keeps answering.
+
+How the switch works, slot by slot:
+
+- every 15 minutes the dock camera is tried first;
+- a failed **capture** counts as a miss; a failed **upload** does not (the
+  camera answered, and the backup's frame would fail to upload the same way);
+- from the second miss in a row, the backup is captured once per backup slot,
+  only inside its window;
+- the first dock capture that works resets the count, and the backup goes back
+  to sleep. The journal logs both switches.
 
 It used to sleep a fixed interval *after* each capture instead. Every capture
 takes time, so the schedule drifted later each cycle and the first frame of the
@@ -323,6 +372,21 @@ reached. Now:
 - after a restart it captures straight away, then rejoins the timetable.
 
 ## Updating the service on the Pi
+
+**Two-camera release (October 2026) — do these in order:**
+
+1. **Worker first.** Cloudflare dashboard → Workers & Pages → `nhrc-camera` →
+   Edit code → replace everything with the new `cloudflare_worker.js` → Deploy.
+   It stores which camera took each frame; an old Worker would show a backup
+   photo without saying it is the backup.
+2. **Share both cameras** with the Ring account the Pi uses, if not already.
+3. **Update `/opt/nhrc-camera/env`** with the camera names and settings in
+   section 5 (keep your `CAMERA_UPLOAD_URL`, `CAMERA_UPLOAD_SECRET` and
+   `RING_TOKEN_FILE` lines). The old 30/60-minute daylight lines must go: left
+   in, they would run the dock camera on the battery schedule.
+4. **Update the service file** as below, and restart.
+5. Check: `journalctl -u nhrc-camera -n 20 --no-pager` lists the cameras and
+   both timetables, and `/status` shows `"role": "primary"` within 15 minutes.
 
 After a change to `snapshot_service.js` is merged to `main`:
 
@@ -342,18 +406,20 @@ a working service. The startup line in the journal states the timetable.
 
 ## Battery
 
-The camera is battery plus solar. Every capture wakes it, so the interval is a
-direct battery trade-off. If charge trends down over a few weeks, raise
-`CAMERA_INTERVAL_MINUTES` to 30 or narrow the active hours before assuming a
-hardware fault.
+Only the backup camera runs on battery (with solar), and only while the dock
+camera is down. Each capture wakes it, so if its charge trends down during a
+long dock outage, raise `BACKUP_INTERVAL_MINUTES` or narrow the backup window
+before assuming a hardware fault.
 
 ## When something is wrong
 
 ```bash
-curl https://nhrc-camera.YOUR-ACCOUNT.workers.dev/status       # age of the current frame
+curl https://nhrc-camera.YOUR-ACCOUNT.workers.dev/status       # which camera, and how old
 journalctl -u nhrc-camera -n 50           # what the Pi has been doing
 ```
 
+- **`"role": "backup"`** — the dock camera has stopped answering (power, Wi-Fi,
+  or Ring). The journal shows its capture errors.
 - **`ok: false` with a large `ageSeconds`** — the Pi has stopped uploading.
   Check the service is running and the Pi is online.
 - **401 on upload** — the secret on the Pi and in the Worker disagree.
@@ -375,11 +441,11 @@ are inherent and one of them is worth a deliberate decision.
 A Ring refresh token is equivalent to the account password: whoever holds it can
 reach everything that account can reach.
 
-**In this deployment that is already narrow.** The account used here is not the
-camera owner's; the boathouse camera was shared with it, and it is not used for
-anything else. So a stolen token exposes one camera pointed at a river — which
-is exactly the isolation a purpose-made Shared User would have provided. Nothing
-further is needed.
+**In this deployment that is already narrow.** The account used here is not a
+camera owner's; the two cameras were shared with it, and it is not used for
+anything else. So a stolen token exposes two cameras whose views are already
+public — which is exactly the isolation a purpose-made Shared User would have
+provided. Nothing further is needed.
 
 Two consequences worth noting:
 
@@ -449,13 +515,17 @@ Pin versions and update deliberately rather than automatically.
 Being explicit, since these are real:
 
 - **A compromised Pi.** If the box is owned, the Ring token goes with it. The
-  limiting factor is what that account can reach — currently one shared camera,
+  limiting factor is what that account can reach — currently two shared cameras,
   which is why keeping the account single-purpose matters.
 - **Anyone who can see the published image.** It is public by design. The
   privacy control is the camera's framing, not access control.
-- **Someone re-aiming the camera.** If it is ever moved to cover the dock,
-  people become publicly visible with no code change and no warning. Worth a
-  note in the committee's records that the framing is deliberate.
+- **Someone re-aiming a camera.** If one is moved, people may become publicly
+  visible with no code change and no warning. Worth a note in the committee's
+  records that the framing is deliberate.
+- **A view that shows when the boathouse is empty.** The dock camera now
+  publishes around the clock, night vision included. The committee accepted
+  this in October 2026; revisit it if security at the boathouse becomes a
+  concern.
 - **Ring changing or blocking the unofficial API.** This can break without
   notice. The failure mode is benign — the site's camera card says the camera
   could not be reached — but it will need attention when it happens.
@@ -465,7 +535,7 @@ Being explicit, since these are real:
 Exactly one object exists at any time, overwritten every cycle. Nothing is
 archived, nothing enters git, and Cloudflare access logs are not enabled by
 default. If the committee wants a formal retention answer: *the current frame
-only, replaced at each capture (every 30-60 minutes), never stored historically.*
+only, replaced at each capture (every 15 minutes), never stored historically.*
 
 ---
 
@@ -475,8 +545,11 @@ only, replaced at each capture (every 30-60 minutes), never stored historically.
 node camera/test_snapshot_service.js
 ```
 
-64 tests covering config validation, the timezone-aware active window, the
-capture timetable (whole days on a fake clock, including both daylight-saving
-days), atomic token persistence and file permissions, upload auth, and retry
-behaviour. Every test is hermetic: a fixed clock and a fake network, never the
-real endpoint. The Ring API itself is stubbed, so no credentials are needed.
+93 tests covering config validation, the timezone-aware windows, the capture
+timetable and the switch to the backup (whole days on a fake clock, including
+both daylight-saving days and day-long outages), camera selection, atomic token
+persistence and file permissions, upload auth and retry behaviour, the Worker
+itself (run in Node against an in-memory R2), and the real service process end
+to end, with a stand-in Ring library. Every test is hermetic: a
+fixed clock and a fake network, never the real endpoint. The Ring API itself is
+stubbed, so no credentials are needed.

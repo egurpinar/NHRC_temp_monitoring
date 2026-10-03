@@ -36,17 +36,36 @@
 
 const OBJECT_KEY = 'latest.jpg';
 
-// A frame older than this is treated as stale. The Pi captures every 30 minutes
-// before 10am and every 60 minutes after, so this has to clear the slower rate:
-// a SINGLE missed afternoon cycle already reaches 120 minutes, and anything
-// below that would hide the camera over one dropped capture, turning a normal
-// hiccup into an apparently broken feature. 130 minutes tolerates exactly one
-// miss with a little slack, while still refusing to present a badly outdated
-// river as current. A stale image is more dangerous than no image, because
-// people trust a photograph more than a number.
+// A frame older than this is treated as stale, by the camera that took it. A
+// stale image is more dangerous than no image, because people trust a
+// photograph more than a number.
 //
-// If the capture interval changes, this must change with it.
-const MAX_AGE_MS = 130 * 60 * 1000;
+// primary - the hardwired dock camera, every 15 minutes around the clock: an
+//           hour is three missed captures plus slack. (After two misses the Pi
+//           switches to the backup in daylight, well inside this.)
+// backup  - the battery camera, every 30 minutes before 10am and hourly after:
+//           one missed afternoon capture already reaches 120 minutes, so 130
+//           tolerates exactly one miss with a little slack.
+// Frames from a Pi that does not say which camera (older versions) get the
+// longer limit.
+//
+// If a capture interval changes, these must change with it.
+const MAX_AGE_MS = { primary: 60 * 60 * 1000, backup: 130 * 60 * 1000 };
+const MAX_AGE_DEFAULT_MS = 130 * 60 * 1000;
+const maxAgeFor = (role) => (Object.prototype.hasOwnProperty.call(MAX_AGE_MS, role) ? MAX_AGE_MS[role] : MAX_AGE_DEFAULT_MS);
+
+// The website reads which camera took the photo, and when, from these headers.
+// Custom headers are only visible to another origin when listed here.
+const EXPOSED = 'X-Camera-Role, X-Camera-Name, X-Snapshot-Age-Seconds';
+
+/** Camera role and name from an upload, reduced to what is safe to store and echo. */
+function cameraMeta(request) {
+  const role = (request.headers.get('X-Camera-Role') || '').trim().toLowerCase();
+  return {
+    role: role === 'primary' || role === 'backup' ? role : '',
+    camera: (request.headers.get('X-Camera-Name') || '').replace(/[^A-Za-z0-9 ._-]/g, '').trim().slice(0, 60),
+  };
+}
 
 export default {
   async fetch(request, env) {
@@ -91,7 +110,7 @@ async function handleUpload(request, env) {
 
   await env.BUCKET.put(OBJECT_KEY, body, {
     httpMetadata: { contentType: 'image/jpeg' },
-    customMetadata: { capturedAt: new Date().toISOString() },
+    customMetadata: Object.assign({ capturedAt: new Date().toISOString() }, cameraMeta(request)),
   });
 
   return new Response('OK', { status: 200 });
@@ -101,18 +120,18 @@ async function handleGet(request, env) {
   const object = await env.BUCKET.get(OBJECT_KEY);
   if (!object) return new Response('No snapshot yet', { status: 404 });
 
-  const capturedAt = object.customMetadata?.capturedAt
-    ? new Date(object.customMetadata.capturedAt)
-    : object.uploaded;
+  const meta = object.customMetadata || {};
+  const capturedAt = meta.capturedAt ? new Date(meta.capturedAt) : object.uploaded;
   const ageMs = Date.now() - new Date(capturedAt).getTime();
 
-  // Refuse to serve a badly stale frame. The website hides the card on a failed
-  // load, so a 404 here correctly removes the camera from the page rather than
-  // showing hours-old conditions as if they were current.
-  if (ageMs > MAX_AGE_MS) {
+  // Refuse to serve a badly stale frame. The website says the camera could not
+  // be reached rather than showing hours-old conditions as if they were current.
+  // CORS headers here too, so the page sees a 404 rather than a network error.
+  if (ageMs > maxAgeFor(meta.role)) {
     return new Response('Snapshot is stale', {
       status: 404,
-      headers: { 'Cache-Control': 'no-store', 'X-Snapshot-Age-Seconds': String(Math.round(ageMs / 1000)) },
+      headers: { 'Cache-Control': 'no-store', 'X-Snapshot-Age-Seconds': String(Math.round(ageMs / 1000)),
+                 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': EXPOSED },
     });
   }
 
@@ -128,9 +147,11 @@ async function handleGet(request, env) {
   // valid HTML/SVG and get it executed from our domain" path.
   headers.set('X-Content-Type-Options', 'nosniff');
   headers.set('Content-Disposition', 'inline; filename="latest.jpg"');
-  // Allow the main site to read this cross-origin if we later want a fetch()
-  // rather than a plain <img>.
+  // The website fetches the frame and reads which camera took it and when.
   headers.set('Access-Control-Allow-Origin', '*');
+  headers.set('Access-Control-Expose-Headers', EXPOSED);
+  headers.set('X-Camera-Role', meta.role || '');
+  headers.set('X-Camera-Name', meta.camera || '');
 
   if (request.method === 'HEAD') return new Response(null, { headers });
   return new Response(object.body, { headers });
@@ -142,13 +163,16 @@ async function handleStatus(env) {
   if (!object) {
     return json({ ok: false, reason: 'no snapshot has ever been uploaded' }, 404);
   }
-  const capturedAt = object.customMetadata?.capturedAt || object.uploaded;
+  const meta = object.customMetadata || {};
+  const capturedAt = meta.capturedAt || object.uploaded;
   const ageSeconds = Math.round((Date.now() - new Date(capturedAt).getTime()) / 1000);
   return json({
-    ok: ageSeconds * 1000 <= MAX_AGE_MS,
+    ok: ageSeconds * 1000 <= maxAgeFor(meta.role),
+    camera: meta.camera || null,
+    role: meta.role || null,
     capturedAt: new Date(capturedAt).toISOString(),
     ageSeconds,
-    staleAfterSeconds: MAX_AGE_MS / 1000,
+    staleAfterSeconds: maxAgeFor(meta.role) / 1000,
     sizeBytes: object.size,
   });
 }
@@ -156,7 +180,7 @@ async function handleStatus(env) {
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj, null, 2), {
     status,
-    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' },
   });
 }
 
