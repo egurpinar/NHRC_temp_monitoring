@@ -628,9 +628,11 @@ function statusPill(status, label) {
 
 /** A section heading: small dark-gold label above a block. */
 function sectionLabel(text) {
+  // font-family set here too: without it the label fell back to the client's
+  // default face (Times in some), unlike every other line of the email.
   return `<div style="font-size:11px;font-weight:bold;letter-spacing:0.08em;` +
     `text-transform:uppercase;color:${C.label};background-color:${C.card};` +
-    `padding:0 0 8px 0;">${esc(text)}</div>`;
+    `font-family:Arial,Helvetica,sans-serif;padding:0 0 8px 0;">${esc(text)}</div>`;
 }
 
 /**
@@ -791,7 +793,7 @@ function renderEmailHtml(d) {
     : `<div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">Weather data unavailable this morning.</div>`;
 
   // ── Assemble ───────────────────────────────────────────────────────────────
-  return toAsciiEntities(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background-color:${C.page};">
+  return toAsciiEntities(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background-color:${C.page};font-family:Arial,Helvetica,sans-serif;">
   <tr><td align="center" style="padding:16px 8px;background-color:${C.page};">
     <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;width:100%;max-width:600px;background-color:${C.card};border:1px solid ${C.border};border-radius:10px;">
 

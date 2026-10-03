@@ -1028,13 +1028,23 @@ function downloadCSV() {
     const tempC = Math.round((h.tempF-32)*5/9*100)/100;
     rows.push(`${ts},${h.tempF.toFixed(1)},${tempC.toFixed(2)}`);
   });
-  const blob = new Blob([rows.join('\n')], {type:'text/csv'});
+  // A byte-order mark, so Excel reads the file as UTF-8: without it the "°F"
+  // in the header arrives as "Â°F" on Windows.
+  const blob = new Blob(['\ufeff' + rows.join('\n')], {type:'text/csv;charset=utf-8'});
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href = url;
-  a.download = `NHRC_water_temp_${new Date().toISOString().slice(0,10)}.csv`;
+  // The boathouse date: after 8 PM the UTC date is already tomorrow's.
+  const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  a.download = `NHRC_water_temp_${day}.csv`;
+  // In the document while clicked (older Firefox ignores a detached link),
+  // and the URL released later, not at once - some browsers cancel a
+  // download whose URL is revoked in the same tick as the click.
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
   showToast(`Downloaded ${hist.length.toLocaleString()} readings`);
 }
 
@@ -1179,6 +1189,19 @@ function updateChart() {
 }
 
 /* ── SCRUBBER (Garmin-style crosshair) ── */
+
+// The reading nearest a time. Skips the null points withGapBreaks() inserts
+// to break the line at a data gap: the scrubber used to land on one at the
+// edge of every gap and throw (null.toFixed), freezing the tooltip there.
+function nearestReading(points, ts) {
+  let closest = null, minDist = Infinity;
+  for (const pt of points) {
+    if (!pt || typeof pt.y !== 'number' || !Number.isFinite(pt.y)) continue;
+    const d = Math.abs(pt.x - ts);
+    if (d < minDist) { minDist = d; closest = pt; }
+  }
+  return closest;
+}
 function initScrubber() {
   const wrap = document.getElementById('chart-wrap');
   if (!wrap) return;
@@ -1196,13 +1219,8 @@ function initScrubber() {
     if (ts == null) return null;
 
     // Find nearest data point
-    const data = chart.data.datasets[0].data;
-    if (!data.length) return null;
-    let closest = null, minDist = Infinity;
-    for (const pt of data) {
-      const d = Math.abs(pt.x - ts);
-      if (d < minDist) { minDist = d; closest = pt; }
-    }
+    const closest = nearestReading(chart.data.datasets[0].data, ts);
+    if (!closest) return null;
     return { closest, pixelX: x, canvasWidth: rect.width };
   }
 

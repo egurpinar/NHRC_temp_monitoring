@@ -1152,6 +1152,29 @@ async function emailWeatherWith(current) {
 const CURRENT_OK = { temperature_2m: 58.4, apparent_temperature: 56.2, weather_code: 3, wind_speed_10m: 9.4,
   wind_gusts_10m: 23.8, wind_direction_10m: 310, precipitation: 0 };
 
+test('every line of the email has a font set - none falls back to the client default (Times)', async () => {
+  const w = await emailWeatherWith(CURRENT_OK);
+  const html = M.renderEmailHtml(M.computeDigest(logic, { raw: makeRaw(66), history: historyAtTemp(66) },
+    { level: 9.5, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() }, w, new Date()));
+  // Walk the markup with a stack: each text node must have an ancestor (or
+  // itself) whose inline style sets font-family.
+  const stack = [], bare = [];
+  const re = /<(\/?)([a-z0-9]+)\b([^>]*?)(\/?)>|([^<]+)/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    if (m[5] !== undefined) {
+      const text = m[5].replace(/&nbsp;|&#160;/g, '').trim();
+      if (text && !stack.some(e => e.font)) bare.push(text.slice(0, 40));
+      continue;
+    }
+    const [, close, tag, attrs, selfClose] = m;
+    if (/^(br|img|hr|meta)$/i.test(tag) || selfClose) continue;
+    if (close) { while (stack.length && stack.pop().tag !== tag.toLowerCase()); continue; }
+    stack.push({ tag: tag.toLowerCase(), font: /font-family\s*:/.test(attrs) });
+  }
+  assert.deepStrictEqual(bare, [], 'text with no font-family on itself or any ancestor');
+});
+
 test('email weather: a missing temperature or wind is "unavailable" - never 0°F or 0 mph', async () => {
   // Math.round(null) is 0: an API gap used to print "Overcast, 0°F".
   for (const k of ['temperature_2m', 'wind_speed_10m']) {
@@ -1297,6 +1320,12 @@ test('SAFETY the email is built from the latest readings, not the checkout made 
   assert.ok(gate < refresh && refresh < tests && refresh < build && refresh < send,
     'refresh must come after the wait and before the tests, the build and the send');
   assert.ok(/bash scripts\/test_refresh_checkout\.sh/.test(wf), 'and its own tests must run before sending');
+});
+
+test('the email job runs on a supported Node (20 reached end of life in April 2026)', () => {
+  const wf = require('fs').readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'daily_email.yml'), 'utf8');
+  const v = (wf.match(/node-version:\s*'(\d+)'/) || [])[1];
+  assert.ok(v && Number(v) >= 22, `node-version ${v}`);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2122,6 +2151,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     getContext: () => ({ createLinearGradient: () => ({ addColorStop() {} }) }),
     addEventListener() {}, querySelector: () => null, querySelectorAll: () => [],
     classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {}, appendChild() {},
+    click() { this.clicked = (this.clicked || 0) + 1; }, remove() { this.removed = true; },
     get parentElement() { return el(id + '__parent'); },
   });
   class FixedDate extends Date {
@@ -2147,7 +2177,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
   els.__blobs = blobs;
   const document = { getElementById: el, querySelectorAll: (sel) => (/#range-btns/.test(sel) ? rangeButtons : []),
     querySelector: () => null, addEventListener: on('document'), createElement: () => el('__created'),
-    visibilityState: 'visible' };
+    visibilityState: 'visible', body: el('__body') };
   els.__document = document;
   const sandbox = {
     document,
@@ -2161,7 +2191,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     console: { log() {}, warn: (...a) => logged.push(['warn', ...a]), error: (...a) => logged.push(['error', ...a]) },
     URL: { createObjectURL() { const u = 'blob:fake-' + (++blobs.made); blobs.live.add(u); return u; },
            revokeObjectURL(u) { blobs.live.delete(u); blobs.revoked.push(u); } },
-    Blob: function () {},
+    Blob: function (parts, o) { this.parts = parts; this.type = o && o.type; els.__blobParts = parts; els.__blobType = this.type; },
     // By default an image fails to load, as it would with no network, and
     // says so asynchronously like a browser.
     Image: opts.Image || function () {
@@ -2175,7 +2205,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData,' +
     ' loadData, loadHistory, refreshAll, loadFogOutlook, loadCameraSnapshot, historyNeedsRefresh, pickRiverLevel,' +
     ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraOffHours,' +
-    ' cameraCaption, cameraMissingMessage, CAMERA_SNAPSHOT_URL };',
+    ' cameraCaption, cameraMissingMessage, CAMERA_SNAPSHOT_URL, nearestReading, downloadCSV, withGapBreaks };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -2871,6 +2901,36 @@ test('the chart info bar gives the last reading in boathouse time', async () => 
   const { site, els } = loadSite(t, net.fetch);
   await site.loadData();
   assert.ok(/^Last reading: Oct 3, 6:15(\u202f| )AM EDT \(15 min ago\)$/.test(els['info-last'].textContent), els['info-last'].textContent);
+});
+
+test('chart scrubber: the nearest READING, never a gap-break point (it used to throw at every gap)', () => {
+  const { site } = loadSite(Date.now());
+  const H = HOUR;
+  const pts = site.withGapBreaks([{ x: 0, y: 60 }, { x: H, y: 61 }, { x: 30 * H, y: 62 }, { x: 31 * H, y: 63 }]);
+  assert.ok(pts.some(p => p.y === null), 'sanity: the gap is broken with null points');
+  for (const ts of [H + 1, H + 2, 2 * H, 15 * H, 29.9 * H, 30 * H - 1]) {
+    const p = site.nearestReading(pts, ts);
+    assert.ok(p && typeof p.y === 'number', `at ${ts / H} h: ${JSON.stringify(p)}`);
+  }
+  assert.strictEqual(site.nearestReading(pts, H + 1).y, 61);
+  assert.strictEqual(site.nearestReading(pts, 30 * H - 1).y, 62);
+  assert.strictEqual(site.nearestReading([{ x: 0, y: null }], 0), null, 'nothing to show is null, not a crash');
+  assert.strictEqual(site.nearestReading([], 0), null);
+});
+
+test('CSV download: UTF-8 marked for Excel, boathouse date in the name, link attached while clicked', () => {
+  const now = etDate('2026-10-03', 23, 30).getTime();   // already Oct 4 in UTC
+  const { site, els } = loadSite(now);
+  site.state.allHistory = [{ ts: now - 2 * HOUR, tempF: 65.4 }, { ts: now - HOUR, tempF: 65.25 }];
+  site.downloadCSV();
+  const text = els.__blobParts.join('');
+  assert.ok(text.startsWith('\ufeffTimestamp (UTC),Temperature (°F),Temperature (°C)\n'), JSON.stringify(text.slice(0, 60)));
+  assert.strictEqual(text.trim().split('\n').length, 3);
+  assert.ok(/charset=utf-8/.test(els.__blobType));
+  const a = els['__created'];
+  assert.strictEqual(a.download, 'NHRC_water_temp_2026-10-03.csv', 'not the UTC date');
+  assert.strictEqual(a.clicked, 1);
+  assert.ok(a.removed, 'the temporary link is removed afterwards');
 });
 
 test('the Refresh button refreshes the whole summary, not just the water reading', () => {

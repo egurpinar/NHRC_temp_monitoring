@@ -66,7 +66,9 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          # 22 LTS: Node 20 reached end of life in April 2026 and gets no
+          # security fixes. The test suites are run on 22.
+          node-version: '22'
 
       - name: Wait for the send window
         id: gate
