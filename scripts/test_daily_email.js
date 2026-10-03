@@ -38,12 +38,23 @@ function record(name, err, note = '') {
   console.log(`        ${err.message}`);
 }
 
+// The workflow runs this suite before sending, inside the 1-5 AM window. A test
+// that never settles would hold the send until the job timed out - so no
+// email. Each async test therefore gets a hard deadline.
+const ASYNC_TEST_TIMEOUT_MS = 30000;
+
 function test(name, fn) {
   if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
     const where = currentSection;
     asyncChain = asyncChain.then(async () => {
-      try { await fn(); record(name, null, `  [async: ${where}]`); }
+      let timer;
+      const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${ASYNC_TEST_TIMEOUT_MS / 1000}s`)),
+          ASYNC_TEST_TIMEOUT_MS);
+      });
+      try { await Promise.race([fn(), deadline]); record(name, null, `  [async: ${where}]`); }
       catch (err) { record(name, err, `  [async: ${where}]`); }
+      finally { clearTimeout(timer); }
     });
     return;
   }
@@ -1758,6 +1769,22 @@ test('the digest carries the site\'s fog verdict, using the water temperature fo
   assert.strictEqual(fogDigest('dry', { inputs: { response: null, alerts: null } }).fog.level, 'unknown');
 });
 
+test('SAFETY: unreadable fog data can never stop the email from being built', () => {
+  // The email carries the boat restrictions. Fog is a heads-up; a surprise in
+  // its data must degrade to "unavailable", never throw out of computeDigest.
+  const bomb = new Proxy({}, { get() { throw new Error('boom'); } });
+  for (const inputs of [{ response: bomb, alerts: null }, { response: null, alerts: bomb },
+                        { response: { hourly: bomb }, alerts: { features: bomb } }]) {
+    let d;
+    assert.doesNotThrow(() => { d = fogDigest('likely_2026_10_02', { inputs }); });
+    assert.strictEqual(d.fog.level, 'unknown');
+    const html = M.renderEmailHtml(d);
+    assert.ok(/Fog outlook unavailable/.test(html));
+    assert.ok(/Allowed/.test(html), 'boat restrictions still rendered');
+    assert.ok(!/FOG RISK/.test(M.renderSubject(d)));
+  }
+});
+
 test('SAFETY: fog never changes which boats are allowed', () => {
   for (const [tempF, level] of [[72, 3], [55, 9.5], [45, 10.4], [35, 5]]) {
     const base = { raw: makeRaw(tempF, etDate('2026-10-02', 1)), history: historyAtTemp(tempF) };
@@ -1892,7 +1919,7 @@ function loadSite(nowMs) {
     Intl, Date: FixedDate, Math, JSON, isNaN, parseInt, parseFloat, Number, Array, Object, String,
   };
   const ctx = vmT.createContext(sandbox);
-  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, renderFogOutlook, renderFloodGrid };',
+  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, renderFogOutlook, renderFloodGrid, renderDashboard };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -1966,6 +1993,48 @@ test('site: after 10 AM the outlook is about tomorrow morning', () => {
     fogAlerts: null, lastTempF: 65.7 });
   site.renderFogOutlook();
   assert.ok(/Fog likely at dawn tomorrow morning/.test(els['fog-outlook'].innerHTML), els['fog-outlook'].innerHTML);
+});
+
+// Forecast data that throws the moment anything reads it - standing in for any
+// shape of surprise the API, a proxy or a browser extension might produce.
+const EXPLODING = new Proxy({}, { get() { throw new Error('boom: unreadable forecast'); } });
+
+test('SAFETY site: a fog failure cannot suppress the stale-data or offline-sensor warnings', () => {
+  // renderFogOutlook used to run BEFORE updateFreshnessWarnings() and the
+  // offline banner, so an exception in it would have skipped both.
+  const now = Date.now();
+  const { site, els } = loadSite(now);
+  site.state.allHistory = historyAtTemp(72);
+  Object.assign(site.state, { fogLoaded: true, fogResponse: EXPLODING, fogAlerts: null });
+  const fourHoursAgo = new Date(now - 4 * 3600000);
+  const tempC = (72 - 32) * 5 / 9;
+  assert.doesNotThrow(() => site.renderDashboard(tempC, makeRaw(72, fourHoursAgo)));
+  assert.strictEqual(els['warn-offline'].style.display, 'flex', 'offline banner must still appear');
+  assert.strictEqual(els['status-text'].textContent, 'Sensor offline');
+  assert.ok(/Fog outlook unavailable/.test(els['fog-outlook'].innerHTML), 'fog failure must be stated');
+});
+
+test('site: renderFogOutlook never throws, whatever the forecast data looks like', () => {
+  const { site, els } = loadSite(etDate('2026-10-02', 5).getTime());
+  for (const bad of [EXPLODING, { hourly: EXPLODING }, { hourly: { time: EXPLODING } }, 42, 'x', [], { hourly: [] }]) {
+    Object.assign(site.state, { fogLoaded: true, fogResponse: bad, fogAlerts: bad, lastTempF: 65 });
+    assert.doesNotThrow(() => site.renderFogOutlook());
+    assert.ok(/Fog outlook unavailable|Fog not indicated/.test(els['fog-outlook'].innerHTML),
+      els['fog-outlook'].innerHTML.slice(0, 120));
+    assert.strictEqual(els['warn-fog'].style.display, 'none', 'no banner from unreadable data');
+  }
+});
+
+test('site: footer status describes the sensor feed, never "Normal"', () => {
+  const now = Date.now();
+  const tempC = (72 - 32) * 5 / 9;
+  for (const [ageMin, expected] of [[1, 'Sensor live'], [44, 'Sensor live'], [60, 'Sensor delayed'],
+                                    [179, 'Sensor delayed'], [181, 'Sensor offline'], [3000, 'Sensor offline']]) {
+    const { site, els } = loadSite(now);
+    site.state.allHistory = historyAtTemp(72);
+    site.renderDashboard(tempC, makeRaw(72, new Date(now - ageMin * 60000)));
+    assert.strictEqual(els['status-text'].textContent, expected, `${ageMin} min old`);
+  }
 });
 
 test('site: the steam-fog check uses the river temperature once it arrives', () => {

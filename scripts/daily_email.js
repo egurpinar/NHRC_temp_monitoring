@@ -506,10 +506,19 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
 
   // Fog outlook for the coming dawn, with the website's own logic and words.
   // Missing inputs give 'unknown', which is stated, never silently dropped.
+  // Guarded: fog is a heads-up, and nothing in its data may ever stop the
+  // email that carries the boat restrictions from going out.
   const fogDay = logic.fogTarget(now);
-  const fogA = logic.assessFogRisk(fogInputs && fogInputs.response, fogDay.date, tempF,
-    fogInputs && fogInputs.alerts);
-  const fogWords = logic.fogText(fogA, fogDay.label);
+  let fogA, fogWords;
+  try {
+    fogA = logic.assessFogRisk(fogInputs && fogInputs.response, fogDay.date, tempF,
+      fogInputs && fogInputs.alerts);
+    fogWords = logic.fogText(fogA, fogDay.label);
+  } catch (e) {
+    console.error('Fog outlook failed; reporting it as unavailable:', e.message);
+    fogA = logic.assessFogRisk(null, fogDay.date, null, null);
+    fogWords = logic.fogText(fogA, fogDay.label);
+  }
   const fog = {
     level: fogA.level,
     advisory: fogA.advisory ? { event: fogA.advisory.event, until: fogA.advisory.until } : null,

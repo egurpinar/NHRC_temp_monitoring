@@ -755,12 +755,14 @@ function renderDashboard(tempC, raw) {
 
   updateStats();
 
-  document.getElementById('status-text').textContent = 'Normal';
+  // Footer status describes the SENSOR FEED, using the same thresholds as the
+  // Live/Delayed pill above and the offline banner below. It used to be a
+  // hardcoded "Normal", which read like a verdict on conditions and stayed
+  // "Normal" even while the offline banner was showing.
+  document.getElementById('status-text').textContent =
+    ageMs > 3 * 3600000 ? 'Sensor offline' : ageMs > 45 * 60000 ? 'Sensor delayed' : 'Sensor live';
 
   renderRowingStatus(tempF);
-  // The steam-fog check needs the water temperature, which can arrive after
-  // the fog forecast. Re-render so the outlook never sits on a stale answer.
-  renderFogOutlook();
   updateFreshnessWarnings();
   // Show/hide offline banner based on data age (3 hour threshold)
   // More reliable than Govee's online field which can lag after reconnection
@@ -769,6 +771,12 @@ function renderDashboard(tempC, raw) {
     const ageHrs = (Date.now() - fetchedAt.getTime()) / 3600000;
     offlineEl.style.display = (ageHrs > 3) ? 'flex' : 'none';
   }
+  // Last, after every safety warning above has run: the steam-fog check needs
+  // the water temperature, which can arrive after the fog forecast, so the
+  // outlook is re-rendered here. Placed at the end because it used to sit
+  // before updateFreshnessWarnings(), where any fog failure would have
+  // silently skipped the stale-data and offline-sensor warnings.
+  renderFogOutlook();
 }
 
 /* ── RANGE BUTTONS ── */
@@ -1766,8 +1774,17 @@ function renderFogOutlook() {
   // Water temperature arrives separately; renderDashboard calls this again
   // once it has, so the steam-fog check catches up.
   const water = fogNum(state.lastTempF) ? state.lastTempF : null;
-  const a = assessFogRisk(state.fogResponse, target.date, water, state.fogAlerts);
-  const t = fogText(a, target.label);
+  // Never throws. Any surprise in the forecast data becomes "unavailable" -
+  // stated, not silent - and cannot reach the code that called this.
+  let a, t;
+  try {
+    a = assessFogRisk(state.fogResponse, target.date, water, state.fogAlerts);
+    t = fogText(a, target.label);
+  } catch (e) {
+    console.warn('fog outlook failed:', e);
+    a = assessFogRisk(null, target.date, null, null);
+    t = fogText(a, target.label);
+  }
   const pill = { likely: 'Likely', possible: 'Possible', low: 'Not indicated', unknown: 'Unavailable' }[a.level];
   box.innerHTML = `
     <div class="fog-head"><span class="section-label" style="margin:0;">Fog outlook &mdash; dawn</span><span class="fog-pill ${a.level}">${pill}</span></div>
