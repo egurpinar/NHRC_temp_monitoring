@@ -9,10 +9,10 @@
  * TWO CAMERAS
  * -----------
  * The PRIMARY camera (RING_CAMERA_NAME, the hardwired "Dock Wired") is captured
- * every 15 minutes, around the clock. The BACKUP (RING_BACKUP_CAMERA_NAME, the
+ * every 5 minutes, around the clock. The BACKUP (RING_BACKUP_CAMERA_NAME, the
  * battery-powered "Downstream Lot") is never used routinely, to spare its
  * battery: only once the primary has missed BACKUP_AFTER_MISSES captures in a
- * row (two, ~30 minutes), and then only on its own battery-friendly daylight
+ * row (six, ~30 minutes), and then only on its own battery-friendly daylight
  * timetable (5am-4pm, every 30 minutes until 10am, then hourly). As soon as
  * the primary answers again the backup goes back to sleep. Each upload says
  * which camera and role it came from, so the website can label a backup view
@@ -65,7 +65,7 @@ const CONFIG = {
   // Ring camera names. The full name is matched first (case-insensitive), then
   // a unique part of a name; a part that matches several cameras is refused
   // rather than guessed, since a wrong guess could run the battery camera
-  // every 15 minutes.
+  // every 5 minutes.
   cameraName: process.env.RING_CAMERA_NAME || '',
   backupCameraName: process.env.RING_BACKUP_CAMERA_NAME || '',
 
@@ -74,8 +74,9 @@ const CONFIG = {
   uploadSecret: process.env.CAMERA_UPLOAD_SECRET || '',
 
   // The PRIMARY camera's timetable. The defaults suit a hardwired camera:
-  // every 15 minutes, around the clock (both window hours 0 = always).
-  intervalMinutes: Number(process.env.CAMERA_INTERVAL_MINUTES || 15),
+  // every 5 minutes, around the clock (both window hours 0 = always). Five is
+  // also the minimum the validator accepts.
+  intervalMinutes: Number(process.env.CAMERA_INTERVAL_MINUTES || 5),
 
   // Optional two-speed schedule: every CAMERA_INTERVAL_MINUTES until this
   // hour, then every CAMERA_SLOW_INTERVAL_MINUTES. Off when it is not after
@@ -89,11 +90,13 @@ const CONFIG = {
   activeEndHour: parseHourSetting(process.env.CAMERA_ACTIVE_END_HOUR, 0),
 
   // The BACKUP camera: battery-powered, so used only after the primary has
-  // missed this many captures in a row, and only on its own timetable - the
-  // battery-friendly one: daylight, every 30 minutes until 10am, then hourly.
-  // A night-time frame from an unlit river is dark anyway.
+  // missed this many captures in a row - six at the 5-minute rate, about half
+  // an hour, so a short Wi-Fi or Ring hiccup never wakes it - and only on its
+  // own timetable, the battery-friendly one: daylight, every 30 minutes until
+  // 10am, then hourly. A night-time frame from an unlit river is dark anyway.
+  // If CAMERA_INTERVAL_MINUTES changes, change this with it.
   backup: {
-    afterMisses: Number(process.env.BACKUP_AFTER_MISSES || 2),
+    afterMisses: Number(process.env.BACKUP_AFTER_MISSES || 6),
     intervalMinutes: Number(process.env.BACKUP_INTERVAL_MINUTES || 30),
     slowAfterHour: parseHourSetting(process.env.BACKUP_SLOW_AFTER_HOUR, 10),
     slowIntervalMinutes: Number(process.env.BACKUP_SLOW_INTERVAL_MINUTES || 60),
@@ -603,7 +606,7 @@ const cameraList = (cameras) => cameras.map(c => `"${c.name}"`).join(', ');
  * The camera a configured name refers to, or null when none does. The full
  * name wins (case-insensitive); otherwise a part of a name that matches exactly
  * one camera. A part matching several is an error, not a guess: "Dock" or
- * "Lot" could otherwise pick the battery camera and run it every 15 minutes.
+ * "Lot" could otherwise pick the battery camera and run it every 5 minutes.
  */
 function findCamera(cameras, name) {
   const want = String(name || '').trim().toLowerCase();
@@ -725,7 +728,7 @@ function describeWindow(cfg = CONFIG) {
     : formatHourSetting(cfg.activeStartHour) + '-' + formatHourSetting(cfg.activeEndHour) + ' ' + cfg.timeZone;
 }
 
-/** "every 15 min, around the clock" / "every 30 min until 10:00, then every 60 min, 5:00-16:00 ...". */
+/** "every 5 min, around the clock" / "every 30 min until 10:00, then every 60 min, 5:00-16:00 ...". */
 function describeTimetable(cfg = CONFIG) {
   const rate = describeSchedule(cfg).replace(/^Capturing /, '').replace(/\.$/, '');
   return `${rate}, ${describeWindow(cfg)}`;

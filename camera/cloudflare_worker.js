@@ -14,8 +14,8 @@
  * WHY NOT THE GITHUB REPO
  * -----------------------
  * NHRC_temp_monitoring is public and git history is permanent. Committing a
- * frame every 15 minutes would build an irreversible public archive of the
- * river — roughly 35,000 images a year that could never truly be deleted. R2
+ * frame every 5 minutes would build an irreversible public archive of the
+ * river — roughly 100,000 images a year that could never truly be deleted. R2
  * stores exactly one object, overwritten each time.
  *
  * ─── Deploy ──────────────────────────────────────────────────────────────────
@@ -40,9 +40,11 @@ const OBJECT_KEY = 'latest.jpg';
 // stale image is more dangerous than no image, because people trust a
 // photograph more than a number.
 //
-// primary - the hardwired dock camera, every 15 minutes around the clock: an
-//           hour is three missed captures plus slack. (After two misses the Pi
-//           switches to the backup in daylight, well inside this.)
+// primary - the hardwired dock camera, every 5 minutes around the clock. In
+//           daylight the Pi switches to the backup after six misses (about
+//           half an hour), well inside this hour; at night, when the backup
+//           sleeps, a dock photo up to an hour old is still shown - with the
+//           time it was taken - before the page says the camera is down.
 // backup  - the battery camera, every 30 minutes before 10am and hourly after:
 //           one missed afternoon capture already reaches 120 minutes, so 130
 //           tolerates exactly one miss with a little slack.

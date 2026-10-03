@@ -737,48 +737,49 @@ const between = (fromH, toH) => (at) => { const h = Number(nyClock(at).slice(0, 
 const DAY = '2026-08-15', NEXT = '2026-08-16';
 
 test('the defaults are the agreed schedule', () => {
-  assert.strictEqual(S.describeSchedule(dualCfg), 'Capturing every 15 min.');
+  assert.strictEqual(S.describeSchedule(dualCfg), 'Capturing every 5 min.');
   assert.strictEqual(S.describeWindow(dualCfg), 'around the clock');
   const b = S.backupConfig(dualCfg);
   assert.strictEqual(S.describeSchedule(b), 'Capturing every 30 min until 10:00, then every 60 min.');
   assert.strictEqual(S.describeWindow(b), '5:00-16:00 America/New_York');
-  assert.strictEqual(dualCfg.backup.afterMisses, 2);
+  assert.strictEqual(dualCfg.backup.afterMisses, 6, 'six misses at 5 minutes: the half hour agreed for the switch');
   assert.deepStrictEqual(S.validateConfig(dualCfg), []);
 });
 
-test('a normal day: the dock camera every 15 minutes, the battery camera never woken', async () => {
+test('a normal day: the dock camera every 5 minutes, the battery camera never woken', async () => {
   const r = await simulateDual(dualCfg, ny(DAY, 0, 0), ny(NEXT, 0, 0));
-  assert.strictEqual(r.primary.length, 96, '96 dock captures');
+  assert.strictEqual(r.primary.length, 288, '288 dock captures');
   assert.strictEqual(r.backup.length, 0, 'the battery camera must sleep');
-  assert.deepStrictEqual(r.primary.slice(0, 3).map(a => hhmm(a.at)), ['00:00', '00:15', '00:30']);
-  assert.strictEqual(hhmm(r.primary[95].at), '23:45');
+  assert.deepStrictEqual(r.primary.slice(0, 3).map(a => hhmm(a.at)), ['00:00', '00:05', '00:10']);
+  assert.strictEqual(hhmm(r.primary[287].at), '23:55');
 });
 
-test('one missed dock capture does not wake the battery camera', async () => {
-  const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 0), { primaryDown: between(9, 9.1) });
+test('up to 25 minutes of missed dock captures does not wake the battery camera', async () => {
+  // Five misses in a row (9:00 to 9:20), dock back at 9:25.
+  const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 0), { primaryDown: between(9, 9 + 25 / 60) });
+  assert.strictEqual(r.primary.filter(a => !a.ok).length, 5);
   assert.strictEqual(r.backup.length, 0);
-  assert.strictEqual(r.primary.filter(a => !a.ok).length, 1);
 });
 
-test('two misses in a row: the backup takes over, on its own timetable', async () => {
+test('six misses in a row (about half an hour): the backup takes over, on its own timetable', async () => {
   const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 5), { primaryDown: between(9, 12) });
-  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['09:15', '09:30', '10:00', '11:00'],
-    'second miss at 9:15, then the 9:30 slot, then hourly after 10');
-  assert.ok(r.primary.every(a => Number(nyClock(a.at).slice(3, 5)) % 15 === 0), 'the dock is still tried every 15 minutes');
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['09:25', '09:30', '10:00', '11:00'],
+    'sixth miss at 9:25, then the 9:30 slot, then hourly after 10');
+  assert.ok(r.primary.every(a => Number(nyClock(a.at).slice(3, 5)) % 5 === 0), 'the dock is still tried every 5 minutes');
   assert.ok(r.primary.filter(a => hhmm(a.at) === '12:00')[0].ok, 'and found again at 12:00');
 });
 
 test('the dock answering again sends the battery camera back to sleep', async () => {
   const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 16, 0), { primaryDown: between(9, 10) });
-  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['09:15', '09:30']);
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['09:25', '09:30']);
 });
 
-test('the miss count starts again after the dock answers: a later single miss does not wake the backup', async () => {
-  // Down 9:00-9:29 (two misses: backup at 9:15), fine from 9:30, then one
-  // failed capture at 11:00. That is one miss in a row, not three.
-  const down = (at) => between(9, 9.5)(at) || between(11, 11.1)(at);
+test('the miss count starts again after the dock answers: later short outages do not wake the backup', async () => {
+  // Down 9:00-9:34 (backup at 9:25 and 9:30), fine from 9:35, then five
+  // misses from 11:00. Counted from scratch that is five, under the six.
+  const down = (at) => between(9, 9 + 35 / 60)(at) || between(11, 11 + 25 / 60)(at);
   const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 0), { primaryDown: down });
-  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['09:15']);
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['09:25', '09:30']);
 });
 
 test('at night the battery camera stays asleep even with the dock down; it starts at 5:00', async () => {
@@ -792,7 +793,7 @@ test('a whole day with the dock down: the battery camera is woken 16 times, all 
   const r = await simulateDual(dualCfg, ny(DAY, 0, 0), ny(NEXT, 0, 0), { primaryDown: () => true });
   assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['05:00', '05:30', '06:00', '06:30', '07:00', '07:30', '08:00',
     '08:30', '09:00', '09:30', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00']);
-  assert.strictEqual(r.primary.length, 96, 'the dock is still tried every slot');
+  assert.strictEqual(r.primary.length, 288, 'the dock is still tried every slot');
 });
 
 test('a failed upload is not a camera outage: the battery camera is not woken', async () => {
@@ -803,7 +804,7 @@ test('a failed upload is not a camera outage: the battery camera is not woken', 
 test('if the backup fails too, each of its slots is tried once - no retry storm on a battery', async () => {
   const r = await simulateDual(dualCfg, ny(DAY, 8, 0), ny(DAY, 12, 5),
     { primaryDown: () => true, backupDown: () => true });
-  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['08:15', '08:30', '09:00', '09:30', '10:00', '11:00', '12:00']);
+  assert.deepStrictEqual(r.backup.map(a => hhmm(a.at)), ['08:25', '08:30', '09:00', '09:30', '10:00', '11:00', '12:00']);
 });
 
 test('without a backup camera, a dock outage is just a gap', async () => {
@@ -900,7 +901,7 @@ test('the service wires both cameras into the scheduler', () => {
 });
 
 test('the timetables read the way they are written', () => {
-  assert.strictEqual(S.describeTimetable(dualCfg), 'every 15 min, around the clock');
+  assert.strictEqual(S.describeTimetable(dualCfg), 'every 5 min, around the clock');
   assert.strictEqual(S.describeTimetable(S.backupConfig(dualCfg)),
     'every 30 min until 10:00, then every 60 min, 5:00-16:00 America/New_York');
 });
@@ -984,8 +985,8 @@ test('end to end: the running service uploads the dock camera, and leaves the ba
   const box = e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
   const r = await box.run([], {}, 1, 1500);
   assert.deepStrictEqual(r.uploads.map(u => u.role), ['primary'], r.out);
-  assert.ok(/Primary camera: "Dock Wired" — every 15 min, around the clock/.test(r.out), r.out);
-  assert.ok(/Backup camera: "Downstream Lot" — only after 2 missed primary captures in a row/.test(r.out));
+  assert.ok(/Primary camera: "Dock Wired" — every 5 min, around the clock/.test(r.out), r.out);
+  assert.ok(/Backup camera: "Downstream Lot" — only after 6 missed primary captures in a row/.test(r.out));
 });
 
 test('end to end: with the dock camera down, the running service switches to the backup', async () => {

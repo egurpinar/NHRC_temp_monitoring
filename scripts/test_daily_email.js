@@ -2186,7 +2186,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     // from the config it was built with.
     Chart: opts.Chart || function (ctx, cfg) { return { data: cfg && cfg.data, options: (cfg && cfg.options) || {}, destroy() {}, update() {} }; },
     moment: {},
-    setInterval() {}, setTimeout: opts.setTimeout || (() => 0), clearTimeout: opts.clearTimeout || (() => {}),
+    setInterval: opts.setInterval || (() => 0), setTimeout: opts.setTimeout || (() => 0), clearTimeout: opts.clearTimeout || (() => {}),
     AbortController: opts.AbortController,
     console: { log() {}, warn: (...a) => logged.push(['warn', ...a]), error: (...a) => logged.push(['error', ...a]) },
     URL: { createObjectURL() { const u = 'blob:fake-' + (++blobs.made); blobs.live.add(u); return u; },
@@ -2205,7 +2205,8 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData,' +
     ' loadData, loadHistory, refreshAll, loadFogOutlook, loadCameraSnapshot, historyNeedsRefresh, pickRiverLevel,' +
     ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraBackupAsleep,' +
-    ' cameraCaption, cameraMissingMessage, CAMERA_SNAPSHOT_URL, nearestReading, downloadCSV, withGapBreaks };',
+    ' cameraCaption, cameraMissingMessage, CAMERA_SNAPSHOT_URL, nearestReading, downloadCSV, withGapBreaks,' +
+    ' checkCameraForNewPhoto };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -2493,6 +2494,24 @@ test('clicking a range button updates the stats, not just the chart', () => {
   seven.handlers.click();
   assert.strictEqual(els['min-label'].textContent, 'Min (7 days)');
   assert.strictEqual(els['min-val'].textContent, '60.0°F');
+});
+
+test('the beta notice is gone from the top; the disclaimer sits at the bottom, out of the way', () => {
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8');
+  const markup = html.slice(0, html.indexOf('<script>')).replace(/<!--[\s\S]*?-->/g, '');
+  assert.ok(!/This website is in beta|Beta — data may not be accurate/.test(markup), 'no beta banner');
+  const dash = markup.indexOf('<div id="dashboard">'), summary = markup.indexOf('class="dash-top"');
+  const between = markup.slice(dash, summary);
+  assert.ok(!/guidance only|thermometer/.test(between), 'nothing standing between the top of the page and the summary');
+  const disc = markup.match(/<div id="site-disclaimer"[^>]*>([\s\S]*?)<\/div>/);
+  assert.ok(disc, 'the disclaimer exists');
+  const text = disc[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ');
+  assert.ok(/guidance only/.test(text) && /thermometer on the side of the dock at the boathouse/.test(text)
+    && /before making rowing decisions/.test(text), text);
+  assert.ok(markup.indexOf('id="site-disclaimer"') > markup.indexOf('Daily Conditions Email'), 'after the last card');
+  assert.ok(markup.indexOf('id="site-disclaimer"') > markup.lastIndexOf('</div>\n\n  <!-- FOOTER -->') ||
+    markup.indexOf('id="site-disclaimer"') > markup.indexOf('id="status-text"'), 'at the bottom, by the footer');
+  assert.ok(!/id="site-disclaimer"[^>]*display:\s*none/.test(markup), 'and visible');
 });
 
 test('the email sign-up box tells members about the fog outlook', () => {
@@ -3087,9 +3106,99 @@ test('camera: an unknown or missing role is never presented as the dock camera',
 test('camera: the title states the around-the-clock cadence, and no daylight window', () => {
   const { site, els } = loadSite(Date.now());
   site.loadCameraSnapshot();
-  assert.strictEqual(els['camera-title'].textContent, 'Boathouse Camera — Still Image, Updates every 15 min');
+  assert.strictEqual(els['camera-title'].textContent, 'Boathouse Camera — Still Image, Updates every 5 min');
   const html = fsT.readFileSync(INDEX_PATH, 'utf8');
   assert.ok(!/paused overnight|first photo of the day|returns at 5:00/.test(html), 'no leftovers from the daylight-only camera');
+});
+
+// A camera Worker whose photo changes when the test says so; HEAD and GET
+// requests are counted separately.
+function cameraWorker(clock) {
+  const w = { photoAt: clock() - 60000, role: 'primary', status: 200, heads: 0, gets: 0, headFails: false };
+  w.route = [camUrl, (url, opts) => {
+    const head = opts && opts.method === 'HEAD';
+    if (head) { w.heads++; if (w.headFails) return Promise.reject(new TypeError('CORS')); }
+    else w.gets++;
+    if (w.status !== 200) return reply({}, w.status);
+    return frameReply(new Date(w.photoAt).toUTCString(), w.role, w.role === 'backup' ? 'Downstream Lot' : 'Dock Wired');
+  }];
+  return w;
+}
+
+test('camera: every minute the page asks for a newer photo, and downloads only a changed one', async () => {
+  let t = etDate('2026-10-03', 9, 0, ).getTime() + 30000;
+  const w = cameraWorker(() => t);
+  w.photoAt = etDate('2026-10-03', 9, 0).getTime();
+  // With AbortController, as in every browser: the request deadline path is
+  // the one that must still send HEAD.
+  const { site, els } = loadSite(() => t, fakeNet([w.route]).fetch, { Image: imageThat(() => true), AbortController });
+  await site.loadCameraSnapshot();
+  assert.deepStrictEqual([w.gets, w.heads], [1, 0]);
+  assert.ok(/taken 9:00(\u202f| )AM EDT \(1 min ago\)/.test(els['camera-note'].textContent), els['camera-note'].textContent);
+  // Thirty minutes, a check each minute, a new photo every five.
+  for (let minute = 1; minute <= 30; minute++) {
+    t += 60000;
+    if (minute % 5 === 0) w.photoAt = t - 20000;   // the Pi uploads a little after each slot
+    await site.checkCameraForNewPhoto();
+  }
+  assert.strictEqual(w.heads, 30, 'one small check a minute');
+  assert.strictEqual(w.gets, 1 + 6, 'the photo itself only when it changed');
+  assert.ok(/\(0 min ago\)|just now/.test(els['camera-note'].textContent), els['camera-note'].textContent);
+  // A minute later, with no new photo, only the caption's age moves on.
+  t += 60000;
+  await site.checkCameraForNewPhoto();
+  assert.strictEqual(w.gets, 7);
+  assert.ok(/\(1 min ago\)/.test(els['camera-note'].textContent), els['camera-note'].textContent);
+});
+
+test('camera: the switch to the backup reaches the page at the next check', async () => {
+  let t = etDate('2026-10-03', 9, 30).getTime();
+  const w = cameraWorker(() => t);
+  const { site, els } = loadSite(() => t, fakeNet([w.route]).fetch, { Image: imageThat(() => true) });
+  await site.loadCameraSnapshot();
+  assert.strictEqual(els['camera-badge'].style.display, 'none');
+  w.role = 'backup'; w.photoAt = t + 30000; t += 60000;
+  await site.checkCameraForNewPhoto();
+  assert.strictEqual(els['camera-badge'].style.display, '', 'badge shown within the minute');
+  assert.ok(/^Backup view from the Downstream Lot camera/.test(els['camera-note'].textContent));
+});
+
+test('camera: a photo going stale is noticed at the next check, and its return too', async () => {
+  let t = etDate('2026-10-03', 12, 0).getTime();
+  const w = cameraWorker(() => t);
+  // The plain image route gets the same answer from the Worker as fetch does.
+  const { site, els } = loadSite(() => t, fakeNet([w.route]).fetch, { Image: imageThat((src) => /^blob:/.test(src) || w.status === 200) });
+  await site.loadCameraSnapshot();
+  w.status = 404; t += 60000;
+  await site.checkCameraForNewPhoto();
+  assert.ok(/could not be reached/.test(els['camera-note'].textContent), els['camera-note'].textContent);
+  const gets = w.gets;
+  t += 60000;
+  await site.checkCameraForNewPhoto();
+  assert.strictEqual(w.gets, gets, 'still stale: nothing to download');
+  w.status = 200; w.photoAt = t; t += 60000;
+  await site.checkCameraForNewPhoto();
+  assert.ok(/^View from the dock camera/.test(els['camera-note'].textContent), 'back as soon as there is a photo');
+});
+
+test('camera: with an older Worker that cannot be asked, the photo still refreshes every 5 minutes', async () => {
+  let t = etDate('2026-10-03', 12, 0).getTime();
+  const w = cameraWorker(() => t);
+  w.headFails = true;
+  const { site } = loadSite(() => t, fakeNet([w.route]).fetch, { Image: imageThat(() => true) });
+  await site.loadCameraSnapshot();
+  for (let minute = 1; minute <= 10; minute++) { t += 60000; await site.checkCameraForNewPhoto(); }
+  assert.strictEqual(w.gets, 3, 'at load, then after 5 and 10 minutes');
+});
+
+test('camera: the page runs the check every minute (not a full download every 5)', () => {
+  const intervals = [];
+  const { site, els } = loadSite(Date.now(), () => new Promise(() => {}),
+    { setInterval: (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; } });
+  els.__fire('window', 'DOMContentLoaded');
+  const cam = intervals.filter(i => i.fn === site.checkCameraForNewPhoto);
+  assert.deepStrictEqual(cam.map(i => i.ms), [60000]);
+  assert.ok(!intervals.some(i => i.fn && i.fn.name === 'loadCameraSnapshot'), 'no blind 5-minute re-download');
 });
 
 test('camera: each new photo releases the previous one\'s memory', async () => {

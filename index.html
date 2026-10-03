@@ -252,11 +252,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
   <div id="dashboard">
 
-    <div style="display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;background:rgba(26,111,181,.1);border:1px solid rgba(26,111,181,.3);color:#5ba4e0;">
-      <span style="width:10px;height:10px;border-radius:50%;background:#5ba4e0;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-      <div><strong style="display:block;margin-bottom:2px;">Beta — data may not be accurate</strong>This website is in beta. Temperature readings are provided for guidance only. Please verify against the thermometer on the side of the dock at the boathouse before making rowing decisions.</div>
-    </div>
-
+    <!-- The standing disclaimer used to be a banner here, above everything, and
+         pushed the Conditions Summary off the first screen of a phone. It now
+         sits at the bottom of the page (#site-disclaimer). The banners left up
+         here appear only when there is something to warn about. -->
 
     <!-- Fog: shown only when fog is likely at dawn or an NWS fog advisory is in
          effect. Awareness only - fog never changes which boats are allowed. -->
@@ -463,6 +462,13 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     </div>
   </div>
 
+  <!-- Outside #dashboard, so it shows even when the data could not load. -->
+  <div id="site-disclaimer" style="font-size:.74rem;color:var(--muted);line-height:1.6;padding:12px 16px;border:1px solid rgba(255,255,255,.08);border-radius:12px;margin-bottom:16px;">
+    <strong style="color:var(--white);">Disclaimer:</strong> The information on this page is provided for guidance only
+    and may be inaccurate or out of date. Please verify the water temperature against the thermometer on the side of
+    the dock at the boathouse, and judge conditions yourself, before making rowing decisions.
+  </div>
+
   <div style="margin-top:40px;padding-top:20px;border-top:1px solid rgba(255,209,102,0.15);">
     <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;">
       <a href="https://github.com/egurpinar/NHRC_temp_monitoring" target="_blank" style="display:inline-flex;align-items:center;gap:8px;text-decoration:none;color:var(--muted);font-size:0.72rem;">
@@ -515,20 +521,27 @@ const ZONE_OVERRIDE = null;
 // custom domains require the zone to be hosted on Cloudflare.)
 const CAMERA_SNAPSHOT_URL = 'https://nhrc-camera.gurpinar-emre.workers.dev/latest.jpg';
 
-// How often the page re-fetches the snapshot, in minutes. The camera itself
-// decides how often a new image is produced; this only controls the browser.
+// How the page keeps the photo current. Every CAMERA_CHECK_SECONDS it asks the
+// Worker whether a newer photo exists - a HEAD request, a few hundred bytes -
+// and downloads the photo only when it has changed. Downloading it every
+// minute instead would cost each open phone several MB an hour; every 5
+// minutes, as before, would often show a photo ten minutes old now that one
+// is taken every five. If the check cannot be made (an older Worker, a
+// blocked request), the photo is re-downloaded every CAMERA_REFRESH_MINUTES.
+const CAMERA_CHECK_SECONDS = 60;
 const CAMERA_REFRESH_MINUTES = 5;
 
 // TWO CAMERAS, ONE PHOTO. The Pi (camera/snapshot_service.js) captures the
-// hardwired dock camera ("Dock Wired") every 15 minutes around the clock. The
+// hardwired dock camera ("Dock Wired") every 5 minutes around the clock. The
 // battery-powered "Downstream Lot" camera is a backup only: used once the dock
-// camera has missed two captures in a row, and then only 5am-4pm, every 30-60
-// minutes, to spare its battery. Each photo says which camera took it.
+// camera has been failing for about half an hour (six missed captures), and
+// then only 5am-4pm, every 30-60 minutes, to spare its battery. Each photo says
+// which camera took it.
 //
 // These describe the Pi's settings so the page can explain itself; they do not
 // control the cameras. If the Pi's settings change (CAMERA_INTERVAL_MINUTES,
 // BACKUP_ACTIVE_START_HOUR / _END_HOUR in /opt/nhrc-camera/env), change these.
-const CAMERA_CADENCE_LABEL = 'every 15 min';
+const CAMERA_CADENCE_LABEL = 'every 5 min';
 const CAMERA_BACKUP_START_HOUR = 5;
 const CAMERA_BACKUP_END_HOUR = 16;
 const CAMERA_BACKUP_WINDOW_LABEL = '5am–4pm';
@@ -537,6 +550,47 @@ const CAMERA_LABELS = { primary: 'the dock camera', backup: 'the Downstream Lot 
 
 function loadCameraSnapshot() {
   return once('camera', loadCameraSnapshotNow);
+}
+
+let cameraShown = null;   // { takenAt, role } of the photo on screen; null when none
+let cameraLoadedAt = 0;   // when the photo was last downloaded (ms)
+
+function cameraUrl() {
+  // Cache-busting: without this, browsers and CDNs happily serve a stale
+  // frame for hours, which on a conditions page is worse than showing nothing.
+  return CAMERA_SNAPSHOT_URL + (CAMERA_SNAPSHOT_URL.includes('?') ? '&' : '?') + '_=' + Date.now();
+}
+
+/**
+ * Runs every CAMERA_CHECK_SECONDS: downloads the photo only if the Worker has
+ * a different one, and otherwise keeps the caption's "N min ago" current.
+ */
+function checkCameraForNewPhoto() {
+  return once('camera-check', async () => {
+    if (!CAMERA_SNAPSHOT_URL) return;
+    // The fallback when the Worker cannot be asked: a plain periodic reload.
+    const due = Date.now() - cameraLoadedAt >= CAMERA_REFRESH_MINUTES * 60_000;
+    let changed = due;
+    try {
+      const res = await fetchWithTimeout(cameraUrl(), FETCH_TIMEOUT_MS, { method: 'HEAD' });
+      const lm = Date.parse((res.headers && typeof res.headers.get === 'function' && res.headers.get('Last-Modified')) || '');
+      if (res.ok) {
+        if (!cameraShown) changed = true;                 // a photo is available again
+        else if (cameraShown.takenAt !== null && Number.isFinite(lm)) changed = lm !== cameraShown.takenAt;
+        // otherwise there is no time to compare: keep the periodic decision
+      } else {
+        changed = cameraShown !== null || due;            // gone stale: reload to say why
+      }
+    } catch (e) {
+      // No answer to the check (an older Worker without CORS, a dropped
+      // request): rely on the periodic reload.
+    }
+    if (changed) return loadCameraSnapshot();
+    const note = document.getElementById('camera-note');
+    if (note && cameraShown && cameraShown.takenAt !== null) {
+      note.textContent = cameraCaption(cameraShown.takenAt, cameraShown.role);
+    }
+  });
 }
 
 async function loadCameraSnapshotNow() {
@@ -551,9 +605,8 @@ async function loadCameraSnapshotNow() {
   // No source configured yet — leave the card hidden entirely.
   if (!CAMERA_SNAPSHOT_URL) return;
 
-  // Cache-busting: without this, browsers and CDNs happily serve a stale
-  // frame for hours, which on a conditions page is worse than showing nothing.
-  const bust = CAMERA_SNAPSHOT_URL + (CAMERA_SNAPSHOT_URL.includes('?') ? '&' : '?') + '_=' + Date.now();
+  cameraLoadedAt = Date.now();
+  const bust = cameraUrl();
 
   // Fetched rather than handed straight to an <img>, because only a fetch can
   // read the Worker's headers: when the photo was TAKEN (Last-Modified) and by
@@ -593,6 +646,7 @@ function showCameraFrame(frame, card, img, note) {
       if (img.parentElement) img.parentElement.style.display = '';
       card.style.display = '';
       if (note) note.textContent = cameraCaption(frame.takenAt, frame.role);
+      cameraShown = { takenAt: frame.takenAt, role: frame.role };
       if (badge) {
         badge.textContent = frame.role === 'backup' ? 'Backup view — Downstream Lot' : '';
         badge.style.display = frame.role === 'backup' ? '' : 'none';
@@ -609,6 +663,7 @@ function showCameraFrame(frame, card, img, note) {
       if (badge) badge.style.display = 'none';
       card.style.display = '';
       if (note) note.textContent = cameraMissingMessage(new Date());
+      cameraShown = null;
       done();
     };
     probe.src = frame.src;
@@ -699,7 +754,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // covers two days, and loadData re-renders the outlook every minute.)
   setInterval(loadFogOutlook, 1_800_000);
   setInterval(loadRiverData, 900_000); // refresh river every 15 min
-  setInterval(loadCameraSnapshot, CAMERA_REFRESH_MINUTES * 60_000);
+  setInterval(checkCameraForNewPhoto, CAMERA_CHECK_SECONDS * 1000);
 
   // Phones freeze background tabs. Someone who left this page open last night
   // and comes back at 5 AM would otherwise see last night's weather, river and
@@ -731,11 +786,11 @@ function refreshAll() {
  * indefinitely, and hold its loader's in-flight flag so no refresh ever ran.
  */
 const FETCH_TIMEOUT_MS = 20_000;
-function fetchWithTimeout(url, ms = FETCH_TIMEOUT_MS) {
-  if (typeof AbortController === 'undefined') return fetch(url);
+function fetchWithTimeout(url, ms = FETCH_TIMEOUT_MS, init = {}) {
+  if (typeof AbortController === 'undefined') return fetch(url, init);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
-  return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+  return fetch(url, Object.assign({}, init, { signal: ctrl.signal })).finally(() => clearTimeout(timer));
 }
 
 /**

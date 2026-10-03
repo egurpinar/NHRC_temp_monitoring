@@ -5,8 +5,8 @@ the time it was taken and which camera took it. Two Ring cameras:
 
 | Camera | Power | Role | When it is captured |
 |---|---|---|---|
-| **Dock Wired** | Hardwired | Primary | Every 15 minutes, around the clock |
-| **Downstream Lot** | Battery + solar | Backup | Only after the dock camera has missed **two captures in a row**; then 5am-4pm, every 30 minutes until 10am and hourly after. Back to sleep as soon as the dock camera answers |
+| **Dock Wired** | Hardwired | Primary | Every 5 minutes, around the clock |
+| **Downstream Lot** | Battery + solar | Backup | Only after the dock camera has missed **six captures in a row** (about half an hour); then 5am-4pm, every 30 minutes until 10am and hourly after. Back to sleep as soon as the dock camera answers |
 
 The backup is never woken while the dock camera is answering, to spare its
 battery. When the website shows a backup photo it says so, on the photo and in
@@ -31,8 +31,8 @@ Committee in October 2026, with the Downstream Lot owner's permission. Re-check
 whenever a camera is moved or replaced.
 
 **Never commit snapshots to this repository.** It is public and git history is
-permanent: a frame every 15 minutes would build an irreversible public archive
-of tens of thousands of images a year. R2 holds exactly one object, overwritten
+permanent: a frame every 5 minutes would build an irreversible public archive
+of about 100,000 images a year. R2 holds exactly one object, overwritten
 each capture.
 
 ## Why a service and not a cron job
@@ -194,11 +194,11 @@ RING_CAMERA_NAME="Dock Wired"
 RING_BACKUP_CAMERA_NAME="Downstream Lot"
 CAMERA_UPLOAD_URL=https://nhrc-camera.YOUR-ACCOUNT.workers.dev/latest.jpg
 CAMERA_UPLOAD_SECRET=the-same-secret-as-the-worker
-CAMERA_INTERVAL_MINUTES=15
+CAMERA_INTERVAL_MINUTES=5
 CAMERA_ACTIVE_START_HOUR=0
 CAMERA_ACTIVE_END_HOUR=0
 CAMERA_SLOW_AFTER_HOUR=0
-BACKUP_AFTER_MISSES=2
+BACKUP_AFTER_MISSES=6
 BACKUP_INTERVAL_MINUTES=30
 BACKUP_SLOW_AFTER_HOUR=10
 BACKUP_SLOW_INTERVAL_MINUTES=60
@@ -310,13 +310,17 @@ const CAMERA_SNAPSHOT_URL = 'https://nhrc-camera.YOUR-ACCOUNT.workers.dev/latest
 ```
 
 The card never shows a broken or badly stale image. The Worker refuses a dock
-frame over an hour old (four missed captures) and a backup frame over 130
+frame over an hour old (twelve missed captures) and a backup frame over 130
 minutes old (one missed hourly capture). The caption gives the time the photo
 was taken and which camera took it, read from the Worker's `Last-Modified`,
 `X-Camera-Role` and `X-Camera-Name` headers; a backup photo is also badged on
 the image. With no photo the card says why: at night that the dock camera is not
 responding and the backup only runs 5am-4pm, by day that the cameras could not
 be reached.
+
+The page asks the Worker every minute whether there is a newer photo (a small
+HEAD request) and downloads the photo only when it has changed, so a new photo
+appears within about a minute without every open phone re-downloading it.
 
 The page describes the Pi's settings in a few constants next to
 `CAMERA_SNAPSHOT_URL` (`CAMERA_CADENCE_LABEL`, `CAMERA_BACKUP_START_HOUR` /
@@ -331,10 +335,10 @@ settings change.
 |---|---|---|
 | `RING_CAMERA_NAME` | — | The primary (dock) camera. May be omitted only if the account has a single camera |
 | `RING_BACKUP_CAMERA_NAME` | — | The backup camera. Omit to run without one |
-| `CAMERA_INTERVAL_MINUTES` | 15 | Primary. Minimum 5 |
+| `CAMERA_INTERVAL_MINUTES` | 5 | Primary. Minimum 5 |
 | `CAMERA_ACTIVE_START_HOUR` / `_END_HOUR` | 0 / 0 | Primary window, boathouse local time. Both `0` means around the clock |
 | `CAMERA_SLOW_AFTER_HOUR` / `CAMERA_SLOW_INTERVAL_MINUTES` | 0 / 60 | Optional slower primary rate after that hour; off when not after the window start |
-| `BACKUP_AFTER_MISSES` | 2 | Primary captures missed in a row before the backup is used |
+| `BACKUP_AFTER_MISSES` | 6 | Primary captures missed in a row before the backup is used: six at 5 minutes is about half an hour. Change it with `CAMERA_INTERVAL_MINUTES` |
 | `BACKUP_INTERVAL_MINUTES` | 30 | Backup rate until `BACKUP_SLOW_AFTER_HOUR` |
 | `BACKUP_SLOW_AFTER_HOUR` / `BACKUP_SLOW_INTERVAL_MINUTES` | 10 / 60 | Backup rate after that hour. Must stay under the Worker's backup limit (130 min) |
 | `BACKUP_ACTIVE_START_HOUR` / `_END_HOUR` | 5 / 16 | Backup window. Night frames are dark and still cost battery |
@@ -344,16 +348,16 @@ settings change.
 ## The timetable
 
 Captures happen on fixed slots counted from the window start. The dock camera:
-every 15 minutes from midnight, 96 a day. The backup, when it is in use: its own
+every 5 minutes from midnight, 288 a day. The backup, when it is in use: its own
 slots, 5:00, 5:30, ... 9:30, then 10:00, 11:00, ... 15:00 - at most 16 a day,
 and none at all on a day the dock camera keeps answering.
 
 How the switch works, slot by slot:
 
-- every 15 minutes the dock camera is tried first;
+- every 5 minutes the dock camera is tried first;
 - a failed **capture** counts as a miss; a failed **upload** does not (the
   camera answered, and the backup's frame would fail to upload the same way);
-- from the second miss in a row, the backup is captured once per backup slot,
+- from the sixth miss in a row, the backup is captured once per backup slot,
   only inside its window;
 - the first dock capture that works resets the count, and the backup goes back
   to sleep. The journal logs both switches.
@@ -386,7 +390,7 @@ reached. Now:
    in, they would run the dock camera on the battery schedule.
 4. **Update the service file** as below, and restart.
 5. Check: `journalctl -u nhrc-camera -n 20 --no-pager` lists the cameras and
-   both timetables, and `/status` shows `"role": "primary"` within 15 minutes.
+   both timetables, and `/status` shows `"role": "primary"` within 5 minutes.
 
 After a change to `snapshot_service.js` is merged to `main`:
 
@@ -535,7 +539,7 @@ Being explicit, since these are real:
 Exactly one object exists at any time, overwritten every cycle. Nothing is
 archived, nothing enters git, and Cloudflare access logs are not enabled by
 default. If the committee wants a formal retention answer: *the current frame
-only, replaced at each capture (every 15 minutes), never stored historically.*
+only, replaced at each capture (every 5 minutes), never stored historically.*
 
 ---
 
