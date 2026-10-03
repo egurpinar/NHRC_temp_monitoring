@@ -236,10 +236,15 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     <p style="font-family:var(--fsans);font-size:.8rem;color:var(--muted);">Loading water temperature…</p>
   </div>
 
+  <!-- Shown only when the very first load fails. Once the page has data, a
+       failed refresh keeps the last reading on screen instead (see loadData).
+       Written for members: it used to give repository instructions. -->
   <div id="error-view">
-    <h2>No data yet</h2>
-    <p>The GitHub Actions workflow hasn't run yet, or encountered an error.<br/><br/>
-    Go to your repo → <code>Actions</code> tab → <code>Fetch Govee Temperature</code> → <code>Run workflow</code>.</p>
+    <h2>Water temperature unavailable</h2>
+    <p>The latest sensor reading could not be loaded. Check your connection, then
+    <button class="rb" onclick="refreshAll()" style="padding:4px 10px;">Try again</button><br/><br/>
+    The page also retries on its own every minute. If this persists, the data feed may be down &mdash;
+    check the thermometer on the dock before making rowing decisions.</p>
   </div>
 
   <div id="dashboard">
@@ -277,7 +282,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       </div>
       <div class="dash-top-btns">
         <div id="status-pill" class="pill pill-ok"><span class="pill-dot"></span><span id="pill-text">Live</span></div>
-        <button class="rb" onclick="loadData()" style="padding:5px 12px;">Refresh</button>
+        <button class="rb" onclick="refreshAll()" style="padding:5px 12px;">Refresh</button>
       </div>
     </div>
 
@@ -623,15 +628,17 @@ const state = {
   fogLoaded: false,   // true once loadFogOutlook() has finished, even if both sources failed
   fogResponse: null,  // Open-Meteo multi-model forecast, or null if it could not be fetched
   fogAlerts: null,    // NWS active alerts for the boathouse point, or null
+  lastRaw: null,      // the last data.json that rendered, kept for failed refreshes
+  lastTempC: null,
+  dataRefreshFailed: false, // the latest data.json refresh failed; the last reading is still shown
+  historyFetchedAt: 0,      // when history.json was last requested (ms)
+  riverEstimateTs: null,    // time of the forecast point used when riverLevelIsEstimate
+  inFlight: {},             // loader name -> true while its request is outstanding
 };
 let chart = null;
 
 window.addEventListener('DOMContentLoaded', () => {
-  loadData();
-  loadWeather();
-  loadRiverData();
-  loadCameraSnapshot();
-  loadFogOutlook();
+  refreshAll();
   setInterval(loadData, 60_000);
   setInterval(loadWeather, 600_000);
   // Thirty minutes: the models update hourly at most. (The switch from "this
@@ -640,35 +647,118 @@ window.addEventListener('DOMContentLoaded', () => {
   setInterval(loadFogOutlook, 1_800_000);
   setInterval(loadRiverData, 900_000); // refresh river every 15 min
   setInterval(loadCameraSnapshot, CAMERA_REFRESH_MINUTES * 60_000);
+
+  // Phones freeze background tabs. Someone who left this page open last night
+  // and comes back at 5 AM would otherwise see last night's weather, river and
+  // camera until each timer next fired - up to half an hour for the fog
+  // outlook. Coming back after more than a minute away refreshes everything.
+  let hiddenAt = null;
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+    if (hiddenAt !== null && Date.now() - hiddenAt > 60_000) refreshAll();
+    hiddenAt = null;
+  });
+  // Restored from the back/forward cache (iOS Safari does this a lot): the
+  // page reappears exactly as it was left, however long ago that was.
+  window.addEventListener('pageshow', (e) => { if (e.persisted) refreshAll(); });
 });
 
-async function loadData() {
-  try {
-    const res = await fetch(`data.json?_=${Date.now()}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const raw = await res.json();
-    if (raw.error) { showError(); return; }
-    const tempC = extractTemp(raw);
-    if (tempC === null) { showError(); return; }
-    // Await history BEFORE rendering so rowing status has full history available.
-    // Wrapped in its own try/catch so any history.json error (404, parse, timeout)
-    // never blocks or crashes the main temperature display.
-    try { await loadHistory(); } catch(e) { console.warn('loadHistory failed:', e); }
-    renderDashboard(tempC, raw);
-  } catch(e) { console.error(e); showError(); }
+/** Everything at once: page load, the Refresh button, returning to the tab. */
+function refreshAll() {
+  loadData();
+  loadWeather();
+  loadRiverData();
+  loadCameraSnapshot();
+  loadFogOutlook();
+}
+
+/**
+ * fetch() with a deadline. A request that never answers - a captive portal, one
+ * bar of signal at the boathouse - would otherwise leave a card on "Loading…"
+ * indefinitely, and hold its loader's in-flight flag so no refresh ever ran.
+ */
+const FETCH_TIMEOUT_MS = 20_000;
+function fetchWithTimeout(url, ms = FETCH_TIMEOUT_MS) {
+  if (typeof AbortController === 'undefined') return fetch(url);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Runs an async loader unless the previous call is still outstanding, so a
+ * slow network cannot pile up requests whose answers then arrive - and render -
+ * out of order.
+ */
+async function once(name, fn) {
+  if (state.inFlight[name]) return;
+  state.inFlight[name] = true;
+  try { return await fn(); } finally { state.inFlight[name] = false; }
+}
+
+function loadData() {
+  return once('data', async () => {
+    try {
+      const res = await fetchWithTimeout(`data.json?_=${Date.now()}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const raw = await res.json();
+      if (!raw || raw.error) throw new Error('data.json reports no reading');
+      const tempC = extractTemp(raw);
+      if (tempC === null) throw new Error('data.json has no temperature');
+      // History BEFORE rendering, so the rowing rules have it - but only when
+      // there is a reading it does not have yet. It used to be downloaded in
+      // full every minute (hundreds of KB, growing every day) on every open
+      // tab, for a file that changes every 15 minutes. Its own try/catch: a
+      // history problem must never block the temperature display.
+      if (historyNeedsRefresh(raw)) {
+        try { await loadHistory(); } catch (e) { console.warn('loadHistory failed:', e); }
+      }
+      state.lastRaw = raw;
+      state.lastTempC = tempC;
+      state.dataRefreshFailed = false;
+      renderDashboard(tempC, raw);
+    } catch (e) {
+      console.error('data.json:', e);
+      // Once the page has a reading, a failed refresh - one dropped request on
+      // a phone at the river - must not replace the whole page with an error,
+      // as it used to. Keep the last reading on screen and re-render it, so
+      // its age keeps counting: "Delayed" and the offline banner still appear
+      // when they should. Only a failed FIRST load shows the error view.
+      if (state.lastRaw) {
+        state.dataRefreshFailed = true;
+        try { renderDashboard(state.lastTempC, state.lastRaw); } catch (e2) { console.error(e2); }
+      } else {
+        showError();
+      }
+    }
+  });
+}
+
+// history.json gets the same timestamp as data.json's fetchedAt when a reading
+// is recorded, so "behind" is exact. While it lags (a failed write, a slow
+// deploy) it is retried, but no more often than this.
+const HISTORY_RETRY_MS = 2 * 60_000;
+function historyNeedsRefresh(raw) {
+  if (Date.now() - state.historyFetchedAt < HISTORY_RETRY_MS) return false;
+  if (!state.allHistory.length) return true;
+  const fetchedTs = Date.parse(raw && raw.fetchedAt);
+  if (!Number.isFinite(fetchedTs)) return true;
+  return state.allHistory[state.allHistory.length - 1].ts < fetchedTs - 1000;
 }
 
 async function loadHistory() {
+  state.historyFetchedAt = Date.now();
   try {
-    const res = await fetch(`history.json?_=${Date.now()}`);
+    const res = await fetchWithTimeout(`history.json?_=${Date.now()}`);
     if (!res.ok) return;
     const hist = await res.json();
     if (!Array.isArray(hist) || hist.length === 0) return;
+    // parseFloat, not the raw value: a reading stored as a string would
+    // otherwise survive the NaN check and break every .toFixed() downstream.
     state.allHistory = hist.map(h => ({
       ts: new Date(h.ts).getTime(),
-      tempF: h.tempF != null ? h.tempF : Math.round((h.tempC * 9/5 + 32) * 10) / 10
-    })).filter(h => !isNaN(h.ts) && !isNaN(h.tempF)).sort((a,b) => a.ts - b.ts);
-    updateChart();
+      tempF: h.tempF != null ? parseFloat(h.tempF) : Math.round((parseFloat(h.tempC) * 9/5 + 32) * 10) / 10
+    })).filter(h => Number.isFinite(h.ts) && Number.isFinite(h.tempF)).sort((a,b) => a.ts - b.ts);
     updateInfoBar();
     updateFreshnessWarnings();
     updateStats();
@@ -676,6 +766,9 @@ async function loadHistory() {
     // This covers the case where loadHistory is called independently
     // (e.g. future background refreshes) after renderDashboard already ran.
     if (state.lastTempF !== null) renderRowingStatus(state.lastTempF);
+    // Last: the chart depends on a library from a CDN, and nothing above may
+    // wait on it (renderChartData also guards itself).
+    updateChart();
   } catch(e) { console.error('history.json:', e); }
 }
 
@@ -806,8 +899,11 @@ function renderDashboard(tempC, raw) {
   document.getElementById('data-age').textContent = ageMins<2 ? 'Just now' : `${ageMins} min ago`;
 
   const pill = document.getElementById('status-pill');
-  if (ageMs > 45*60000) { pill.className='pill pill-warn'; document.getElementById('pill-text').textContent='Delayed'; }
-  else                  { pill.className='pill pill-ok';   document.getElementById('pill-text').textContent='Live'; }
+  // A failed refresh says so: "Live" would claim the page is up to date when it
+  // could not check.
+  if (state.dataRefreshFailed) { pill.className='pill pill-warn'; document.getElementById('pill-text').textContent='Reconnecting…'; }
+  else if (ageMs > 45*60000)   { pill.className='pill pill-warn'; document.getElementById('pill-text').textContent='Delayed'; }
+  else                         { pill.className='pill pill-ok';   document.getElementById('pill-text').textContent='Live'; }
 
   updateStats();
 
@@ -841,8 +937,8 @@ document.querySelectorAll('#range-btns .rb:not(.rb-csv)').forEach(btn => {
     document.querySelectorAll('#range-btns .rb').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active');
     state.currentRange = parseInt(btn.dataset.d);
+    updateStats();   // first: it needs no chart library
     updateChart();
-    updateStats();
   });
 });
 
@@ -972,8 +1068,24 @@ function renderChartData(subset) {
   singleMsg.style.display = 'none';
   chartWrap.style.display = 'block';
 
-  if (!chart) initChart();
+  // Chart.js and its date adapter come from a CDN. If either fails to load,
+  // say so in place of the chart rather than throwing into whoever called
+  // this - the history loader and the range buttons both do.
+  if (!chart) {
+    try { initChart(); }
+    catch (e) {
+      console.warn('temperature chart unavailable:', e);
+      chart = null;
+      singleMsg.style.display = 'block';
+      chartWrap.style.display = 'none';
+      singleMsg.innerHTML = '<span>Chart unavailable &mdash; the charting library did not load. The readings and rules on this page are unaffected.</span>';
+      return;
+    }
+  }
 
+  // Everything below touches the library's objects, so it is guarded too: a
+  // partial or different Chart.js build must not break the callers either.
+  try {
   const now = Date.now();
 
   // For preset ranges: fix x-axis to the full window so data fills in from right
@@ -994,7 +1106,9 @@ function renderChartData(subset) {
   }
 
   chart.data.datasets[0].data = withGapBreaks(subset.map(h=>({x:h.ts,y:h.tempF})));
+  // A missing date adapter only surfaces here, on the first update.
   chart.update('none');
+  } catch (e) { console.warn('temperature chart update failed:', e); }
 }
 
 function updateChart() {
@@ -1471,6 +1585,8 @@ const WMO_ICONS = {
   80:'&#127782;',81:'&#127783;',82:'&#9928;',
   85:'&#127784;',86:'&#10052;',95:'&#9928;',96:'&#9928;',99:'&#9928;',
 };
+// A real number from the weather API - not null, which Math.round() turns into 0.
+function wxNum(v) { return typeof v === 'number' && Number.isFinite(v); }
 function windDirLabel(deg) {
   const dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
   return dirs[Math.round(deg / 22.5) % 16];
@@ -1482,7 +1598,10 @@ function rowingWeatherAlert(windMph, gustMph, code) {
   if (windMph > 12)                  return { cls:'warn',   text:'Moderate wind — monitor conditions' };
   return null;
 }
-async function loadWeather() {
+function loadWeather() {
+  return once('weather', loadWeatherNow);
+}
+async function loadWeatherNow() {
   try {
     // Coordinates: 407 Roosevelt Drive, Oxford CT (Lake Housatonic boathouse)
     const lat = 41.4370, lon = -73.1190;
@@ -1490,9 +1609,14 @@ async function loadWeather() {
       `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation` +
       `&daily=sunrise,sunset` +
       `&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=America%2FNew_York`;
-    const res  = await fetch(url);
+    const res  = await fetchWithTimeout(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const c    = data.current;
+    // Temperature and wind are the point of this card: without them it says
+    // "unavailable" rather than printing Math.round(null), which is 0 - "0°F,
+    // wind 0 mph" on a page people use to decide whether to go out.
+    if (!c || !wxNum(c.temperature_2m) || !wxNum(c.wind_speed_10m)) throw new Error('weather: no temperature or wind');
     // Open-Meteo returns daily times already converted to the requested
     // timezone and WITHOUT an offset ("2026-08-07T05:52"). Parsing those with
     // new Date() would treat them as UTC and shift them by hours, so read the
@@ -1518,12 +1642,13 @@ async function loadWeather() {
     const sunset  = sunTime(data && data.daily && data.daily.sunset  && data.daily.sunset[0]);
     const code    = c.weather_code;
     const tempF   = Math.round(c.temperature_2m);
-    const feelsF  = Math.round(c.apparent_temperature);
+    // The rest are secondary: shown as "--" when missing, never as zero.
+    const feelsF  = wxNum(c.apparent_temperature) ? Math.round(c.apparent_temperature) : '--';
     const windMph = Math.round(c.wind_speed_10m);
-    const gustMph = Math.round(c.wind_gusts_10m);
-    const dir     = windDirLabel(c.wind_direction_10m);
-    const precip  = c.precipitation.toFixed(2);
-    const alert   = rowingWeatherAlert(windMph, gustMph, code);
+    const gustMph = wxNum(c.wind_gusts_10m) ? Math.round(c.wind_gusts_10m) : '--';
+    const dir     = wxNum(c.wind_direction_10m) ? windDirLabel(c.wind_direction_10m) : '--';
+    const precip  = wxNum(c.precipitation) ? c.precipitation.toFixed(2) : '--';
+    const alert   = rowingWeatherAlert(windMph, typeof gustMph === 'number' ? gustMph : 0, code);
     const icon    = WMO_ICONS[code] || '&#127777;';
     const cond    = WMO_CODES[code] || 'Unknown';
     renderSummaryWeather({ tempF, cond, icon, windMph, gustMph, dir, alert });
@@ -1585,7 +1710,7 @@ function renderSummaryWeather(w) {
     setSummary('sum-weather', `
       <div class="summary-big"><span class="wicon">${w.icon}</span>${w.tempF}°F</div>
       <div class="summary-line">${w.cond}</div>
-      <div class="summary-line">Wind ${w.windMph} mph ${w.dir}, gusts ${w.gustMph}</div>${alert}`);
+      <div class="summary-line">Wind ${w.windMph} mph${w.dir && w.dir !== '--' ? ' ' + w.dir : ''}, gusts ${w.gustMph}</div>${alert}`);
   } catch (e) {
     console.warn('weather summary failed:', e);
   }
@@ -1729,6 +1854,11 @@ function fogAdvisory(alerts) {
     // The live feed carries test and exercise messages, and cancellations
     // linger briefly: none of them mean fog.
     if (p.status !== 'Actual' || p.messageType === 'Cancel') continue;
+    // Over by its own end time. The active feed can keep an advisory listed
+    // until it "expires", after it "ends" - which would print "in effect until
+    // 9:00 AM" at half past nine.
+    const end = Date.parse(p.ends || p.expires);
+    if (Number.isFinite(end) && end < Date.now()) continue;
     return { event: p.event, until: p.ends || p.expires || null };
   }
   return null;
@@ -1866,20 +1996,32 @@ function fogText(a, label) {
   };
 }
 
-async function loadFogOutlook() {
-  const { lat, lon } = BOATHOUSE_POINT;
-  const getJson = (url) => fetch(url).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
-  // Independent sources: an NWS outage must not hide the model outlook, or
-  // the other way round.
-  const [fc, al] = await Promise.allSettled([
-    getJson(fogOutlookUrl(lat, lon)),
-    getJson(fogAlertsUrl(lat, lon)),
-  ]);
-  state.fogResponse = fc.status === 'fulfilled' ? fc.value : null;
-  state.fogAlerts   = al.status === 'fulfilled' ? al.value : null;
-  state.fogLoaded   = true;
-  renderFogOutlook();
+function loadFogOutlook() {
+  return once('fog', async () => {
+    const { lat, lon } = BOATHOUSE_POINT;
+    const getJson = (url) => fetchWithTimeout(url).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+    // Independent sources: an NWS outage must not hide the model outlook, or
+    // the other way round.
+    const [fc, al] = await Promise.allSettled([
+      getJson(fogOutlookUrl(lat, lon)),
+      getJson(fogAlertsUrl(lat, lon)),
+    ]);
+    // A failed refresh keeps the previous answer for a while rather than
+    // replacing a good outlook with "unavailable" over one dropped request.
+    // The forecast carries its own dates, so an old one that no longer covers
+    // the coming dawn still reads as unavailable; expired advisories are
+    // dropped by fogAdvisory().
+    const now = Date.now();
+    const kept = (value, at) => (value && at && now - at < FOG_KEEP_MS) ? value : null;
+    if (fc.status === 'fulfilled') { state.fogResponse = fc.value; state.fogResponseAt = now; }
+    else state.fogResponse = kept(state.fogResponse, state.fogResponseAt);
+    if (al.status === 'fulfilled') { state.fogAlerts = al.value; state.fogAlertsAt = now; }
+    else state.fogAlerts = kept(state.fogAlerts, state.fogAlertsAt);
+    state.fogLoaded   = true;
+    renderFogOutlook();
+  });
 }
+const FOG_KEEP_MS = 6 * 3600000;
 
 function renderFogOutlook() {
   const box = document.getElementById('fog-outlook');
@@ -2006,85 +2148,90 @@ function floodSummaryLabel(levelFt) {
 
 let riverChart = null;
 
-async function loadRiverData() {
-  try {
-    const BASE = 'https://api.water.noaa.gov/nwps/v1/gauges/STVC3/stageflow/';
-    const [obsRes, fcRes] = await Promise.all([
-      fetch(BASE + 'observed'),
-      fetch(BASE + 'forecast'),
-    ]);
+const RIVER_BASE = 'https://api.water.noaa.gov/nwps/v1/gauges/STVC3/stageflow/';
+// The gauge normally reports every ~15 minutes; a reading older than this is stale.
+const RIVER_STALE_MS = 6 * 3600000;
+// A forecast point further than this from now is not an estimate of now.
+const RIVER_FORECAST_MAX_GAP_MS = 12 * 3600000;
 
-    let observed = [], forecast = [];
+/** NOAA stage series -> [{ts, ft}] ascending, without missing or sentinel values. */
+function parseRiverSeries(arr) {
+  return (Array.isArray(arr) ? arr : [])
+    .filter(d => d && d.primary !== null && d.primary !== undefined && d.primary > 0)
+    .map(d => ({ ts: new Date(d.validTime).getTime(), ft: parseFloat(d.primary) }))
+    .filter(d => !isNaN(d.ts) && !isNaN(d.ft))
+    .sort((a, b) => a.ts - b.ts);
+}
 
-    if (obsRes.ok) {
-      const obsData = await obsRes.json();
-      // NOAA format: { data: [{validTime, primary}] }
-      const arr = obsData?.data || obsData?.observed?.data || [];
-      observed = arr
-        .filter(d => d.primary !== null && d.primary !== undefined && d.primary > 0)
-        .map(d => ({ ts: new Date(d.validTime).getTime(), ft: parseFloat(d.primary) }))
-        .filter(d => !isNaN(d.ts) && !isNaN(d.ft))
-        .sort((a,b) => a.ts - b.ts);
-    }
+/**
+ * Which river level to use, from NOAA's observed and forecast series. Shared
+ * with the daily email, so the two can never pick differently.
+ *
+ * The latest observed reading - BUT this gauge's observed feed has been seen
+ * to stall silently for weeks (frozen since Jul 9 while the forecast kept
+ * updating). A stale reading can show a falsely reassuring low level while the
+ * river is much higher, and the flood restrictions are gated on this number.
+ * So past RIVER_STALE_MS it falls back to the forecast point nearest to now,
+ * flagged as an estimate - if one is close enough to mean anything - and only
+ * then to the stale reading itself, flagged as stale wherever it is shown.
+ *
+ * Returns { level, isEstimate, estimateTs, stale, ageMs, lastObsTs }.
+ */
+function pickRiverLevel(observed, forecast, now) {
+  const last = observed.length ? observed[observed.length - 1] : null;
+  const ageMs = last ? now - last.ts : null;
+  const out = { level: null, isEstimate: false, estimateTs: null,
+                stale: !last || ageMs > RIVER_STALE_MS, ageMs, lastObsTs: last ? last.ts : null };
+  if (!out.stale) { out.level = last.ft; return out; }
+  const nearest = forecast.length
+    ? forecast.reduce((a, b) => Math.abs(b.ts - now) < Math.abs(a.ts - now) ? b : a) : null;
+  if (nearest && Math.abs(nearest.ts - now) <= RIVER_FORECAST_MAX_GAP_MS) {
+    Object.assign(out, { level: nearest.ft, isEstimate: true, estimateTs: nearest.ts });
+  } else if (last) {
+    out.level = last.ft;
+  }
+  return out;
+}
 
-    if (fcRes.ok) {
-      const fcData = await fcRes.json();
-      const arr = fcData?.data || fcData?.forecast?.data || [];
-      forecast = arr
-        .filter(d => d.primary !== null && d.primary !== undefined && d.primary > 0)
-        .map(d => ({ ts: new Date(d.validTime).getTime(), ft: parseFloat(d.primary) }))
-        .filter(d => !isNaN(d.ts) && !isNaN(d.ft))
-        .sort((a,b) => a.ts - b.ts);
-    }
+function loadRiverData() {
+  return once('river', async () => {
+    // Each series is fetched on its own, and a failed request falls back to
+    // the last good copy of THAT series. A refresh that failed used to blank
+    // the river card and summary ("flood restrictions not applied") while the
+    // rules grid kept applying the old level - the page contradicted itself.
+    // Now the same data drives all three, and staleness is judged from the
+    // readings' own timestamps, so a long outage still ends in "stale" and
+    // then "unavailable" rather than an old number shown as current.
+    const get = async (kind, previous) => {
+      try {
+        const res = await fetchWithTimeout(RIVER_BASE + kind);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const body = await res.json();
+        return { ok: true, series: parseRiverSeries(body && (body.data || (body[kind] && body[kind].data))) };
+      } catch (e) {
+        console.warn(`River ${kind} load failed:`, e);
+        return { ok: false, series: previous || [] };
+      }
+    };
+    const [o, f] = await Promise.all([get('observed', state.riverObserved), get('forecast', state.riverForecast)]);
+    state.riverObserved = o.series;
+    state.riverForecast = f.series;
+    state.riverFetchFailed = !o.ok && !f.ok;
 
-    state.riverObserved = observed;
-    state.riverForecast = forecast;
+    const pick = pickRiverLevel(o.series, f.series, Date.now());
+    state.riverLevel = pick.level;
+    state.riverLevelIsEstimate = pick.isEstimate;
+    state.riverEstimateTs = pick.estimateTs;
+    state.riverObservedStale = pick.stale;
+    state.riverObservedAgeMs = pick.ageMs;
 
-    // Current level = most recent observed reading — BUT this gauge's observed
-    // feed has been confirmed to silently stall for weeks at a time (verified
-    // directly against NOAA's API: observed was frozen since Jul 9 while forecast
-    // kept issuing fresh predictions). Trusting a stale reading is dangerous here:
-    // it can show a falsely reassuring low level while the river is actually much
-    // higher, since flood restrictions and boat clearance are gated on this number.
-    // If observed is missing or older than STALE_MS, fall back to the forecast
-    // point nearest to now and flag it clearly so the UI can label it as an
-    // estimate rather than a live sensor reading.
-    const STALE_MS = 6 * 3600000; // 6h — gauge normally reports every ~15 min
-    const lastObsTs = observed.length ? observed[observed.length - 1].ts : null;
-    const obsIsStale = lastObsTs === null || (Date.now() - lastObsTs) > STALE_MS;
-
-    state.riverObservedStale = obsIsStale;
-    state.riverObservedAgeMs = lastObsTs !== null ? Date.now() - lastObsTs : null;
-
-    if (!obsIsStale) {
-      state.riverLevel = observed[observed.length - 1].ft;
-      state.riverLevelIsEstimate = false;
-    } else if (forecast.length > 0) {
-      const nearestFc = forecast.reduce((a, b) =>
-        Math.abs(b.ts - Date.now()) < Math.abs(a.ts - Date.now()) ? b : a
-      );
-      state.riverLevel = nearestFc.ft;
-      state.riverLevelIsEstimate = true;
-    } else if (lastObsTs !== null) {
-      // No forecast to fall back on either — show the stale observed reading
-      // rather than nothing, but the staleness banner below still applies.
-      state.riverLevel = observed[observed.length - 1].ft;
-      state.riverLevelIsEstimate = false;
-    } else {
-      state.riverLevel = null;
-    }
-
-    renderRiverCard();
+    try { renderRiverCard(); } catch (e) { console.warn('river card failed:', e); }
     // Re-render rowing status — only if history is loaded to avoid race condition
     // where loadRiverData completes before loadHistory and shows Winter incorrectly
     if (state.lastTempF !== null && state.allHistory.length > 0) {
       renderRowingStatus(state.lastTempF);
     }
-
-  } catch(e) {
-    console.warn('River data load failed:', e);
-    renderRiverCardUnavailable('Could not load river data. Flood restrictions not applied.');
-  }
+  });
 }
 
 /**
@@ -2114,9 +2261,8 @@ function riverStaleNote(ageMs, lastObsTs, isEstimate) {
 function renderRiverCardUnavailable(msg) {
   const el = document.getElementById('river-content');
   if (el) el.innerHTML = `<div class="river-unavailable">${msg}</div>`;
-  // Explicitly, not via state.riverLevel: after a failed refresh that still
-  // holds the previous reading, and the summary must not show it as current
-  // while the card below says the data could not be loaded.
+  // Explicitly, not via state.riverLevel, so the tile can never disagree with
+  // the card below about whether there is a level to show.
   setSummary('sum-river', '<div class="summary-line">River level unavailable &mdash; flood restrictions not applied</div>');
 }
 
@@ -2126,26 +2272,27 @@ function renderRiverCard() {
   const level  = state.riverLevel;
   const obs    = state.riverObserved;
   const fc     = state.riverForecast;
-  if (level === null && obs.length === 0) {
-    renderRiverCardUnavailable('No river level data available.');
+  if (level === null) {
+    // pickRiverLevel only returns null when there is no reading and no usable
+    // forecast. The rules grid then applies no flood restrictions - say so.
+    renderRiverCardUnavailable(state.riverFetchFailed
+      ? 'Could not load river data. Flood restrictions not applied.'
+      : 'No current river level from NOAA. Flood restrictions not applied.');
     return;
   }
 
   const summary = floodSummaryLabel(level);
-  const levelStr = level !== null ? level.toFixed(1) : '--';
+  const levelStr = level.toFixed(1);
 
   // When the observed gauge feed is stale, riverLevel/updatedAt are sourced from
-  // the nearest forecast point instead (see loadRiverData) — label that clearly
+  // the nearest forecast point instead (see pickRiverLevel) — label that clearly
   // so nobody mistakes a modeled estimate for a live sensor reading.
   let updatedLabel, updatedAt, updatedTz;
-  if (state.riverLevelIsEstimate && fc.length > 0) {
-    const nearestFc = fc.reduce((a, b) =>
-      Math.abs(b.ts - Date.now()) < Math.abs(a.ts - Date.now()) ? b : a
-    );
+  if (state.riverLevelIsEstimate && state.riverEstimateTs !== null) {
     updatedLabel = 'Forecast valid';
-    updatedAt = new Date(nearestFc.ts).toLocaleString('en-US',
+    updatedAt = new Date(state.riverEstimateTs).toLocaleString('en-US',
       {timeZone:'America/New_York', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
-    updatedTz = nyTzAbbr(nearestFc.ts);
+    updatedTz = nyTzAbbr(state.riverEstimateTs);
   } else {
     updatedLabel = 'Updated';
     updatedAt = obs.length > 0 ? new Date(obs[obs.length-1].ts).toLocaleString('en-US',
@@ -2201,7 +2348,23 @@ function renderFloodGrid(levelFt) {
     }).join('');
 }
 
+// The chart library comes from a CDN. If it did not load, the river card must
+// still show the level, the restriction pill and the boat grid - and the
+// river loader must not see an exception: it used to catch one here and
+// declare the river data unavailable while the rules applied the level anyway.
 function initRiverChart(obs, fc, currentLevel) {
+  try {
+    drawRiverChart(obs, fc, currentLevel);
+  } catch (e) {
+    console.warn('river chart unavailable:', e);
+    riverChart = null;
+    const canvas = document.getElementById('river-chart');
+    const wrap = canvas && canvas.parentElement;
+    if (wrap) wrap.innerHTML = '<div class="river-unavailable">Chart unavailable &mdash; the charting library did not load. The level and restrictions shown are unaffected.</div>';
+  }
+}
+
+function drawRiverChart(obs, fc, currentLevel) {
   const ctx = document.getElementById('river-chart');
   if (!ctx) return;
   if (riverChart) { riverChart.destroy(); riverChart = null; }

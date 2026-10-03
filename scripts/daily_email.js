@@ -170,6 +170,8 @@ function loadSiteLogic(indexHtmlPath = INDEX_HTML) {
     'getEffectiveLevel', 'checkMorningStreak', 'nyWindowBound', 'nyTzAbbr',
     'getFloodStatus', 'combineStatus', 'boatKeys', 'floodStatusForBoat',
     'floodSummaryLabel', 'riverStaleNote', 'extractTemp', 'parseLastDeviceData',
+    // River level selection: same staleness rule and forecast fallback as the site.
+    'pickRiverLevel', 'parseRiverSeries', 'RIVER_STALE_MS', 'RIVER_FORECAST_MAX_GAP_MS',
     'WMO_CODES', 'WMO_ICONS',
     // Wording: the email must never label a status differently from the site.
     'boatStatusLabel', 'ALLOWED_NOTE_HTML',
@@ -203,10 +205,11 @@ function loadLocalData() {
   try {
     const h = JSON.parse(fs.readFileSync(histPath, 'utf8'));
     if (Array.isArray(h)) {
+      // Same parsing as the website's loadHistory().
       history = h.map(x => ({
         ts: new Date(x.ts).getTime(),
-        tempF: x.tempF != null ? x.tempF : Math.round((x.tempC * 9 / 5 + 32) * 10) / 10,
-      })).filter(x => !isNaN(x.ts) && !isNaN(x.tempF)).sort((a, b) => a.ts - b.ts);
+        tempF: x.tempF != null ? parseFloat(x.tempF) : Math.round((parseFloat(x.tempC) * 9 / 5 + 32) * 10) / 10,
+      })).filter(x => Number.isFinite(x.ts) && Number.isFinite(x.tempF)).sort((a, b) => a.ts - b.ts);
     }
   } catch (e) {
     // history.json is optional — the streak logic degrades gracefully without it
@@ -216,7 +219,9 @@ function loadLocalData() {
 }
 
 const NOAA_BASE = 'https://api.water.noaa.gov/nwps/v1/gauges/STVC3/stageflow/';
-const STALE_MS = 6 * 3600000; // must match index.html's river staleness threshold
+// Kept for reference and tests; the decision itself is made by the site's
+// pickRiverLevel(), so the email cannot apply a different threshold.
+const STALE_MS = 6 * 3600000;
 
 async function fetchJson(url, timeoutMs = 20000, headers = undefined) {
   const ctrl = new AbortController();
@@ -240,11 +245,12 @@ function parseGaugeSeries(payload) {
 }
 
 /**
- * Mirrors index.html's river logic, including the stale-observed fallback:
- * NOAA's observed feed for this gauge has been seen frozen for weeks while the
- * forecast kept updating. Never silently present a stale reading as current.
+ * The river level, chosen by the website's own pickRiverLevel(): the latest
+ * observed reading, or - when NOAA's observed feed has stalled, as it has for
+ * weeks at a time - the forecast for now, labelled as an estimate. Never a
+ * stale reading presented as current.
  */
-async function loadRiver() {
+async function loadRiver(logic) {
   let observed = [], forecast = [], failed = false;
   try {
     const [obs, fc] = await Promise.all([
@@ -258,26 +264,10 @@ async function loadRiver() {
     failed = true;
   }
 
-  const lastObsTs = observed.length ? observed[observed.length - 1].ts : null;
-  const isStale = lastObsTs === null || (Date.now() - lastObsTs) > STALE_MS;
-
-  let level = null, isEstimate = false;
-  if (!isStale) {
-    level = observed[observed.length - 1].ft;
-  } else if (forecast.length) {
-    const nearest = forecast.reduce((a, b) =>
-      Math.abs(b.ts - Date.now()) < Math.abs(a.ts - Date.now()) ? b : a);
-    level = nearest.ft;
-    isEstimate = true;
-  } else if (lastObsTs !== null) {
-    level = observed[observed.length - 1].ft;
-  }
-
+  const pick = logic.pickRiverLevel(observed, forecast, Date.now());
   return {
-    level, isEstimate, failed,
-    stale: isStale,
-    ageMs: lastObsTs !== null ? Date.now() - lastObsTs : null,
-    lastObsTs,
+    level: pick.level, isEstimate: pick.isEstimate, failed,
+    stale: pick.stale, ageMs: pick.ageMs, lastObsTs: pick.lastObsTs,
   };
 }
 
@@ -404,6 +394,11 @@ async function loadWeather() {
   try {
     const data = await fetchJson(url);
     const c = data.current;
+    // Same rule as the website: no temperature or wind means no weather, never
+    // Math.round(null) - which is 0, and would print "0°F, wind 0 mph". The
+    // secondary values show as "--" when missing.
+    const num = v => typeof v === 'number' && Number.isFinite(v);
+    if (!c || !num(c.temperature_2m) || !num(c.wind_speed_10m)) return { available: false };
     // daily arrays are indexed by day; [0] is today in the requested timezone.
     const sunrise = formatLocalClock(data && data.daily && data.daily.sunrise && data.daily.sunrise[0]);
     const sunset  = formatLocalClock(data && data.daily && data.daily.sunset  && data.daily.sunset[0]);
@@ -411,11 +406,11 @@ async function loadWeather() {
       available: true,
       code: c.weather_code,
       tempF: Math.round(c.temperature_2m),
-      feelsF: Math.round(c.apparent_temperature),
+      feelsF: num(c.apparent_temperature) ? Math.round(c.apparent_temperature) : '--',
       windMph: Math.round(c.wind_speed_10m),
-      gustMph: Math.round(c.wind_gusts_10m),
-      dir: windDirLabel(c.wind_direction_10m),
-      precip: Number(c.precipitation).toFixed(2),
+      gustMph: num(c.wind_gusts_10m) ? Math.round(c.wind_gusts_10m) : '--',
+      dir: num(c.wind_direction_10m) ? windDirLabel(c.wind_direction_10m) : '--',
+      precip: num(c.precipitation) ? c.precipitation.toFixed(2) : '--',
       sunrise,
       sunset,
     };
@@ -785,9 +780,10 @@ function renderEmailHtml(d) {
            <td style="font-size:26px;line-height:1;padding-right:12px;vertical-align:top;color:${C.ink};background-color:${C.card};">${d.weather.icon || ''}</td>
            <td style="vertical-align:top;font-family:Arial,Helvetica,sans-serif;background-color:${C.card};">
              <div style="font-size:14px;font-weight:bold;color:${C.ink};background-color:${C.card};">${esc(d.weather.cond)}, ${d.weather.tempF}°F</div>
-             <div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};padding-top:3px;">Feels like ${d.weather.feelsF}°F &nbsp;&middot;&nbsp; Wind ${d.weather.windMph} mph ${esc(d.weather.dir)}, gusts ${d.weather.gustMph} mph</div>
-             <div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};padding-top:2px;">Precipitation ${esc(d.weather.precip)} in</div>
+             <div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};padding-top:3px;">Feels like ${esc(d.weather.feelsF)}°F &nbsp;&middot;&nbsp; Wind ${d.weather.windMph} mph${d.weather.dir && d.weather.dir !== '--' ? ' ' + esc(d.weather.dir) : ''}, gusts ${esc(d.weather.gustMph)}${d.weather.gustMph === '--' ? '' : ' mph'}</div>
+             <div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};padding-top:2px;">Precipitation ${esc(d.weather.precip)}${d.weather.precip === '--' ? '' : ' in'}</div>
              ${(d.weather.sunrise || d.weather.sunset) ? `<div style="font-size:13px;color:${C.ink};background-color:${C.card};padding-top:6px;">Sunrise ${esc(d.weather.sunrise || '--')} &nbsp;&middot;&nbsp; Sunset ${esc(d.weather.sunset || '--')}</div>` : ''}
+             ${d.timeLabel ? `<div style="font-size:12px;color:${C.inkSoft};background-color:${C.card};padding-top:6px;">Conditions as of ${esc(d.timeLabel)} ${esc(d.tz || '')}, when this email was prepared &mdash; check again before you leave.</div>` : ''}
            </td>
          </tr>
        </table>`
@@ -1087,7 +1083,7 @@ async function build() {
   const logic = loadSiteLogic();
   const local = loadLocalData();
   const [river, weather, fogInputs] = await Promise.all([
-    loadRiver(), loadWeather(), loadFogInputs(logic),
+    loadRiver(logic), loadWeather(), loadFogInputs(logic),
   ]);
   const digest = computeDigest(logic, local, river, weather, new Date(), fogInputs);
   return { digest, html: renderEmailHtml(digest), subject: renderSubject(digest) };

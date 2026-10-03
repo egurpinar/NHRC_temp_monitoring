@@ -346,11 +346,41 @@ test('no history at all falls back to the most restrictive zone', () => {
 section('5. River staleness and fallback');
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('stale threshold constant matches index.html (6h)', () => {
-  assert.strictEqual(M.STALE_MS, 6 * 3600000);
-  const html = require('fs').readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
-  assert.ok(/const STALE_MS = 6 \* 3600000/.test(html),
-    'index.html no longer uses a 6h river staleness threshold — keep these in sync');
+test('river level: the email makes the website\'s decision, with the website\'s function', () => {
+  assert.strictEqual(logic.RIVER_STALE_MS, 6 * 3600000, '6 h staleness');
+  assert.strictEqual(logic.RIVER_FORECAST_MAX_GAP_MS, 12 * 3600000, 'forecast within 12 h of now');
+  assert.strictEqual(M.STALE_MS, logic.RIVER_STALE_MS);
+  assert.strictEqual(typeof logic.pickRiverLevel, 'function', 'pickRiverLevel must be exported to the email');
+  const src = require('fs').readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8');
+  assert.ok(/logic\.pickRiverLevel\(/.test(src), 'loadRiver must delegate to the site\'s pickRiverLevel');
+});
+
+test('pickRiverLevel: every branch, at the exact boundaries', () => {
+  const now = Date.parse('2026-10-03T09:00:00Z');
+  const H = 3600000;
+  const obs = (ageH, ft = 3.1) => [{ ts: now - 30 * H, ft: 2 }, { ts: now - ageH * H, ft }];
+  const fc = (offH, ft = 4.4) => [{ ts: now + offH * H, ft }];
+  const pick = (o, f) => logic.pickRiverLevel(o, f, now);
+  let p = pick(obs(0.25), fc(1));
+  assert.deepStrictEqual([p.level, p.isEstimate, p.stale], [3.1, false, false], 'fresh reading wins');
+  p = pick(obs(6), fc(1));
+  assert.deepStrictEqual([p.level, p.isEstimate, p.stale], [3.1, false, false], 'exactly 6 h is not yet stale');
+  p = logic.pickRiverLevel(obs(6), fc(1), now + 1);
+  assert.deepStrictEqual([p.level, p.isEstimate, p.stale], [4.4, true, true], '6 h + 1 ms: forecast estimate');
+  assert.strictEqual(p.estimateTs, now + H);
+  p = pick(obs(7), fc(-12));
+  assert.deepStrictEqual([p.level, p.isEstimate], [4.4, true], 'a forecast point 12 h away still counts');
+  p = pick(obs(7), fc(12.01));
+  assert.deepStrictEqual([p.level, p.isEstimate, p.stale], [3.1, false, true],
+    'a forecast more than 12 h from now is not an estimate of now: the stale reading, flagged stale');
+  p = pick(obs(7), []);
+  assert.deepStrictEqual([p.level, p.isEstimate, p.stale], [3.1, false, true], 'no forecast');
+  p = pick([], fc(2));
+  assert.deepStrictEqual([p.level, p.isEstimate, p.stale, p.lastObsTs, p.ageMs], [4.4, true, true, null, null], 'no readings');
+  p = pick([], []);
+  assert.deepStrictEqual([p.level, p.isEstimate], [null, false], 'nothing at all');
+  p = pick(obs(8), [{ ts: now - 5 * H, ft: 5 }, { ts: now + 2 * H, ft: 6 }, { ts: now + 8 * H, ft: 7 }]);
+  assert.strictEqual(p.level, 6, 'the forecast point nearest to now');
 });
 
 test('parseGaugeSeries drops null/zero readings and sorts ascending', () => {
@@ -1102,6 +1132,53 @@ test('no icon is emitted when weather is unavailable', () => {
   }
 });
 
+async function emailWeatherWith(current) {
+  const realFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, json: async () => ({ current,
+    daily: { sunrise: ['2026-10-03T06:53'], sunset: ['2026-10-03T18:32'] } }) });
+  try { return await M.loadWeather(); } finally { global.fetch = realFetch; }
+}
+const CURRENT_OK = { temperature_2m: 58.4, apparent_temperature: 56.2, weather_code: 3, wind_speed_10m: 9.4,
+  wind_gusts_10m: 23.8, wind_direction_10m: 310, precipitation: 0 };
+
+test('email weather: a missing temperature or wind is "unavailable" - never 0°F or 0 mph', async () => {
+  // Math.round(null) is 0: an API gap used to print "Overcast, 0°F".
+  for (const k of ['temperature_2m', 'wind_speed_10m']) {
+    for (const bad of [null, undefined, 'x', NaN]) {
+      const w = await emailWeatherWith(Object.assign({}, CURRENT_OK, { [k]: bad }));
+      assert.strictEqual(w.available, false, `${k} = ${bad}`);
+    }
+  }
+  assert.strictEqual((await emailWeatherWith(null)).available, false, 'no current block at all');
+  const ok = await emailWeatherWith(CURRENT_OK);
+  assert.deepStrictEqual([ok.available, ok.tempF, ok.windMph, ok.gustMph, ok.dir], [true, 58, 9, 24, 'NW']);
+});
+
+test('email weather: missing secondary values show "--", and the line still reads cleanly', async () => {
+  const w = await emailWeatherWith(Object.assign({}, CURRENT_OK,
+    { apparent_temperature: null, wind_gusts_10m: null, wind_direction_10m: null, precipitation: null }));
+  assert.deepStrictEqual([w.feelsF, w.gustMph, w.dir, w.precip], ['--', '--', '--', '--']);
+  const digest = M.computeDigest(logic, { raw: makeRaw(66), history: historyAtTemp(66) },
+    { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() }, w, new Date());
+  const html = M.renderEmailHtml(digest);
+  assert.ok(/Wind 9 mph, gusts --</.test(html), html.match(/Wind [^<]*/)[0]);
+  assert.ok(/Feels like --/.test(html) && /Precipitation --</.test(html));
+  assert.ok(!/[^0-9.]0&#176;F|null|undefined|NaN/.test(html), 'no standalone 0°F, no null/undefined/NaN');
+});
+
+test('email weather: says what time the conditions are from (they are 1 AM conditions)', async () => {
+  const w = await emailWeatherWith(CURRENT_OK);
+  const now = etDate('2026-10-03', 1, 4);
+  const digest = M.computeDigest(logic, { raw: makeRaw(66, now), history: historyAtTemp(66) },
+    { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: now.getTime() }, w, now);
+  const html = M.renderEmailHtml(digest);
+  assert.ok(/Conditions as of 1:04(&#8239;| )AM EDT, when this email was prepared/.test(html),
+    (html.match(/Conditions as of[^<]*/) || ['(missing)'])[0]);
+  const none = M.renderEmailHtml(M.computeDigest(logic, { raw: makeRaw(66, now), history: historyAtTemp(66) },
+    { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: now.getTime() }, { available: false }, now));
+  assert.ok(!/Conditions as of/.test(none), 'no time stamp for weather that is not there');
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 section('8c. Send scheduling and idempotency');
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1733,12 +1810,25 @@ test('wind above 8 mph disqualifies a saturated model', () => {
   assert.strictEqual(logic.assessFogRisk(r, '2026-09-19', 60, null).level, 'low');
 });
 
+// The next 9:00 AM in New York, strictly in the future, as the feed writes it
+// (local time with offset). Advisories that have ended are now ignored, so a
+// fixed date here would turn these tests into a time bomb.
+function nextNineAmEt() {
+  const ymdNY = (t) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit' }).format(t);
+  let t = etDate(ymdNY(new Date()), 9);
+  if (t.getTime() <= Date.now()) t = etDate(ymdNY(new Date(Date.now() + 86400000)), 9);
+  const off = /EDT/.test(logic.nyTzAbbr(t.getTime())) ? '-04:00' : '-05:00';
+  return `${ymdNY(t)}T09:00:00${off}`;
+}
+const NINE_AM = nextNineAmEt();
+
 // Shaped exactly like the live api.weather.gov feed (checked 2 Oct 2026).
 function nwsAlerts(props) {
   return { type: 'FeatureCollection', features: [{ type: 'Feature', properties: Object.assign({
     event: 'Dense Fog Advisory', status: 'Actual', messageType: 'Alert', severity: 'Minor',
     headline: 'Dense Fog Advisory issued October 3 at 3:12AM EDT until October 3 at 9:00AM EDT by NWS Upton NY',
-    onset: '2026-10-03T03:12:00-04:00', ends: '2026-10-03T09:00:00-04:00', expires: '2026-10-03T09:00:00-04:00',
+    onset: new Date(Date.now() - 2 * 3600000).toISOString(), ends: NINE_AM, expires: NINE_AM,
   }, props) }] };
 }
 
@@ -1761,8 +1851,22 @@ test('NWS test messages, cancellations and non-fog alerts are ignored', () => {
 
 test('an alert with no end time falls back to its expiry (12 of 423 live alerts had none)', () => {
   const a = assess('dry', 60, nwsAlerts({ ends: null }));
-  assert.strictEqual(a.advisory.until, '2026-10-03T09:00:00-04:00');
+  assert.strictEqual(a.advisory.until, NINE_AM);
   assert.ok(/until 9:00 AM/.test(logic.fogText(a, 'this morning').headline), logic.fogText(a, 'this morning').headline);
+});
+
+test('an advisory past its end time is over, even while the feed still lists it', () => {
+  // The active feed keeps an alert until it "expires", which can be after it
+  // "ends"; at 9:30 the page would have said "in effect until 9:00 AM".
+  const past = new Date(Date.now() - 30 * 60000).toISOString();
+  const later = new Date(Date.now() + 30 * 60000).toISOString();
+  assert.strictEqual(assess('dry', 60, nwsAlerts({ ends: past, expires: later })).level, 'low', 'ended');
+  assert.strictEqual(assess('dry', 60, nwsAlerts({ ends: null, expires: past })).level, 'low', 'expired, no end time');
+  assert.strictEqual(assess('dry', 60, nwsAlerts({ ends: later, expires: later })).level, 'likely', 'still running');
+  assert.strictEqual(assess('dry', 60, nwsAlerts({ ends: null, expires: null })).level, 'likely',
+    'no times at all: trust the feed that it is active');
+  assert.strictEqual(assess('dry', 60, nwsAlerts({ ends: 'garbage', expires: null })).level, 'likely',
+    'an unreadable time is not a reason to drop an advisory');
 });
 
 test('SECURITY: text from the NWS feed is escaped before it reaches any HTML', () => {
@@ -1995,7 +2099,11 @@ section('13. Website rendering (index.html in a DOM stub)');
 // separate code. Run the real page script with a DOM that remembers what was
 // written, at a fixed clock, and read the result back.
 
-function loadSite(nowMs, fetchImpl) {
+// nowMs: a fixed clock in ms, or a function returning the current ms (for tests
+// that let time pass). opts overrides parts of the environment: Chart,
+// AbortController, setTimeout, clearTimeout, Image.
+function loadSite(nowMs, fetchImpl, opts = {}) {
+  const clock = typeof nowMs === 'function' ? nowMs : () => nowMs;
   const src = fsT.readFileSync(INDEX_PATH, 'utf8').match(/<script>([\s\S]*)<\/script>\s*<\/body>/)[1];
   const els = {};
   const el = id => els[id] || (els[id] = {
@@ -2003,10 +2111,11 @@ function loadSite(nowMs, fetchImpl) {
     getContext: () => ({ createLinearGradient: () => ({ addColorStop() {} }) }),
     addEventListener() {}, querySelector: () => null, querySelectorAll: () => [],
     classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {}, appendChild() {},
+    get parentElement() { return el(id + '__parent'); },
   });
   class FixedDate extends Date {
-    constructor(...a) { if (a.length) super(...a); else super(nowMs); }
-    static now() { return nowMs; }
+    constructor(...a) { if (a.length) super(...a); else super(clock()); }
+    static now() { return clock(); }
   }
   // The chart's range buttons, so their click handlers get attached and can be
   // fired - without them nothing tests that clicking "7 days" updates anything.
@@ -2015,21 +2124,36 @@ function loadSite(nowMs, fetchImpl) {
     addEventListener(type, fn) { this.handlers[type] = fn; },
   }));
   els.__rangeButtons = rangeButtons;
+  // Page-level event listeners, so tests can fire DOMContentLoaded,
+  // visibilitychange and pageshow.
+  const listeners = { document: {}, window: {} };
+  const on = (bucket) => (type, fn) => { (listeners[bucket][type] = listeners[bucket][type] || []).push(fn); };
+  els.__listeners = listeners;
+  els.__fire = (bucket, type, event = {}) => (listeners[bucket][type] || []).forEach(fn => fn(event));
+  const logged = [];
+  els.__logged = logged;
+  const document = { getElementById: el, querySelectorAll: (sel) => (/#range-btns/.test(sel) ? rangeButtons : []),
+    querySelector: () => null, addEventListener: on('document'), createElement: () => el('__created'),
+    visibilityState: 'visible' };
+  els.__document = document;
   const sandbox = {
-    document: { getElementById: el, querySelectorAll: (sel) => (/#range-btns/.test(sel) ? rangeButtons : []),
-                querySelector: () => null, addEventListener() {}, createElement: () => el('__created') },
-    window: { addEventListener() {} }, fetch: fetchImpl || (() => new Promise(() => {})),
+    document,
+    window: { addEventListener: on('window') }, fetch: fetchImpl || (() => new Promise(() => {})),
     // Shaped like Chart.js where the page touches it: data and options come
     // from the config it was built with.
-    Chart: function (ctx, cfg) { return { data: cfg && cfg.data, options: (cfg && cfg.options) || {}, destroy() {}, update() {} }; },
+    Chart: opts.Chart || function (ctx, cfg) { return { data: cfg && cfg.data, options: (cfg && cfg.options) || {}, destroy() {}, update() {} }; },
     moment: {},
-    setInterval() {}, setTimeout() {}, console: { log() {}, warn() {}, error() {} },
-    URL: { createObjectURL() {}, revokeObjectURL() {} }, Blob: function () {}, Image: function () {},
+    setInterval() {}, setTimeout: opts.setTimeout || (() => 0), clearTimeout: opts.clearTimeout || (() => {}),
+    AbortController: opts.AbortController,
+    console: { log() {}, warn: (...a) => logged.push(['warn', ...a]), error: (...a) => logged.push(['error', ...a]) },
+    URL: { createObjectURL() { return 'blob:fake'; }, revokeObjectURL() {} }, Blob: function () {}, Image: opts.Image || function () {},
     Intl, Date: FixedDate, Math, JSON, isNaN, parseInt, parseFloat, Number, Array, Object, String,
   };
   const ctx = vmT.createContext(sandbox);
   vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, renderFogOutlook, renderFloodGrid, renderDashboard,' +
-    ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData };',
+    ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData,' +
+    ' loadData, loadHistory, refreshAll, loadFogOutlook, loadCameraSnapshot, historyNeedsRefresh, pickRiverLevel,' +
+    ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraOffHours };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -2352,6 +2476,386 @@ test('history stats: an empty range shows "--", never the previous numbers', () 
   site.updateStats();
   assert.strictEqual(els['min-val'].textContent, '--');
   assert.strictEqual(els['avg-val'].textContent, '--');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('13c. Website resilience: failed refreshes, slow networks, missing libraries');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The page runs for hours on phones with one bar of signal at the river. Each
+// test drives the real loaders through a fake network, with a clock the test
+// moves forward.
+
+const HOUR = 3600000;
+// A fake network: [regex, handler] pairs, every call recorded.
+function fakeNet(routes) {
+  const calls = [];
+  const fetch = (url, opts) => {
+    url = String(url); calls.push(url);
+    for (const [re, h] of routes) if (re.test(url)) return h(url, opts);
+    return Promise.reject(new Error('unexpected request ' + url));
+  };
+  return { fetch, calls, count: (re) => calls.filter(u => re.test(u)).length };
+}
+const reply = (body, status = 200) =>
+  Promise.resolve({ ok: status < 300, status, json: () => Promise.resolve(body) });
+const offline = () => Promise.reject(new TypeError('Failed to fetch'));
+const settle = async (rounds = 20) => { for (let i = 0; i < rounds; i++) await new Promise(r => setImmediate(r)); };
+// history.json as the site serves it: a reading every 15 minutes, ISO strings,
+// ending exactly at endMs (the time data.json's fetchedAt carries).
+function histUpTo(endMs, tempF, days = 10) {
+  const out = [];
+  for (let ts = endMs - days * 24 * HOUR; ts <= endMs; ts += 15 * 60000) out.push({ ts: new Date(ts).toISOString(), tempF });
+  if (Date.parse(out[out.length - 1].ts) !== endMs) out.push({ ts: new Date(endMs).toISOString(), tempF });
+  return out;
+}
+const riverSeries = (t0, ft, kind) => ({ data: kind === 'observed'
+  ? Array.from({ length: 24 }, (_, i) => ({ validTime: new Date(t0 - (23 - i) * 15 * 60000).toISOString(), primary: ft }))
+  : Array.from({ length: 12 }, (_, i) => ({ validTime: new Date(t0 + (1 + i * 6) * HOUR).toISOString(), primary: ft + 0.3 })) });
+
+test('a failed refresh keeps the last reading on screen - it used to replace the whole page', async () => {
+  let t = Date.now(), up = true, reading = t - 10 * 60000;
+  const net = fakeNet([
+    [/^data\.json/, () => up ? reply(makeRaw(66.3, new Date(reading))) : offline()],
+    [/^history\.json/, () => reply(histUpTo(reading, 66))],
+  ]);
+  const { site, els } = loadSite(() => t, net.fetch);
+  await site.loadData();
+  assert.strictEqual(els['dashboard'].style.display, 'block');
+  assert.strictEqual(els['pill-text'].textContent, 'Live');
+  up = false; t += 60000;
+  await site.loadData();
+  assert.strictEqual(els['dashboard'].style.display, 'block', 'the dashboard must stay');
+  assert.notStrictEqual(els['error-view'].style.display, 'block', 'no error page over good data');
+  assert.strictEqual(String(els['current-f'].textContent), '66.3', 'the last reading stays');
+  assert.strictEqual(els['pill-text'].textContent, 'Reconnecting…', 'and the pill says it could not refresh');
+  // The reading keeps ageing while the connection is down: the warnings still come.
+  t += 4 * HOUR;
+  await site.loadData();
+  assert.strictEqual(els['warn-offline'].style.display, 'flex', 'offline banner after 3 h, even with no connection');
+  assert.strictEqual(els['status-text'].textContent, 'Sensor offline');
+  assert.strictEqual(els['current-f'].style.color, '#f07070');
+  // Back online with a fresh reading: everything recovers.
+  up = true; reading = t - 5 * 60000;
+  await site.loadData();
+  assert.strictEqual(els['pill-text'].textContent, 'Live');
+  assert.strictEqual(els['warn-offline'].style.display, 'none');
+});
+
+test('a data.json with no usable reading, after a good load, is treated as a failed refresh', async () => {
+  let t = Date.now(), body = makeRaw(64.0, new Date(t - 5 * 60000));
+  const net = fakeNet([[/^data\.json/, () => reply(body)], [/^history\.json/, () => reply(histUpTo(t - 5 * 60000, 64))]]);
+  const { site, els } = loadSite(() => t, net.fetch);
+  await site.loadData();
+  for (const bad of [{ error: true }, { data: { devices: [] } }, null]) {
+    body = bad; t += 60000;
+    await site.loadData();
+    assert.strictEqual(els['dashboard'].style.display, 'block', JSON.stringify(bad));
+    assert.strictEqual(String(els['current-f'].textContent), '64');
+    assert.strictEqual(els['pill-text'].textContent, 'Reconnecting…');
+  }
+});
+
+test('a failed FIRST load shows an error written for members, not for the repository owner', async () => {
+  const { site, els } = loadSite(Date.now(), () => offline());
+  await site.loadData();
+  assert.strictEqual(els['error-view'].style.display, 'block');
+  assert.strictEqual(els['dashboard'].style.display, 'none');
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8');
+  const view = html.slice(html.indexOf('<div id="error-view">'), html.indexOf('<div id="dashboard">'));
+  assert.ok(!/Actions|repo|workflow|GitHub/i.test(view), 'no developer instructions on the public page');
+  assert.ok(/onclick="refreshAll\(\)"/.test(view), 'a Try again button');
+  assert.ok(/thermometer on the dock/.test(view), 'and what to do instead');
+});
+
+test('history.json is downloaded only when it lacks the latest reading - not every minute', async () => {
+  let t = Date.now(), reading = t - 3 * 60000, served = reading;
+  const net = fakeNet([
+    [/^data\.json/, () => reply(makeRaw(66, new Date(reading)))],
+    [/^history\.json/, () => reply(histUpTo(served, 66))],
+  ]);
+  const { site } = loadSite(() => t, net.fetch);
+  const hist = () => net.count(/^history\.json/);
+  await site.loadData();
+  assert.strictEqual(hist(), 1, 'first load');
+  for (let i = 0; i < 10; i++) { t += 60000; await site.loadData(); }
+  assert.strictEqual(net.count(/^data\.json/), 11, 'data.json every minute');
+  assert.strictEqual(hist(), 1, 'history not re-downloaded while it already has the reading');
+  // A new reading arrives in both files.
+  reading = served = t - 30000; t += 60000;
+  await site.loadData();
+  assert.strictEqual(hist(), 2, 'fetched once for the new reading');
+  t += 60000; await site.loadData();
+  assert.strictEqual(hist(), 2, 'and not again');
+  // history.json lags behind data.json: retried, but at most every 2 minutes.
+  reading = t - 10000; t += 60000;
+  await site.loadData();
+  assert.strictEqual(hist(), 3, 'fetched for the new reading, still behind');
+  t += 60000; await site.loadData();
+  assert.strictEqual(hist(), 3, 'not again within 2 minutes');
+  t += 61000; await site.loadData();
+  assert.strictEqual(hist(), 4, 'retried after 2 minutes');
+  served = reading; t += 2 * 60000 + 1000; await site.loadData();
+  assert.strictEqual(hist(), 5, 'caught up');
+  t += 3 * 60000; await site.loadData();
+  assert.strictEqual(hist(), 5, 'and then left alone');
+});
+
+test('history: readings stored as strings are parsed; junk rows are dropped, not fatal', async () => {
+  const t = Date.now();
+  const rows = histUpTo(t - 60000, 66).map((r, i) => i % 2 ? { ts: r.ts, tempF: String(r.tempF) } : r);
+  rows.push({ ts: 'garbage', tempF: 70 }, { ts: new Date(t - 30000).toISOString(), tempF: '' }, { ts: new Date(t - 20000).toISOString() });
+  const net = fakeNet([[/^data\.json/, () => reply(makeRaw(66, new Date(t - 60000)))], [/^history\.json/, () => reply(rows)]]);
+  const { site, els } = loadSite(t, net.fetch);
+  await site.loadData();
+  assert.ok(site.state.allHistory.every(h => typeof h.tempF === 'number' && Number.isFinite(h.tempF)));
+  assert.strictEqual(site.state.allHistory.length, histUpTo(t - 60000, 66).length, 'every real reading kept, the three junk rows dropped');
+  assert.strictEqual(els['min-val'].textContent, '66.0°F');
+});
+
+test('river: a failed refresh keeps the last good data - card, summary and rules agree', async () => {
+  let t = Date.now(), up = true;
+  const t0 = t;
+  const net = fakeNet([
+    [/^data\.json/, () => reply(makeRaw(72, new Date(t - 5 * 60000)))],
+    [/^history\.json/, () => reply(histUpTo(t - 5 * 60000, 72))],
+    [/stageflow\/observed$/, () => up ? reply(riverSeries(t0, 10.5, 'observed')) : offline()],
+    [/stageflow\/forecast$/, () => up ? reply(riverSeries(t0, 10.5, 'forecast')) : offline()],
+  ]);
+  const { site, els } = loadSite(() => t, net.fetch);
+  await site.loadData();
+  await site.loadRiverData();
+  const twoX = () => (els['tiers-grid'].innerHTML.match(/<span class="boat-name">2x<\/span>\s*<span class="boat-status (\w+-\w+)"/) || [])[1];
+  assert.ok(/10\.5 ft/.test(els['sum-river'].innerHTML), 'sanity: summary');
+  assert.strictEqual(twoX(), 'bs-no', 'sanity: at 10.5 ft the river restricts 2x');
+  // NOAA unreachable for one refresh.
+  up = false; t += 15 * 60000;
+  await site.loadRiverData();
+  assert.ok(/10\.5 ft/.test(els['sum-river'].innerHTML), 'the summary keeps the level: ' + els['sum-river'].innerHTML);
+  assert.ok(!/Could not load|unavailable/i.test(els['river-content'].innerHTML), 'the card keeps it too');
+  assert.strictEqual(twoX(), 'bs-no', 'and the rules still apply it');
+  // Seven hours of outage: the reading is stale, the forecast stands in - labelled.
+  t = t0 + 7 * HOUR + 15 * 60000;
+  await site.loadRiverData();
+  assert.ok(/Forecast estimate/.test(els['sum-river'].innerHTML), els['sum-river'].innerHTML);
+  assert.ok(/10\.8 ft/.test(els['sum-river'].innerHTML), 'the forecast value');
+  assert.ok(/forecast estimate/.test(els['rowing-notes'].innerHTML), 'the rules card says so too');
+  assert.ok(/River gauge data is stale/.test(els['river-content'].innerHTML));
+  // Five days: even the forecast has run out. The last reading, flagged stale.
+  t = t0 + 5 * 24 * HOUR;
+  await site.loadRiverData();
+  assert.ok(/10\.5 ft/.test(els['sum-river'].innerHTML) && /not current/.test(els['sum-river'].innerHTML), els['sum-river'].innerHTML);
+  assert.ok(/that last reading, not a current one/.test(els['river-content'].innerHTML));
+  assert.ok(/last gauge reading, not current/.test(els['rowing-notes'].innerHTML));
+  assert.strictEqual(twoX(), 'bs-no', 'still restricting, and saying why');
+});
+
+test('river: with no data at all, card, summary and rules all say no flood restrictions are applied', async () => {
+  const t = Date.now();
+  const net = fakeNet([
+    [/^data\.json/, () => reply(makeRaw(72, new Date(t - 5 * 60000)))],
+    [/^history\.json/, () => reply(histUpTo(t - 5 * 60000, 72))],
+    [/stageflow/, () => offline()],
+  ]);
+  const { site, els } = loadSite(t, net.fetch);
+  await site.loadData();
+  await site.loadRiverData();
+  assert.ok(/Could not load river data\. Flood restrictions not applied\./.test(els['river-content'].innerHTML));
+  assert.ok(/River level unavailable/.test(els['sum-river'].innerHTML));
+  assert.ok(!/bs-no|bs-caution/.test(els['tiers-grid'].innerHTML), 'no river restriction applied at 72°F');
+  assert.ok(!/River level:/.test(els['rowing-notes'].innerHTML), 'no river level claimed in the rules card');
+});
+
+test('river: NOAA answering with errors is a failed refresh too, not an empty river', async () => {
+  let t = Date.now(), status = 200;
+  const t0 = t;
+  const net = fakeNet([
+    [/stageflow\/observed$/, () => status === 200 ? reply(riverSeries(t0, 3.1, 'observed')) : reply({ error: 'x' }, status)],
+    [/stageflow\/forecast$/, () => status === 200 ? reply(riverSeries(t0, 3.1, 'forecast')) : reply({ error: 'x' }, status)],
+  ]);
+  const { site, els } = loadSite(() => t, net.fetch);
+  await site.loadRiverData();
+  status = 503; t += 15 * 60000;
+  await site.loadRiverData();
+  assert.ok(/3\.1 ft/.test(els['sum-river'].innerHTML), els['sum-river'].innerHTML);
+  assert.ok(/Stevenson Dam gauge/.test(els['sum-river'].innerHTML), 'a 15-minute-old reading is still the live gauge');
+});
+
+test('chart library missing: the river card still shows the level, the pill and the boat grid', async () => {
+  const t = Date.now();
+  const net = fakeNet([[/stageflow\/(observed|forecast)$/, (u) => reply(riverSeries(t, 9.5, /observed$/.test(u) ? 'observed' : 'forecast'))]]);
+  const { site, els } = loadSite(t, net.fetch, { Chart: function () { throw new ReferenceError('Chart is not defined'); } });
+  await site.loadRiverData();
+  const card = els['river-content'].innerHTML;
+  assert.ok(/9\.5/.test(card) && /river-status-pill rp-caution/.test(card), 'level and pill');
+  assert.ok(!/Could not load/.test(card), 'not declared unavailable');
+  assert.ok(/1x/.test(els['flood-grid'].innerHTML) && /No/.test(els['flood-grid'].innerHTML), 'boat grid');
+  assert.ok(/9\.5 ft/.test(els['sum-river'].innerHTML), 'summary');
+  assert.ok(/Chart unavailable/.test(els['river-chart__parent'].innerHTML), 'the chart area says why it is empty');
+});
+
+test('chart library missing: the history stats, info bar and rules still update', async () => {
+  const t = Date.now();
+  const net = fakeNet([[/^data\.json/, () => reply(makeRaw(66, new Date(t - 60000)))], [/^history\.json/, () => reply(histUpTo(t - 60000, 66))]]);
+  const { site, els } = loadSite(t, net.fetch, { Chart: function () { throw new ReferenceError('Chart is not defined'); } });
+  await site.loadData();
+  assert.strictEqual(els['min-val'].textContent, '66.0°F');
+  assert.ok(/readings/.test(els['info-count'].textContent));
+  assert.ok(/Allowed/.test(els['tiers-grid'].innerHTML), 'rules rendered');
+  assert.ok(/Chart unavailable/.test(els['chart-single-msg'].innerHTML));
+  assert.strictEqual(els['dashboard'].style.display, 'block');
+  els.__rangeButtons.find(b => b.dataset.d === '7').handlers.click();
+  assert.strictEqual(els['min-label'].textContent, 'Min (7 days)', 'range buttons still update the stats');
+});
+
+test('a chart library of a different shape cannot break the range buttons or the history loader', async () => {
+  const t = Date.now();
+  const net = fakeNet([[/^data\.json/, () => reply(makeRaw(66, new Date(t - 60000)))], [/^history\.json/, () => reply(histUpTo(t - 60000, 66))]]);
+  // Constructs fine, but has no options/scales and its update throws.
+  const odd = function () { return { data: { datasets: [{}] }, update() { throw new Error('no date adapter'); }, destroy() {} }; };
+  const { site, els } = loadSite(t, net.fetch, { Chart: odd });
+  await site.loadData();
+  assert.strictEqual(els['min-val'].textContent, '66.0°F');
+  assert.doesNotThrow(() => els.__rangeButtons.find(b => b.dataset.d === '30').handlers.click());
+  assert.strictEqual(els['min-label'].textContent, 'Min (30 days)');
+  assert.ok(els.__logged.some(l => /temperature chart/.test(String(l[1]))), 'the failure is logged, not swallowed silently');
+});
+
+test('weather: a missing temperature is "unavailable", never 0°F; missing extras show "--"', async () => {
+  const w = JSON.parse(JSON.stringify(WEATHER_NOW));
+  w.current.temperature_2m = null;
+  let { site, els } = loadSite(Date.now(), () => okJson(w));
+  await site.loadWeather();
+  assert.ok(/Weather unavailable/.test(els['sum-weather'].innerHTML));
+  assert.ok(!/0°F/.test(els['sum-weather'].innerHTML + els['weather-content'].innerHTML));
+  const w2 = JSON.parse(JSON.stringify(WEATHER_NOW));
+  w2.current.wind_gusts_10m = null; w2.current.wind_direction_10m = null; w2.current.precipitation = null;
+  w2.current.apparent_temperature = undefined;
+  ({ site, els } = loadSite(Date.now(), () => okJson(w2)));
+  await site.loadWeather();
+  const sum = els['sum-weather'].innerHTML, card = els['weather-content'].innerHTML;
+  assert.ok(/63°F/.test(sum) && /Wind 3 mph, gusts --/.test(sum), sum);
+  assert.ok(/Feels like --°F/.test(card) && !/NaN|null|undefined/.test(card), card.slice(0, 400));
+  ({ site, els } = loadSite(Date.now(), () => reply({ error: true, reason: 'quota' }, 429)));
+  await site.loadWeather();
+  assert.ok(/Weather unavailable/.test(els['sum-weather'].innerHTML), 'an HTTP error is an outage');
+});
+
+test('one request per source at a time: a slow network cannot pile up overlapping refreshes', async () => {
+  let release;
+  const gate = new Promise(r => { release = r; });
+  const t = Date.now();
+  const net = fakeNet([
+    [/^data\.json/, () => gate.then(() => reply(makeRaw(66, new Date(t - 60000))))],
+    [/^history\.json/, () => reply(histUpTo(t - 60000, 66))],
+  ]);
+  const { site } = loadSite(t, net.fetch);
+  const a = site.loadData(), b = site.loadData(), c = site.loadData();
+  await settle();
+  assert.strictEqual(net.count(/^data\.json/), 1, 'one request while the first is outstanding');
+  release();
+  await Promise.all([a, b, c]);
+  await site.loadData();
+  assert.strictEqual(net.count(/^data\.json/), 2, 'and the next refresh runs once it is done');
+});
+
+test('a request that never answers is abandoned after 20 s, and refreshing works again', async () => {
+  const timers = [];
+  const hang = (url, opts) => new Promise((_, reject) => {
+    opts.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+  });
+  const net = fakeNet([[/^data\.json/, hang]]);
+  const { site, els } = loadSite(Date.now(), net.fetch, {
+    AbortController, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; }, clearTimeout() {},
+  });
+  const p = site.loadData();
+  await settle();
+  assert.strictEqual(timers.length, 1, 'a deadline was set');
+  assert.strictEqual(timers[0].ms, 20000);
+  timers[0].fn();
+  await p;
+  assert.strictEqual(els['error-view'].style.display, 'block', 'the stuck first load ends in the error view');
+  site.loadData();
+  await settle();
+  assert.strictEqual(net.count(/^data\.json/), 2, 'the next refresh is not blocked by the stuck one');
+});
+
+test('returning to the tab after more than a minute refreshes everything; a quick glance does not', async () => {
+  let t = Date.now();
+  const net = fakeNet([
+    [/^data\.json/, () => reply(makeRaw(66, new Date(t - 60000)))],
+    [/^history\.json/, () => reply(histUpTo(t - 60000, 66))],
+    [/api\.open-meteo\.com.*models=/, () => reply(FOG_FX.dry.response)],
+    [/api\.open-meteo\.com/, () => reply(WEATHER_NOW)],
+    [/api\.weather\.gov/, () => reply({ features: [] })],
+    [/stageflow/, (u) => reply(riverSeries(t, 3, /observed$/.test(u) ? 'observed' : 'forecast'))],
+  ]);
+  const { site, els } = loadSite(() => t, net.fetch);
+  const counts = () => ['data\\.json', 'forecast\\?latitude.*current=', 'models=', 'weather\\.gov', 'stageflow/observed']
+    .map(p => net.count(new RegExp(p)));
+  els.__fire('window', 'DOMContentLoaded');
+  await settle();
+  assert.deepStrictEqual(counts(), [1, 1, 1, 1, 1], 'page load fetches every source once');
+  const away = async (ms) => {
+    els.__document.visibilityState = 'hidden'; els.__fire('document', 'visibilitychange');
+    t += ms;
+    els.__document.visibilityState = 'visible'; els.__fire('document', 'visibilitychange');
+    await settle();
+  };
+  await away(30000);
+  assert.deepStrictEqual(counts(), [1, 1, 1, 1, 1], 'back after 30 s: nothing refetched');
+  await away(8 * HOUR);
+  assert.deepStrictEqual(counts(), [2, 2, 2, 2, 2], 'back after a night away: everything refreshed');
+  els.__fire('window', 'pageshow', { persisted: false });
+  await settle();
+  assert.deepStrictEqual(counts(), [2, 2, 2, 2, 2], 'an ordinary page show changes nothing');
+  els.__fire('window', 'pageshow', { persisted: true });
+  await settle();
+  assert.deepStrictEqual(counts(), [3, 3, 3, 3, 3], 'restored from the back/forward cache: refreshed');
+});
+
+test('the Refresh button refreshes the whole summary, not just the water reading', () => {
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8');
+  const btn = html.match(/<button[^>]*>Refresh<\/button>/);
+  assert.ok(btn && /onclick="refreshAll\(\)"/.test(btn[0]), btn && btn[0]);
+  const body = html.match(/function refreshAll\(\) \{([\s\S]*?)\n\}/)[1];
+  for (const f of ['loadData', 'loadWeather', 'loadRiverData', 'loadCameraSnapshot', 'loadFogOutlook']) {
+    assert.ok(new RegExp(f + '\\(\\)').test(body), `refreshAll must call ${f}`);
+  }
+});
+
+test('fog: a failed refresh keeps the previous outlook for up to 6 hours, then says unavailable', async () => {
+  const start = etDate('2026-10-02', 2).getTime();
+  let t = start, up = true;
+  const net = fakeNet([
+    [/models=/, () => up ? reply(FOG_FX.likely_2026_10_02.response) : offline()],
+    [/api\.weather\.gov/, () => up ? reply({ features: [] }) : offline()],
+  ]);
+  const { site, els } = loadSite(() => t, net.fetch);
+  site.state.lastTempF = 65.7;
+  await site.loadFogOutlook();
+  assert.ok(/Fog likely at dawn this morning/.test(els['fog-outlook'].innerHTML), 'sanity');
+  up = false; t = start + 30 * 60000;
+  await site.loadFogOutlook();
+  assert.ok(/Fog likely at dawn this morning/.test(els['fog-outlook'].innerHTML), 'one failed refresh keeps the outlook');
+  assert.strictEqual(els['warn-fog'].style.display, 'flex', 'and the banner');
+  t = start + 6 * HOUR + 60000;
+  await site.loadFogOutlook();
+  assert.ok(/Fog outlook unavailable/.test(els['fog-outlook'].innerHTML), 'past 6 hours it is stated as unavailable');
+  assert.strictEqual(els['warn-fog'].style.display, 'none');
+});
+
+test('fog: an NWS advisory that has ended is not shown as in effect', async () => {
+  let t = etDate('2026-10-02', 9, 30).getTime();
+  const alerts = { features: [{ properties: { event: 'Dense Fog Advisory', status: 'Actual', messageType: 'Alert',
+    ends: new Date(etDate('2026-10-02', 9).getTime()).toISOString(), expires: new Date(etDate('2026-10-02', 10).getTime()).toISOString() } }] };
+  const net = fakeNet([[/models=/, () => reply(FOG_FX.dry.response)], [/api\.weather\.gov/, () => reply(alerts)]]);
+  const { site, els } = loadSite(() => t, net.fetch);
+  await site.loadFogOutlook();
+  assert.ok(!/NWS Dense Fog Advisory in effect/.test(els['fog-outlook'].innerHTML), els['fog-outlook'].innerHTML.slice(0, 200));
+  t = etDate('2026-10-02', 8, 30).getTime();
+  await site.loadFogOutlook();
+  assert.ok(/NWS Dense Fog Advisory in effect until 9:00/.test(els['fog-outlook'].innerHTML), 'before its end it is shown');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
