@@ -1,7 +1,7 @@
 # Daily Conditions Email
 
-Sends a daily digest of rowing status, boat restrictions, river level, and
-weather to subscribers at **1:00 AM Eastern**, so it is in inboxes well before
+Sends a daily digest of boat restrictions, river level, weather and a dawn fog
+outlook to subscribers at **1:00 AM Eastern**, so it is in inboxes well before
 anyone leaves for a dawn practice.
 
 ## Why this can't disagree with the website
@@ -19,7 +19,8 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (74 tests) |
+| `test_daily_email.js` | Test suite (145 tests) |
+| `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
 
 ## Rowing season
@@ -189,3 +190,51 @@ someone already at the boathouse.
 - Every email carries the "verify at the boathouse" disclaimer.
 - The subject line is derived from the actual combined boat statuses, so it can
   never read "all clear" while the river restricts boats.
+
+## Nothing reads as a go-ahead
+
+Safety Committee decision, October 2026. The site and the email know the water
+temperature, the river level and a forecast. They do not know whether there is
+fog, wind, current or debris on the water, so they never say it is clear to row:
+
+- Boats the rules permit are labelled **Allowed** — never "Go", "Row" or "Clear".
+- The normal zone reads **No temperature restrictions**, not "Normal rowing
+  conditions"; the river summary reads **No river-level restrictions**.
+- With no restrictions, the subject says **No temp/river restrictions**.
+- Every email and the website's rules card say that "Allowed" is not a
+  go-ahead, and to judge conditions at the dock.
+
+The label function and that note live in `index.html` and are extracted like the
+rules, so the website and the email cannot word a status differently.
+
+## Fog outlook
+
+The email and the website both show a fog outlook for the coming dawn (4–9 AM),
+computed by `assessFogRisk()` in `index.html`.
+
+| Level | When | Where it shows |
+|---|---|---|
+| **Likely** | ≥ 2/3 of eight models have the air within 2°F of its dew point with wind ≤ 8 mph, or an NWS fog advisory is in effect | Subject starts `FOG RISK -`; amber box (red for an NWS advisory) under the rules banner; banner at the top of the website |
+| **Possible** | ≥ 1/3 of models, or the river is ≥ 18°F warmer than the dawn air (steam fog) | Box in the email, outlook in the website's weather card |
+| **Not indicated** | Neither | One line in the weather section — never "no fog" |
+| **Unavailable** | Forecast could not be loaded, or fewer than 3 models | Said plainly — never shown as "not indicated" |
+
+Every variant quotes the Safety Handbook rule: *If you cannot see the house with
+the picket fence, do not launch.* **Fog never changes which boats are allowed** —
+it is a forecast, not an observation.
+
+**Why eight models.** On 2 Oct 2026 the river was fogged in at dawn. The model
+the weather card uses (HRRR) forecast a 5°F dew-point spread and clear sky; seven
+of eight other models had the air within 2°F of saturation. No model forecast
+low visibility — river fog is too small for them to resolve — so the outlook
+uses the precondition from many models rather than any one model's visibility.
+
+**Calibration.** The production function was run over 294 mornings of archived
+forecasts (Aug–Oct 2025, mid-Mar to 2 Oct 2026) against dense fog observed at
+dawn in the region (46 mornings). "Likely" caught 38; "possible" or "likely"
+caught 44; the default model alone caught 34 and missed 2 Oct. "Likely" fires on
+about 2 mornings in 5 in Aug–Sep, 1 in 6 in October. The observing stations sit
+away from the river and undercount river fog, so these are conservative. The
+models, thresholds and window are pinned by a test: change them only after
+re-running the backtest. Details are in the comment above `FOG_MODELS` in
+`index.html`.

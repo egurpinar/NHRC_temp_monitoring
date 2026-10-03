@@ -94,6 +94,18 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .rule-banner.green{background:rgba(46,125,79,.15);color:#5cc98a;border:1px solid rgba(46,125,79,.3);}
 .rule-banner.yellow{background:rgba(255,209,102,.15);color:#ffd166;border:1px solid rgba(255,209,102,.5);}
 .rule-banner.red{background:rgba(224,62,62,.12);color:#f07070;border:1px solid rgba(224,62,62,.3);}
+.rule-banner.neutral{background:rgba(255,255,255,.04);color:var(--muted);border:1px solid rgba(255,255,255,.1);}
+.allowed-note{margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,.06);color:var(--white);}
+.fog-outlook:empty{display:none;}
+.fog-outlook{margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.06);}
+.fog-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:5px;}
+.fog-pill{display:inline-block;font-size:.64rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:3px 9px;border-radius:10px;white-space:nowrap;}
+.fog-pill.likely{background:rgba(224,123,32,.18);color:#f0a450;border:1px solid rgba(224,123,32,.45);}
+.fog-pill.possible{background:rgba(255,209,102,.15);color:#ffd166;border:1px solid rgba(255,209,102,.45);}
+.fog-pill.low,.fog-pill.unknown{background:rgba(255,255,255,.05);color:var(--muted);border:1px solid rgba(255,255,255,.14);}
+.fog-title{font-size:.82rem;font-weight:600;color:var(--white);}
+.fog-detail{font-size:.75rem;color:var(--muted);line-height:1.55;}
+.fog-rule{font-size:.75rem;color:var(--white);font-weight:600;margin-top:6px;}
 .tiers-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
 @media(max-width:560px){.tiers-grid{grid-template-columns:1fr;}}
 .tier-card{background:var(--navy3);border-radius:10px;padding:12px 14px;border:1px solid rgba(255,255,255,.06);}
@@ -218,6 +230,13 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     </div>
 
 
+    <!-- Fog: shown only when fog is likely at dawn or an NWS fog advisory is in
+         effect. Awareness only - fog never changes which boats are allowed. -->
+    <div id="warn-fog" class="warn-banner level-warn" style="display:none;">
+      <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong id="warn-fog-title">Fog likely at dawn</strong><span id="warn-fog-text"></span></div>
+    </div>
+
     <div id="warn-gap" class="warn-banner level-danger" style="display:none;">
       <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
       <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
@@ -257,8 +276,14 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     </div>
 
     <div class="rowing-status-card">
-      <div class="section-label">Rowing Status — Current Conditions</div>
-      <div id="rule-banner" class="rule-banner green"><span id="rule-text">Normal rowing conditions</span></div>
+      <!-- "Current Conditions" claimed more than the page knows: it applies the
+           club's water-temperature and river-level rules, and measures nothing
+           about fog, wind or the water surface. -->
+      <div class="section-label">Rowing Rules — Water Temperature &amp; River Level</div>
+      <!-- Neutral until the real status renders. This used to start as a green
+           "Normal rowing conditions", which flashed an all-clear on every page
+           load before any data had arrived. -->
+      <div id="rule-banner" class="rule-banner neutral"><span id="rule-text">Loading club rules…</span></div>
       <div class="tiers-grid" id="tiers-grid"></div>
       <div class="note-text" id="rowing-notes"></div>
     </div>
@@ -284,6 +309,9 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       <div id="weather-content">
         <div style="font-size:.8rem;color:var(--muted);padding:12px 0;">Loading weather data...</div>
       </div>
+      <!-- Separate from weather-content, which loadWeather() replaces wholesale
+           every ten minutes and would otherwise wipe this. -->
+      <div id="fog-outlook" class="fog-outlook"></div>
     </div>
 
     <!-- HISTORY CHART -->
@@ -554,6 +582,9 @@ const state = {
   riverObserved: [],  // [{ts, ft}] observed readings
   riverForecast: [],  // [{ts, ft}] NOAA forecast readings
   riverRange: 3,      // selected zoom window in days for the river chart (default: 3 days)
+  fogLoaded: false,   // true once loadFogOutlook() has finished, even if both sources failed
+  fogResponse: null,  // Open-Meteo multi-model forecast, or null if it could not be fetched
+  fogAlerts: null,    // NWS active alerts for the boathouse point, or null
 };
 let chart = null;
 
@@ -562,8 +593,13 @@ window.addEventListener('DOMContentLoaded', () => {
   loadWeather();
   loadRiverData();
   loadCameraSnapshot();
+  loadFogOutlook();
   setInterval(loadData, 60_000);
   setInterval(loadWeather, 600_000);
+  // Thirty minutes: the models update hourly at most. (The switch from "this
+  // morning" to "tomorrow morning" at 10 AM needs no refetch - the response
+  // covers two days, and loadData re-renders the outlook every minute.)
+  setInterval(loadFogOutlook, 1_800_000);
   setInterval(loadRiverData, 900_000); // refresh river every 15 min
   setInterval(loadCameraSnapshot, CAMERA_REFRESH_MINUTES * 60_000);
 });
@@ -722,6 +758,9 @@ function renderDashboard(tempC, raw) {
   document.getElementById('status-text').textContent = 'Normal';
 
   renderRowingStatus(tempF);
+  // The steam-fog check needs the water temperature, which can arrive after
+  // the fog forecast. Re-render so the outlook never sits on a stale answer.
+  renderFogOutlook();
   updateFreshnessWarnings();
   // Show/hide offline banner based on data age (3 hour threshold)
   // More reliable than Govee's online field which can lag after reconnection
@@ -1179,6 +1218,26 @@ function getEffectiveLevel(tempF) {
   return { zone: effectiveZone, immediate, ...streakInfo };
 }
 
+// ── Status wording, shared with the daily email ─────────────────────────────
+// The data can say which boats the club's water-temperature and river-level
+// rules ALLOW. It cannot say conditions are good: nothing here measures fog,
+// wind, current or debris. So no label may read as a go-ahead - not "Go", not
+// "Row", not "Clear". Safety Committee decision, October 2026.
+//
+// The email extracts this function from this file, so the website and the
+// newsletter cannot word the same status differently.
+function boatStatusLabel(status, note) {
+  if (status === 'no') return 'No';
+  if (status === 'caution') return 'Caution';
+  if (note) return 'Cond.';
+  return 'Allowed';
+}
+// Pure ASCII (entities only) because the email inserts it verbatim, and the
+// email must survive charset mismatches.
+const ALLOWED_NOTE_HTML = '<strong>&ldquo;Allowed&rdquo; is not a go-ahead.</strong> ' +
+  'It means the club&rsquo;s water-temperature and river-level rules permit the boat. ' +
+  'Fog, wind and water conditions are not measured here &mdash; judge them at the dock before launching.';
+
 // Zone definitions — tiers only (rule/notes added per-call below)
 const ZONE_TIERS = {
   winter: [
@@ -1216,7 +1275,7 @@ function renderRowingStatus(tempF) {
     const need = 3 - (eff.confirmed || 0);
     const thrLabel = thr === 40 ? '40°F (exit Winter Rowing)' :
                      thr === 50 ? '50°F (exit Four Oar Rule)' :
-                                  '60°F (Normal conditions)';
+                                  '60°F (no temperature restrictions)';
     if (eff.insufficient) {
       return `Winter Rowing restrictions remain in effect. Current temp is above threshold but <strong>fewer than 3 mornings of data</strong> (5–11 AM) have been collected. Cannot confirm the 3-morning streak yet.`;
     }
@@ -1262,14 +1321,21 @@ function renderRowingStatus(tempF) {
       rule  = 'COLD WATER restrictions apply (water 51–60°F)';
       notes = 'Tier 1 may row 4+, 4- and above. Tier 2 may row 2x and above. Tier 3 may row all boats. No life jackets required.';
     } else {
-      rule  = 'COLD WATER — awaiting 3-morning confirmation for Normal';
+      rule  = 'COLD WATER — awaiting 3-morning confirmation to lift';
       notes = isOverride ? '' : awaitingMsg('coldWater', eff);
     }
   } else {
     cssLevel = 'green';
-    rule  = 'Normal rowing conditions (water > 60°F, 3-day confirmed)';
+    // Names the rule that is (not) in force rather than declaring the
+    // conditions "normal": the page knows the water temperature, not whether
+    // there is fog, wind or debris on the river.
+    rule  = 'No temperature restrictions (water > 60°F, 3-day confirmed)';
     notes = 'Buddy Boat advised in Spring and Fall. Carry a cell phone and marine whistle. Wear Hi-Viz tops.';
   }
+
+  // Shown in every zone, first. "Allowed" is a statement about club rules, and
+  // members must not read it as a forecast of good conditions.
+  notes = `<div class="allowed-note">${ALLOWED_NOTE_HTML}</div>` + notes;
 
   banner.className = `rule-banner ${cssLevel}`;
   banner.innerHTML = `<span>${rule}</span>`;
@@ -1281,10 +1347,10 @@ function renderRowingStatus(tempF) {
       const floodS  = floodStatusForBoat(b.name, lvl);
       const combined = combineStatus(b.s, floodS);
       let label, cls;
-      if (combined === 'no')      { label = 'No';          cls = 'bs-no'; }
-      else if (combined === 'caution') { label = 'Caution'; cls = 'bs-caution'; }
-      else if (b.note)            { label = 'Cond.';       cls = 'bs-go'; }
-      else                        { label = 'Row';         cls = 'bs-go'; }
+      // Labels come from boatStatusLabel(), shared with the daily email, so the
+      // two can never word the same status differently.
+      label = boatStatusLabel(combined, b.note);
+      cls = combined === 'no' ? 'bs-no' : combined === 'caution' ? 'bs-caution' : 'bs-go';
       const floodNote = (floodS === 'caution' && b.s !== 'no') ? ' (river)' :
                         (floodS === 'no'      && b.s !== 'no') ? ' (river)' : '';
       return `<div class="boat-row"><span class="boat-name">${b.name}</span>
@@ -1429,6 +1495,299 @@ async function loadWeather() {
   }
 }
 
+/* ── FOG OUTLOOK ──────────────────────────────────────────────────────────────
+ *
+ * WHY IT IS BUILT THIS WAY
+ * On 2 Oct 2026 the river was fogged in at dawn while this page said nothing
+ * about it. The model the weather card uses (HRRR, Open-Meteo's default here)
+ * forecast a 5°F dew-point spread and clear sky. Seven of eight other major
+ * models had the air within 2°F of saturation with light wind - the setup that
+ * fogs a river valley - and the apps that warned of fog that night were reading
+ * that same signal. No model forecast reduced VISIBILITY: river and valley fog
+ * is far too small for them to resolve. So this uses the precondition, read
+ * from many models, never any single model's visibility.
+ *
+ * Nothing measures fog on the river, and the nearest airport is no substitute:
+ * it sits on a hilltop and reported 5-10 miles visibility that same morning.
+ *
+ * HOW IT WAS CALIBRATED - this exact code, run over 294 mornings (Aug-Oct 2025,
+ * mid-Mar to 2 Oct 2026) of archived forecasts from these eight models, scored
+ * against dense fog observed at dawn in the region (Meriden fog or <= 1/2 mi,
+ * Oxford airport fog or <= 1 mi, Danbury fog). 46 such mornings:
+ *   - "likely" caught 38 (autumn: 26 of 28); "possible" or "likely" caught 44;
+ *   - on 94% of the mornings "likely" fired, the air really was saturated or
+ *     visibility really was down somewhere nearby;
+ *   - the default model alone caught 34 - and missed 2 Oct;
+ *   - "likely" fires on about 2 mornings in 5 in Aug-Sep, 1 in 6 in October,
+ *     1 in 5 in spring and summer.
+ * Those stations sit away from the river and undercount river fog - on 2 Oct
+ * none of them recorded dense fog - so the true miss rate is likely lower, and
+ * some apparent false alarms were probably fog on the water.
+ * A stricter rule (1.5°F, 6 mph) was tested and rejected: fewer alerts, but it
+ * missed about a quarter of autumn dense-fog mornings and would NOT have
+ * flagged 2 Oct.
+ *
+ * Steam fog is the other route: cold air over much warmer water fogs the river
+ * even when the air is dry - the case the dew-point rule missed on 31 May 2026,
+ * with the river 21°F warmer than the dawn air. 10°C (18°F) sits mid-range of
+ * the 5-15°C published threshold, lowest for moist air over fresh water. It
+ * added "possible" on 12 of the 294 mornings.
+ *
+ * AWARENESS ONLY. Fog never changes which boats are allowed: this is a
+ * forecast, not an observation. The camera, and the club's picket-fence rule,
+ * are the observation.
+ */
+const BOATHOUSE_POINT = { lat: 41.4370, lon: -73.1190 };
+
+// Exactly the models the calibration above used. Changing this list changes
+// what the numbers above mean - re-run the backtest before editing it.
+const FOG_MODELS = [
+  'gfs_seamless', 'ncep_nbm_conus', 'ecmwf_ifs025', 'icon_seamless',
+  'gem_seamless', 'meteofrance_seamless', 'ukmo_seamless', 'jma_seamless',
+];
+
+const FOG_RULES = Object.freeze({
+  windowStartHour: 4,   // dawn window, boathouse local time, inclusive
+  windowEndHour: 9,     // inclusive
+  spreadMaxF: 2.0,      // temperature minus dew point at or below this = near saturation
+  windMaxMph: 8,        // above this, mixing usually stops radiation fog forming
+  steamDiffF: 18,       // river this much warmer than the dawn air = steam fog
+  minModels: 3,         // fewer models than this and we say "unavailable", never "low"
+  nextDayFromHour: 10,  // from 10 AM on, the outlook is for tomorrow's dawn
+});
+
+// Safety Handbook rule, quoted exactly as the committee gave it.
+const FOG_LAUNCH_RULE = 'If you cannot see the house with the picket fence, do not launch.';
+
+function fogOutlookUrl(lat, lon) {
+  return `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+    `&hourly=temperature_2m,dew_point_2m,wind_speed_10m&models=${FOG_MODELS.join(',')}` +
+    `&forecast_days=2&timezone=America%2FNew_York&temperature_unit=fahrenheit&wind_speed_unit=mph`;
+}
+function fogAlertsUrl(lat, lon) {
+  return `https://api.weather.gov/alerts/active?point=${lat},${lon}`;
+}
+
+/**
+ * Which dawn the outlook is about: this morning until 10 AM boathouse time,
+ * tomorrow after. Calendar arithmetic only - no hour offsets - so it cannot
+ * slip a day around midnight or a daylight-saving change.
+ */
+function fogTarget(now = new Date()) {
+  const p = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', hourCycle: 'h23',
+  }).formatToParts(now);
+  const g = t => p.find(x => x.type === t).value;
+  const y = parseInt(g('year'), 10), m = parseInt(g('month'), 10), d = parseInt(g('day'), 10);
+  const hour = parseInt(g('hour'), 10);
+  if (hour < FOG_RULES.nextDayFromHour) {
+    return { date: `${g('year')}-${g('month')}-${g('day')}`, label: 'this morning' };
+  }
+  return { date: new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10), label: 'tomorrow morning' };
+}
+
+// A finite number - NOT isFinite(), which coerces null to 0 and would read a
+// missing reading as zero spread, zero wind: perfect fog conditions.
+function fogNum(v) { return typeof v === 'number' && Number.isFinite(v); }
+
+function fogMedian(values) {
+  const s = values.filter(fogNum).sort((a, b) => a - b);
+  if (!s.length) return null;
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+/** First real, in-force NWS fog alert for the point, or null. */
+function fogAdvisory(alerts) {
+  const feats = alerts && Array.isArray(alerts.features) ? alerts.features : [];
+  for (const f of feats) {
+    const p = f && f.properties;
+    if (!p || typeof p.event !== 'string' || !/fog/i.test(p.event)) continue;
+    // The live feed carries test and exercise messages, and cancellations
+    // linger briefly: none of them mean fog.
+    if (p.status !== 'Actual' || p.messageType === 'Cancel') continue;
+    return { event: p.event, until: p.ends || p.expires || null };
+  }
+  return null;
+}
+
+/**
+ * Fog risk for one dawn.
+ *
+ *   response    Open-Meteo multi-model hourly forecast (fogOutlookUrl)
+ *   targetDate  'YYYY-MM-DD', boathouse local date of the dawn in question
+ *   waterTempF  latest river temperature, or null
+ *   alerts      NWS active-alerts response for the point, or null
+ *
+ * Returns { level: 'likely' | 'possible' | 'low' | 'unknown', ... }. Missing or
+ * thin data gives 'unknown', never 'low': a fog outlook that fails quietly
+ * would read as reassurance.
+ */
+function assessFogRisk(response, targetDate, waterTempF, alerts) {
+  const R = FOG_RULES;
+  const out = {
+    level: 'unknown', date: targetDate, modelsTotal: 0, modelsFavorable: 0, perModel: [],
+    dawnAirF: null, waterMinusAirF: null, steam: false, advisory: fogAdvisory(alerts),
+  };
+
+  const h = response && response.hourly;
+  if (h && Array.isArray(h.time)) {
+    // Open-Meteo returns local wall-clock strings ("2026-10-02T05:00") for the
+    // requested timezone. Read the digits; never pass them to new Date(), which
+    // would treat them as UTC and shift the window by four or five hours.
+    const idx = [];
+    h.time.forEach((t, i) => {
+      if (typeof t !== 'string' || t.slice(0, 10) !== targetDate) return;
+      const hr = parseInt(t.slice(11, 13), 10);
+      if (hr >= R.windowStartHour && hr <= R.windowEndHour) idx.push(i);
+    });
+
+    for (const model of FOG_MODELS) {
+      const T = h['temperature_2m_' + model], Td = h['dew_point_2m_' + model], W = h['wind_speed_10m_' + model];
+      if (!Array.isArray(T) || !Array.isArray(Td) || !Array.isArray(W)) continue;
+      let closest = null, coldest = null;
+      for (const i of idx) {
+        if (!fogNum(T[i]) || !fogNum(Td[i]) || !fogNum(W[i])) continue;
+        // Inputs come in tenths of a degree, so rounding to tenths only removes
+        // float noise - which matters: 64.4 - 62.4 is 2.0000000000000142, and on
+        // 2 Oct that noise alone decided whether a model counted.
+        const spread = Math.round((T[i] - Td[i]) * 10) / 10;
+        if (!closest || spread < closest.spreadF) closest = { spreadF: spread, windMph: W[i] };
+        if (!coldest || T[i] < coldest.airF) coldest = { airF: T[i], windMph: W[i] };
+      }
+      if (!closest) continue;
+      out.perModel.push({
+        model, spreadF: closest.spreadF, windMph: closest.windMph,
+        favorable: closest.spreadF <= R.spreadMaxF && closest.windMph <= R.windMaxMph,
+        dawnAirF: coldest.airF, dawnWindMph: coldest.windMph,
+      });
+    }
+  }
+
+  out.modelsTotal = out.perModel.length;
+  out.modelsFavorable = out.perModel.filter(x => x.favorable).length;
+
+  if (out.modelsTotal >= R.minModels) {
+    out.dawnAirF = fogMedian(out.perModel.map(x => x.dawnAirF));
+    const dawnWind = fogMedian(out.perModel.map(x => x.dawnWindMph));
+    if (fogNum(waterTempF) && out.dawnAirF !== null) {
+      out.waterMinusAirF = Math.round((waterTempF - out.dawnAirF) * 10) / 10;
+      out.steam = out.waterMinusAirF >= R.steamDiffF && dawnWind !== null && dawnWind <= R.windMaxMph;
+    }
+    // Two thirds of models for "likely", one third for "possible" - in integer
+    // arithmetic, so no fraction is ever a rounding error away from its band.
+    const f = out.modelsFavorable, n = out.modelsTotal;
+    out.level = 3 * f >= 2 * n ? 'likely'
+              : (3 * f >= n || out.steam) ? 'possible'
+              : 'low';
+  }
+
+  // An official advisory outranks any model consensus, including "unknown".
+  if (out.advisory) out.level = 'likely';
+  return out;
+}
+
+function fogClock(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit',
+  }).format(d);
+}
+
+// The NWS event name is the only externally supplied text that reaches the
+// page or the email, and both insert fogText() output as HTML.
+function fogEsc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/**
+ * The words, shared verbatim by the website and the email. Safe HTML, pure
+ * ASCII with entities, because the email inserts these unchanged.
+ */
+function fogText(a, label) {
+  const camera = 'Check the boathouse camera before you drive in.';
+  const steamNote = a.steam
+    ? ` The river is about ${Math.round(a.waterMinusAirF)}&deg;F warmer than the dawn air, which can raise steam fog off the water even when the air is dry.`
+    : '';
+  if (a.advisory) {
+    const until = a.advisory.until && fogClock(a.advisory.until);
+    const event = fogEsc(a.advisory.event);
+    return {
+      headline: `NWS ${event} in effect${until ? ' until ' + until : ''}`,
+      detail: `The National Weather Service has issued a ${event} for the boathouse area.${steamNote} ${camera}`,
+    };
+  }
+  if (a.level === 'likely') {
+    return {
+      headline: `Fog likely at dawn ${label}`,
+      detail: `${a.modelsFavorable} of ${a.modelsTotal} forecast models show the air within 2&deg;F of saturation with light wind at dawn &mdash; the conditions that fog the river even when the airport stays clear.${steamNote} ${camera}`,
+    };
+  }
+  if (a.level === 'possible') {
+    const models = a.modelsFavorable > 0
+      ? `${a.modelsFavorable} of ${a.modelsTotal} forecast models show the air near saturation with light wind at dawn.`
+      : 'Most forecast models keep the air too dry for fog at dawn.';
+    return { headline: `Fog possible at dawn ${label}`, detail: `${models}${steamNote} ${camera}` };
+  }
+  if (a.level === 'low') {
+    return {
+      headline: `Fog not indicated ${label}`,
+      detail: 'Forecast models do not show fog conditions at dawn, but river fog can still form without warning.',
+    };
+  }
+  return {
+    headline: 'Fog outlook unavailable',
+    detail: `The fog forecast could not be loaded. ${camera}`,
+  };
+}
+
+async function loadFogOutlook() {
+  const { lat, lon } = BOATHOUSE_POINT;
+  const getJson = (url) => fetch(url).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+  // Independent sources: an NWS outage must not hide the model outlook, or
+  // the other way round.
+  const [fc, al] = await Promise.allSettled([
+    getJson(fogOutlookUrl(lat, lon)),
+    getJson(fogAlertsUrl(lat, lon)),
+  ]);
+  state.fogResponse = fc.status === 'fulfilled' ? fc.value : null;
+  state.fogAlerts   = al.status === 'fulfilled' ? al.value : null;
+  state.fogLoaded   = true;
+  renderFogOutlook();
+}
+
+function renderFogOutlook() {
+  const box = document.getElementById('fog-outlook');
+  if (!box || !state.fogLoaded) return;
+  const target = fogTarget(new Date());
+  // Water temperature arrives separately; renderDashboard calls this again
+  // once it has, so the steam-fog check catches up.
+  const water = fogNum(state.lastTempF) ? state.lastTempF : null;
+  const a = assessFogRisk(state.fogResponse, target.date, water, state.fogAlerts);
+  const t = fogText(a, target.label);
+  const pill = { likely: 'Likely', possible: 'Possible', low: 'Not indicated', unknown: 'Unavailable' }[a.level];
+  box.innerHTML = `
+    <div class="fog-head"><span class="section-label" style="margin:0;">Fog outlook &mdash; dawn</span><span class="fog-pill ${a.level}">${pill}</span></div>
+    <div class="fog-title">${t.headline}</div>
+    <div class="fog-detail">${t.detail}</div>
+    <div class="fog-rule">Club rule: ${FOG_LAUNCH_RULE}</div>`;
+
+  const banner = document.getElementById('warn-fog');
+  if (banner) {
+    if (a.level === 'likely') {
+      document.getElementById('warn-fog-title').innerHTML = t.headline;
+      document.getElementById('warn-fog-text').innerHTML =
+        ` ${t.detail} <strong style="display:inline;">${FOG_LAUNCH_RULE}</strong> Fog does not change which boats are allowed.`;
+      banner.style.display = 'flex';
+    } else {
+      banner.style.display = 'none';
+    }
+  }
+}
+
 
 /* ── RIVER LEVEL & FLOOD LOGIC ── */
 
@@ -1494,7 +1853,9 @@ function floodStatusForBoat(boatName, levelFt) {
 // Flood summary label for the pill
 function floodSummaryLabel(levelFt) {
   if (levelFt === null) return null;
-  if (levelFt <= 8)  return { cls:'rp-normal',  text:'All boats clear' };
+  // Not "All boats clear": the river level imposing no restriction says nothing
+  // about whether it is safe to row.
+  if (levelFt <= 8)  return { cls:'rp-normal',  text:'No river-level restrictions' };
   if (levelFt <= 9)  return { cls:'rp-caution', text:'1x / 2- use caution' };
   if (levelFt <= 10) return { cls:'rp-caution', text:'1x / 2- restricted, 2x caution' };
   if (levelFt <= 11) return { cls:'rp-danger',  text:'1x / 2- / 2x restricted' };
@@ -1669,7 +2030,7 @@ function renderFloodGrid(levelFt) {
     BOATS.map(b => {
       const s = levelFt !== null ? getFloodStatus(b, levelFt) : 'go';
       const dotCls = s === 'go' ? 'fc-go' : s === 'caution' ? 'fc-caution' : 'fc-no';
-      const label  = s === 'go' ? 'Clear' : s === 'caution' ? 'Caution' : 'No';
+      const label  = s === 'go' ? 'Allowed' : s === 'caution' ? 'Caution' : 'No';
       return `<div class="flood-cell"><div class="fc-name">${b}</div><div class="fc-dot ${dotCls}" title="${label}"></div><div style="font-size:.6rem;color:var(--muted);margin-top:3px;">${label}</div></div>`;
     }).join('');
 }

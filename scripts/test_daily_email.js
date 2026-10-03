@@ -20,21 +20,46 @@ const M = require('./daily_email.js');
 
 let passed = 0, failed = 0;
 const failures = [];
+let currentSection = '';
+
+// Async tests run one at a time, after the synchronous ones, and are genuinely
+// awaited. This harness used to call fn() and count it as passed on return - so
+// an async test was "passed" the moment it STARTED, and an assertion failing
+// inside it could never register. Verified: a deliberately failing assertion in
+// the Buttondown key test reported PASS. Serial execution also stops tests that
+// stub globals (fetch, env vars) from interleaving with each other.
+let asyncChain = Promise.resolve();
+
+function record(name, err, note = '') {
+  if (!err) { passed++; console.log(`  PASS  ${name}${note}`); return; }
+  failed++;
+  failures.push({ name, err });
+  console.log(`  FAIL  ${name}${note}`);
+  console.log(`        ${err.message}`);
+}
 
 function test(name, fn) {
+  if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+    const where = currentSection;
+    asyncChain = asyncChain.then(async () => {
+      try { await fn(); record(name, null, `  [async: ${where}]`); }
+      catch (err) { record(name, err, `  [async: ${where}]`); }
+    });
+    return;
+  }
   try {
-    fn();
-    passed++;
-    console.log(`  PASS  ${name}`);
+    const r = fn();
+    if (r && typeof r.then === 'function') {
+      throw new Error('test returned a promise but is not declared async; it would be counted before it finished');
+    }
+    record(name, null);
   } catch (err) {
-    failed++;
-    failures.push({ name, err });
-    console.log(`  FAIL  ${name}`);
-    console.log(`        ${err.message}`);
+    record(name, err);
   }
 }
 
 function section(title) {
+  currentSection = title;
   console.log(`\n${title}`);
   console.log('-'.repeat(title.length));
 }
@@ -598,7 +623,10 @@ test('subject names the binding constraint (temperature, river, or both)', () =>
     { level, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
     { available: false }, new Date()));
 
-  assert.ok(/All boats clear/.test(mk(72, 5)), mk(72, 5));
+  // No restriction from either rule set is reported as exactly that - never as
+  // "clear", which reads as a statement about conditions (Safety Committee,
+  // October 2026).
+  assert.ok(/No temp\/river restrictions/.test(mk(72, 5)), mk(72, 5));
   assert.ok(/high river/.test(mk(72, 10.4)), mk(72, 10.4));
   assert.ok(/Four Oar Rule/.test(mk(48, 5)), mk(48, 5));
   const both = mk(48, 11.5);
@@ -1115,15 +1143,20 @@ test('the primary hour differs between summer and winter', () => {
   assert.strictEqual(winter, 6, 'winter primary should be 06:00 UTC');
 });
 
-test('alreadySentToday reports unknown rather than false without an API key', () => {
+test('alreadySentToday reports unknown rather than false without an API key', async () => {
+  // Was a plain function returning a promise, which the old harness counted as
+  // passed before the promise settled - so this duplicate-send guard was never
+  // actually checked.
   const saved = process.env.BUTTONDOWN_API_KEY;
   delete process.env.BUTTONDOWN_API_KEY;
-  return M.alreadySentToday(new Date()).then(r => {
-    if (saved) process.env.BUTTONDOWN_API_KEY = saved;
+  try {
+    const r = await M.alreadySentToday(new Date());
     assert.strictEqual(r.known, false,
       'must not claim to know the answer when it cannot ask');
     assert.strictEqual(r.found, false);
-  });
+  } finally {
+    if (saved !== undefined) process.env.BUTTONDOWN_API_KEY = saved;
+  }
 });
 
 test('the slug is a per-day marker the duplicate check can match on', () => {
@@ -1337,11 +1370,663 @@ test('sendViaButtondown refuses to run without an API key', async () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-console.log(`\n${'='.repeat(60)}`);
-console.log(`${passed} passed, ${failed} failed`);
-console.log('='.repeat(60));
-if (failed > 0) {
-  console.log('\nFailures:');
-  failures.forEach(f => console.log(`  - ${f.name}\n    ${f.err.stack.split('\n').slice(0,3).join('\n    ')}`));
-  process.exit(1);
+section('10. Wording: nothing may read as a go-ahead');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Safety Committee decision, October 2026: the site and email know the water
+// temperature, river level and forecast - not fog, wind, current or debris on
+// the water. So nothing may tell members it is clear to row. Boats the rules
+// permit are "Allowed", and every email and page says that is not a go-ahead.
+
+const fsT = require('fs');
+const vmT = require('vm');
+const INDEX_PATH = path.join(__dirname, '..', 'index.html');
+const GO_AHEAD = /all boats clear|clear to row|safe to row|good to row|normal rowing conditions|ok to row/i;
+
+test('boatStatusLabel is shared from index.html and never says Go, Row or Clear', () => {
+  assert.strictEqual(typeof logic.boatStatusLabel, 'function', 'boatStatusLabel not extracted');
+  assert.strictEqual(logic.boatStatusLabel('go', null), 'Allowed');
+  assert.strictEqual(logic.boatStatusLabel('go', 'Certified only'), 'Cond.');
+  assert.strictEqual(logic.boatStatusLabel('caution', null), 'Caution');
+  assert.strictEqual(logic.boatStatusLabel('no', 'w/ launch'), 'No');
+});
+
+test('email boat labels equal the site label for every boat in every scenario', () => {
+  let n = 0;
+  for (const tempF of [30, 45, 55, 72]) {
+    for (const level of [null, 5, 8.5, 9.5, 10.4, 11.5, 13]) {
+      const d = M.computeDigest(logic, { raw: makeRaw(tempF), history: historyAtTemp(tempF) },
+        { level, isEstimate: false, failed: level === null, stale: false, ageMs: 0, lastObsTs: Date.now() },
+        { available: false }, new Date());
+      for (const tier of d.rows) for (const b of tier.boats) {
+        assert.strictEqual(b.label, logic.boatStatusLabel(b.status, b.note),
+          `@${tempF}F/${level}ft ${tier.name}/${b.name}`);
+        assert.ok(!/^(Go|Row|Clear)$/.test(b.label), `go-ahead label "${b.label}"`);
+        n++;
+      }
+    }
+  }
+  assert.ok(n > 300, `expected a broad sweep, ran ${n}`);
+});
+
+test('the normal zone is named for the rule, not the conditions', () => {
+  const d = M.computeDigest(logic, { raw: makeRaw(72), history: historyAtTemp(72) },
+    { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+    { available: false }, new Date());
+  assert.strictEqual(d.zone, 'normal', 'sanity');
+  assert.strictEqual(d.zoneLabel, 'No temperature restrictions');
+});
+
+test('river summary says "no river-level restrictions", never "clear"', () => {
+  assert.strictEqual(logic.floodSummaryLabel(5).text, 'No river-level restrictions');
+  for (const ft of [0, 3, 7.9, 8, 8.5, 9.5, 10.5, 11.5, 12.5]) {
+    assert.ok(!/clear/i.test(logic.floodSummaryLabel(ft).text), `${ft} ft: "${logic.floodSummaryLabel(ft).text}"`);
+  }
+});
+
+test('SAFETY: no subject ever contains "clear", in any scenario', () => {
+  let n = 0;
+  for (const tempF of [30, 38, 45, 52, 58, 65, 72, 80]) {
+    for (const level of [null, 2.5, 7.9, 8.5, 9, 10, 10.4, 11, 12, 15]) {
+      const s = M.renderSubject(M.computeDigest(logic,
+        { raw: makeRaw(tempF), history: historyAtTemp(tempF) },
+        { level, isEstimate: false, failed: level === null, stale: false, ageMs: 0, lastObsTs: Date.now() },
+        { available: false }, new Date()));
+      assert.ok(!/clear/i.test(s), `@${tempF}F/${level}ft: "${s}"`);
+      n++;
+    }
+  }
+  assert.ok(n >= 80);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('11. Fog outlook logic (real forecasts for real mornings)');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Fixtures are the archived Open-Meteo responses for four real mornings,
+// fetched with the same eight models and units the site requests (sha256 of
+// the canonical JSON: de5cc6c4...). Expected levels come from what those
+// models actually said, cross-checked against observations.
+
+const FOG_FX = require('./fixtures/fog_mornings.json');
+const clone = (o) => JSON.parse(JSON.stringify(o));
+
+// The UTC instant whose New York wall clock reads ymd hh:mm (first occurrence).
+function etDate(ymd, hour, minute = 0) {
+  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  const [y, m, d] = ymd.split('-').map(Number);
+  for (const off of [4, 5]) {
+    const cand = new Date(Date.UTC(y, m - 1, d, hour + off, minute));
+    const p = fmt.formatToParts(cand); const g = t => p.find(x => x.type === t).value;
+    if (`${g('year')}-${g('month')}-${g('day')}` === ymd && +g('hour') === hour && +g('minute') === minute) return cand;
+  }
+  throw new Error(`no New York time ${ymd} ${hour}:${minute}`);
 }
+const assess = (name, water, alerts = null, response) =>
+  logic.assessFogRisk(response || FOG_FX[name].response, FOG_FX[name].date,
+    water === undefined ? FOG_FX[name].waterTempF : water, alerts);
+
+test('every fog export reaches the email (extraction skips missing names silently)', () => {
+  for (const fn of ['assessFogRisk', 'fogText', 'fogTarget', 'fogOutlookUrl', 'fogAlertsUrl', 'fogAdvisory']) {
+    assert.strictEqual(typeof logic[fn], 'function', `${fn} missing from the email's copy of the site logic`);
+  }
+  for (const k of ['FOG_MODELS', 'FOG_RULES', 'FOG_LAUNCH_RULE', 'BOATHOUSE_POINT', 'ALLOWED_NOTE_HTML']) {
+    assert.ok(logic[k] !== undefined, `${k} missing`);
+  }
+});
+
+test('the calibrated configuration is exactly what was backtested', () => {
+  // The calibration notes in index.html describe THESE values. Changing any of
+  // them changes what those numbers mean: re-run the backtest, then update both.
+  assert.deepStrictEqual(plain(logic.FOG_MODELS), ['gfs_seamless', 'ncep_nbm_conus', 'ecmwf_ifs025',
+    'icon_seamless', 'gem_seamless', 'meteofrance_seamless', 'ukmo_seamless', 'jma_seamless']);
+  assert.deepStrictEqual(plain(logic.FOG_RULES), { windowStartHour: 4, windowEndHour: 9, spreadMaxF: 2,
+    windMaxMph: 8, steamDiffF: 18, minModels: 3, nextDayFromHour: 10 });
+});
+
+test('the picket-fence rule is quoted exactly as the Safety Handbook gives it', () => {
+  assert.strictEqual(logic.FOG_LAUNCH_RULE,
+    'If you cannot see the house with the picket fence, do not launch.');
+});
+
+test('REGRESSION 2 Oct 2026: the dense-fog morning that prompted this is LIKELY', () => {
+  const a = assess('likely_2026_10_02');
+  assert.strictEqual(a.level, 'likely');
+  assert.strictEqual(a.modelsTotal, 8);
+  assert.strictEqual(a.modelsFavorable, 7);
+});
+
+test('2 Oct: the default model on its own would have missed it', () => {
+  // HRRR, which the site's weather card uses, had a 2.4F spread at best.
+  const gfs = assess('likely_2026_10_02').perModel.find(m => m.model === 'gfs_seamless');
+  assert.strictEqual(gfs.spreadF, 2.4);
+  assert.strictEqual(gfs.favorable, false);
+});
+
+test('a 2.0F spread counts - float noise must not exclude it', () => {
+  // NBM on 2 Oct: 64.4 - 62.4 = 2.0000000000000142 in floating point. Without
+  // rounding, this one model's vote flips, and it was decisive at the margin.
+  assert.ok(64.4 - 62.4 > 2, 'sanity: raw float subtraction overshoots');
+  const nbm = assess('likely_2026_10_02').perModel.find(m => m.model === 'ncep_nbm_conus');
+  assert.strictEqual(nbm.spreadF, 2);
+  assert.strictEqual(nbm.favorable, true);
+});
+
+test('9 Sep 2026: five of eight models -> POSSIBLE', () => {
+  const a = assess('possible');
+  assert.strictEqual(a.modelsFavorable, 5);
+  assert.strictEqual(a.level, 'possible');
+});
+
+test('31 May 2026: steam fog over warm water -> POSSIBLE with dry air', () => {
+  const a = assess('steam_2026_05_31');
+  assert.strictEqual(a.modelsFavorable, 1, 'sanity: the air itself was not saturated');
+  assert.strictEqual(a.steam, true);
+  assert.ok(a.waterMinusAirF >= 18 && a.waterMinusAirF < 22, `water-air ${a.waterMinusAirF}`);
+  assert.strictEqual(a.level, 'possible');
+});
+
+test('the steam case depends on the water: without a water reading it is LOW', () => {
+  assert.strictEqual(assess('steam_2026_05_31', null).level, 'low');
+});
+
+test('19 Sep 2026: dry air, 16.5F water-air gap -> LOW', () => {
+  const a = assess('dry');
+  assert.strictEqual(a.modelsFavorable, 0);
+  assert.strictEqual(a.steam, false);
+  assert.strictEqual(a.level, 'low');
+});
+
+test('only the 4-9 AM window counts: saturated air at 3 AM and 10 AM is ignored', () => {
+  const r = clone(FOG_FX.dry.response);
+  const h = r.hourly;
+  for (const m of logic.FOG_MODELS) for (const hr of [0, 1, 2, 3, 10, 11]) {
+    h['dew_point_2m_' + m][hr] = h['temperature_2m_' + m][hr];
+    h['wind_speed_10m_' + m][hr] = 0;
+  }
+  assert.strictEqual(logic.assessFogRisk(r, '2026-09-19', 60, null).level, 'low');
+});
+
+test('the window is inclusive at both ends: 4 AM and 9 AM count', () => {
+  for (const hr of [4, 9]) {
+    const r = clone(FOG_FX.dry.response);
+    for (const m of logic.FOG_MODELS) {
+      r.hourly['dew_point_2m_' + m][hr] = r.hourly['temperature_2m_' + m][hr];
+      r.hourly['wind_speed_10m_' + m][hr] = 2;
+    }
+    assert.strictEqual(logic.assessFogRisk(r, '2026-09-19', 60, null).level, 'likely', `${hr} AM`);
+  }
+});
+
+test('the date must match: tomorrow\'s fog is not reported for this morning', () => {
+  assert.strictEqual(logic.assessFogRisk(FOG_FX.likely_2026_10_02.response, '2026-10-03', 65, null).level,
+    'unknown', 'a date absent from the forecast is unknown, not low');
+});
+
+test('SAFETY: a missing reading is skipped, never read as zero spread and zero wind', () => {
+  // isFinite(null) is true - the trap fogNum() avoids. Null every dew point in
+  // the dry fixture: if nulls were read as 0 the spread would be huge, but if
+  // temperature were nulled and read as 0 alongside a 0 dew point, the spread
+  // would be ZERO - perfect fog. Both must simply drop the model.
+  const r = clone(FOG_FX.dry.response);
+  for (const m of logic.FOG_MODELS) {
+    r.hourly['temperature_2m_' + m] = r.hourly['temperature_2m_' + m].map(() => null);
+    r.hourly['dew_point_2m_' + m] = r.hourly['dew_point_2m_' + m].map(() => null);
+  }
+  const a = logic.assessFogRisk(r, '2026-09-19', 72, null);
+  assert.strictEqual(a.modelsTotal, 0);
+  assert.strictEqual(a.level, 'unknown');
+});
+
+test('SAFETY: thin data is "unknown", never "low"', () => {
+  const r = clone(FOG_FX.dry.response);
+  for (const m of logic.FOG_MODELS.slice(2)) delete r.hourly['temperature_2m_' + m];
+  const a = logic.assessFogRisk(r, '2026-09-19', 72, null);
+  assert.strictEqual(a.modelsTotal, 2);
+  assert.strictEqual(a.level, 'unknown', 'two models are not enough to reassure anyone');
+  for (const bad of [null, undefined, {}, { hourly: null }, { hourly: { time: 'x' } }, 'garbage']) {
+    assert.strictEqual(logic.assessFogRisk(bad, '2026-09-19', 72, null).level, 'unknown', JSON.stringify(bad));
+  }
+});
+
+test('levels are decided in integer arithmetic at the two-thirds and one-third lines', () => {
+  // Build N models of which F are favourable, by editing the dry fixture.
+  function scenario(n, f) {
+    const r = clone(FOG_FX.dry.response);
+    logic.FOG_MODELS.forEach((m, i) => {
+      if (i >= n) { delete r.hourly['temperature_2m_' + m]; return; }
+      if (i < f) {
+        r.hourly['dew_point_2m_' + m][6] = r.hourly['temperature_2m_' + m][6] - 1;
+        r.hourly['wind_speed_10m_' + m][6] = 3;
+      }
+    });
+    return logic.assessFogRisk(r, '2026-09-19', 60, null).level;
+  }
+  assert.strictEqual(scenario(6, 4), 'likely', '4 of 6 is exactly two thirds');
+  assert.strictEqual(scenario(6, 3), 'possible');
+  assert.strictEqual(scenario(6, 2), 'possible', '2 of 6 is exactly one third');
+  assert.strictEqual(scenario(6, 1), 'low');
+  assert.strictEqual(scenario(8, 6), 'likely');
+  assert.strictEqual(scenario(8, 5), 'possible');
+  assert.strictEqual(scenario(8, 3), 'possible');
+  assert.strictEqual(scenario(8, 2), 'low');
+  assert.strictEqual(scenario(3, 2), 'likely');
+});
+
+test('wind above 8 mph disqualifies a saturated model', () => {
+  const r = clone(FOG_FX.dry.response);
+  for (const m of logic.FOG_MODELS) {
+    r.hourly['dew_point_2m_' + m][6] = r.hourly['temperature_2m_' + m][6];
+    r.hourly['wind_speed_10m_' + m][6] = 8.1;
+  }
+  assert.strictEqual(logic.assessFogRisk(r, '2026-09-19', 60, null).level, 'low');
+});
+
+// Shaped exactly like the live api.weather.gov feed (checked 2 Oct 2026).
+function nwsAlerts(props) {
+  return { type: 'FeatureCollection', features: [{ type: 'Feature', properties: Object.assign({
+    event: 'Dense Fog Advisory', status: 'Actual', messageType: 'Alert', severity: 'Minor',
+    headline: 'Dense Fog Advisory issued October 3 at 3:12AM EDT until October 3 at 9:00AM EDT by NWS Upton NY',
+    onset: '2026-10-03T03:12:00-04:00', ends: '2026-10-03T09:00:00-04:00', expires: '2026-10-03T09:00:00-04:00',
+  }, props) }] };
+}
+
+test('an NWS Dense Fog Advisory makes it LIKELY, whatever the models say', () => {
+  assert.strictEqual(assess('dry', 60, nwsAlerts({})).level, 'likely');
+  const a = logic.assessFogRisk(null, '2026-09-19', null, nwsAlerts({}));
+  assert.strictEqual(a.level, 'likely', 'even with no model data at all');
+  assert.strictEqual(a.advisory.event, 'Dense Fog Advisory');
+});
+
+test('NWS test messages, cancellations and non-fog alerts are ignored', () => {
+  // The live feed carried a "Test Message" when this was built.
+  assert.strictEqual(assess('dry', 60, nwsAlerts({ status: 'Test' })).level, 'low');
+  assert.strictEqual(assess('dry', 60, nwsAlerts({ status: 'Exercise' })).level, 'low');
+  assert.strictEqual(assess('dry', 60, nwsAlerts({ messageType: 'Cancel' })).level, 'low');
+  assert.strictEqual(assess('dry', 60, nwsAlerts({ event: 'Small Craft Advisory' })).level, 'low');
+  assert.strictEqual(assess('dry', 60, { features: 'nonsense' }).level, 'low');
+  assert.strictEqual(assess('dry', 60, nwsAlerts({ event: 'Freezing Fog Advisory' })).level, 'likely');
+});
+
+test('an alert with no end time falls back to its expiry (12 of 423 live alerts had none)', () => {
+  const a = assess('dry', 60, nwsAlerts({ ends: null }));
+  assert.strictEqual(a.advisory.until, '2026-10-03T09:00:00-04:00');
+  assert.ok(/until 9:00 AM/.test(logic.fogText(a, 'this morning').headline), logic.fogText(a, 'this morning').headline);
+});
+
+test('SECURITY: text from the NWS feed is escaped before it reaches any HTML', () => {
+  const a = assess('dry', 60, nwsAlerts({ event: 'Fog <img src=x onerror=alert(1)>' }));
+  const t = logic.fogText(a, 'this morning');
+  for (const s of [t.headline, t.detail]) {
+    assert.ok(!/<img/i.test(s), `unescaped markup: ${s}`);
+    assert.ok(/&lt;img/.test(s), `expected escaped markup: ${s}`);
+  }
+});
+
+test('fog wording for each level', () => {
+  const t = (name, water, alerts) => logic.fogText(assess(name, water, alerts), 'this morning');
+  assert.ok(/^Fog likely at dawn this morning$/.test(t('likely_2026_10_02').headline));
+  assert.ok(/7 of 8 forecast models/.test(t('likely_2026_10_02').detail));
+  assert.ok(/^Fog possible at dawn this morning$/.test(t('possible').headline));
+  assert.ok(/steam fog/.test(t('steam_2026_05_31').detail), 'steam case should explain itself');
+  assert.ok(/^Fog not indicated this morning$/.test(t('dry').headline));
+  assert.ok(/can still form/.test(t('dry').detail), '"not indicated" must not read as "no fog"');
+  assert.strictEqual(logic.fogText(logic.assessFogRisk(null, '2026-09-19', null, null), 'x').headline,
+    'Fog outlook unavailable');
+  for (const s of [t('likely_2026_10_02'), t('possible'), t('dry')]) {
+    assert.ok(!GO_AHEAD.test(s.headline + s.detail));
+    assert.strictEqual(nonAsciiChars(s.headline + s.detail).length, 0, 'fog text must be pure ASCII');
+  }
+});
+
+test('fogTarget: this morning until 10 AM, then tomorrow - by calendar, across DST and year-end', () => {
+  const T = (d) => plain(logic.fogTarget(d));
+  assert.deepStrictEqual(T(etDate('2026-10-02', 0, 0)), { date: '2026-10-02', label: 'this morning' });
+  assert.deepStrictEqual(T(etDate('2026-10-02', 1, 0)), { date: '2026-10-02', label: 'this morning' });
+  assert.deepStrictEqual(T(etDate('2026-10-02', 9, 59)), { date: '2026-10-02', label: 'this morning' });
+  assert.deepStrictEqual(T(etDate('2026-10-02', 10, 0)), { date: '2026-10-03', label: 'tomorrow morning' });
+  assert.deepStrictEqual(T(etDate('2026-10-02', 23, 59)), { date: '2026-10-03', label: 'tomorrow morning' });
+  assert.deepStrictEqual(T(etDate('2026-10-31', 11, 0)), { date: '2026-11-01', label: 'tomorrow morning' });
+  assert.deepStrictEqual(T(etDate('2026-12-31', 15, 0)), { date: '2027-01-01', label: 'tomorrow morning' });
+  assert.deepStrictEqual(T(etDate('2028-02-28', 12, 0)), { date: '2028-02-29', label: 'tomorrow morning' });
+  // Spring forward (8 Mar 2026): 2 AM never happens.
+  assert.deepStrictEqual(T(etDate('2026-03-08', 1, 30)), { date: '2026-03-08', label: 'this morning' });
+  assert.deepStrictEqual(T(etDate('2026-03-08', 3, 30)), { date: '2026-03-08', label: 'this morning' });
+  assert.deepStrictEqual(T(etDate('2026-03-08', 10, 30)), { date: '2026-03-09', label: 'tomorrow morning' });
+  // Fall back (1 Nov 2026): 1:30 AM happens twice; both are this morning.
+  assert.deepStrictEqual(T(new Date(Date.UTC(2026, 10, 1, 5, 30))), { date: '2026-11-01', label: 'this morning' });
+  assert.deepStrictEqual(T(new Date(Date.UTC(2026, 10, 1, 6, 30))), { date: '2026-11-01', label: 'this morning' });
+  // The email's own send time.
+  assert.strictEqual(logic.fogTarget(etDate('2026-07-15', 1, 0)).label, 'this morning');
+});
+
+test('the forecast URL asks for exactly the calibrated models, variables and units', () => {
+  const u = new URL(logic.fogOutlookUrl(41.437, -73.119));
+  assert.strictEqual(u.hostname, 'api.open-meteo.com');
+  assert.strictEqual(u.searchParams.get('models'), logic.FOG_MODELS.join(','));
+  assert.strictEqual(u.searchParams.get('hourly'), 'temperature_2m,dew_point_2m,wind_speed_10m');
+  assert.strictEqual(u.searchParams.get('temperature_unit'), 'fahrenheit');
+  assert.strictEqual(u.searchParams.get('wind_speed_unit'), 'mph');
+  assert.strictEqual(u.searchParams.get('timezone'), 'America/New_York');
+  assert.strictEqual(u.searchParams.get('forecast_days'), '2', 'must cover tomorrow\'s dawn after 10 AM');
+  assert.strictEqual(new URL(logic.fogAlertsUrl(41.437, -73.119)).hostname, 'api.weather.gov');
+});
+
+test('the email and the site forecast the same point', () => {
+  assert.strictEqual(M.BOATHOUSE.lat, logic.BOATHOUSE_POINT.lat);
+  assert.strictEqual(M.BOATHOUSE.lon, logic.BOATHOUSE_POINT.lon);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('12. Fog and wording in the email');
+// ═══════════════════════════════════════════════════════════════════════════
+
+// The digest as the 1 AM run would build it on a fixture's morning.
+function fogDigest(name, opts = {}) {
+  const fx = FOG_FX[name];
+  const now = opts.now || etDate(fx.date, 1, 0);
+  const water = opts.water !== undefined ? opts.water : fx.waterTempF;
+  const level = opts.riverLevel !== undefined ? opts.riverLevel : 3.1;
+  return M.computeDigest(logic,
+    { raw: makeRaw(water, now), history: historyAtTemp(water) },
+    { level, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: now.getTime() },
+    { available: true, code: 0, tempF: 64, feelsF: 64, windMph: 3, gustMph: 6, dir: 'S', precip: '0.00' },
+    now,
+    opts.inputs !== undefined ? opts.inputs : { response: fx.response, alerts: opts.alerts || null });
+}
+function fogVariants() {
+  return [
+    fogDigest('likely_2026_10_02'),
+    fogDigest('possible'),
+    fogDigest('steam_2026_05_31'),
+    fogDigest('dry'),
+    fogDigest('dry', { alerts: nwsAlerts({}) }),
+    fogDigest('dry', { inputs: null }),
+    fogDigest('likely_2026_10_02', { riverLevel: 11.5, water: 45 }),
+  ];
+}
+
+test('the digest carries the site\'s fog verdict, using the water temperature for steam fog', () => {
+  assert.strictEqual(fogDigest('likely_2026_10_02').fog.level, 'likely');
+  assert.strictEqual(fogDigest('possible').fog.level, 'possible');
+  const steam = fogDigest('steam_2026_05_31');
+  assert.strictEqual(steam.fog.level, 'possible');
+  assert.strictEqual(steam.fog.steam, true, 'the email must pass the river temperature through');
+  assert.strictEqual(fogDigest('dry').fog.level, 'low');
+  assert.strictEqual(fogDigest('dry', { inputs: null }).fog.level, 'unknown');
+  assert.strictEqual(fogDigest('dry', { inputs: { response: null, alerts: null } }).fog.level, 'unknown');
+});
+
+test('SAFETY: fog never changes which boats are allowed', () => {
+  for (const [tempF, level] of [[72, 3], [55, 9.5], [45, 10.4], [35, 5]]) {
+    const base = { raw: makeRaw(tempF, etDate('2026-10-02', 1)), history: historyAtTemp(tempF) };
+    const river = { level, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() };
+    const withFog = M.computeDigest(logic, base, river, { available: false }, etDate('2026-10-02', 1),
+      { response: FOG_FX.likely_2026_10_02.response, alerts: nwsAlerts({}) });
+    const noFog = M.computeDigest(logic, base, river, { available: false }, etDate('2026-10-02', 1), null);
+    assert.strictEqual(withFog.fog.level, 'likely', 'sanity');
+    assert.deepStrictEqual(plain(withFog.rows), plain(noFog.rows), `@${tempF}F/${level}ft`);
+    assert.strictEqual(withFog.zone, noFog.zone);
+  }
+});
+
+test('subject leads with FOG RISK on a likely-fog morning, and only then', () => {
+  const s = M.renderSubject(fogDigest('likely_2026_10_02'), etDate('2026-10-02', 1));
+  assert.ok(/^NHRC Oct 2 - FOG RISK - /.test(s), s);
+  assert.ok(/^NHRC [A-Z][a-z]{2} \d{1,2} - FOG RISK - /.test(
+    M.renderSubject(fogDigest('dry', { alerts: nwsAlerts({}) }))), 'an NWS advisory is a fog risk');
+  for (const name of ['possible', 'steam_2026_05_31', 'dry']) {
+    assert.ok(!/FOG/.test(M.renderSubject(fogDigest(name))), `${name}: "possible" and below stay out of the subject`);
+  }
+  assert.ok(!/FOG/.test(M.renderSubject(fogDigest('dry', { inputs: null }))));
+});
+
+test('subject length: within 78 normally; with FOG RISK the warning survives any truncation', () => {
+  const worst = M.renderSubject(M.computeDigest(logic,
+    { raw: makeRaw(48, etDate('2026-09-30', 1)), history: historyAtTemp(48) },
+    { level: 11.5, isEstimate: true, failed: false, stale: true, ageMs: 0, lastObsTs: Date.now() },
+    { available: false }, etDate('2026-09-30', 1),
+    { response: null, alerts: nwsAlerts({}) }), etDate('2026-09-30', 1));
+  assert.ok(/FOG RISK/.test(worst), `sanity: ${worst}`);
+  assert.ok(worst.length <= 85, `${worst.length}: "${worst}"`);
+  assert.ok(worst.indexOf('FOG RISK') <= 15, `the warning must sit at the front: "${worst}"`);
+  for (const name of ['possible', 'dry']) {
+    const s = M.renderSubject(fogDigest(name));
+    assert.ok(s.length <= 78, `${s.length}: "${s}"`);
+  }
+});
+
+test('a likely-fog email shows the warning box, the picket-fence rule, and that boats are unaffected', () => {
+  const html = M.renderEmailHtml(fogDigest('likely_2026_10_02'));
+  assert.ok(html.includes('Fog likely at dawn this morning'));
+  assert.ok(html.includes('Club rule: If you cannot see the house with the picket fence, do not launch.'));
+  assert.ok(html.includes('Fog does not change which boats are allowed.'));
+  assert.ok(html.indexOf('Fog likely at dawn') < html.indexOf('Boat restrictions'),
+    'the fog warning belongs above the boat list');
+});
+
+test('a "not indicated" or "unavailable" email still carries the fog line and the rule', () => {
+  for (const d of [fogDigest('dry'), fogDigest('dry', { inputs: null })]) {
+    const html = M.renderEmailHtml(d);
+    assert.ok(/Fog not indicated this morning|Fog outlook unavailable/.test(html));
+    assert.ok(html.includes('picket fence'), 'the rule applies every day');
+    assert.ok(!html.includes('Fog does not change which boats'), 'no warning box on a quiet morning');
+  }
+});
+
+test('an NWS advisory renders in the red style; a model-only warning in amber', () => {
+  const adv = M.renderEmailHtml(fogDigest('dry', { alerts: nwsAlerts({}) }));
+  assert.ok(/NWS Dense Fog Advisory in effect until 9:00 AM/.test(adv), 'advisory headline');
+  assert.ok(adv.includes('background-color:#fdeaea'), 'advisory should use the "no" palette');
+  const likely = M.renderEmailHtml(fogDigest('likely_2026_10_02'));
+  assert.ok(likely.includes('background-color:#fdf2d8'), 'model warning should use the caution palette');
+});
+
+test('every email says "Allowed" is not a go-ahead', () => {
+  for (const d of [...everyDigest(), ...fogVariants()]) {
+    const html = M.renderEmailHtml(d);
+    assert.ok(/is not a go-ahead/.test(html), 'missing the not-a-go-ahead note');
+    assert.ok(/Fog, wind and water conditions are not measured here/.test(html));
+  }
+});
+
+test('SAFETY: no email variant contains go-ahead language or a Go pill', () => {
+  for (const d of [...everyDigest(), ...fogVariants()]) {
+    const html = M.renderEmailHtml(d);
+    assert.ok(!GO_AHEAD.test(html), `go-ahead phrase: ${(html.match(GO_AHEAD) || [])[0]}`);
+    assert.ok(!/>(Go|Row|Clear)<\/span>/.test(html), 'go-ahead status pill');
+  }
+});
+
+test('fog variants pass every email-client constraint the main sweep enforces', () => {
+  for (const d of fogVariants()) {
+    const html = M.renderEmailHtml(d);
+    assert.ok(!/<style|@media|\sclass=|rgba\(/i.test(html), 'style, media query, class or rgba');
+    assert.ok(!/<!DOCTYPE|<html|<head|<body/i.test(html), 'document wrapper');
+    assert.strictEqual(nonAsciiChars(html).length, 0, 'non-ASCII in body');
+    assert.strictEqual(nonAsciiChars(M.renderSubject(d)).length, 0, 'non-ASCII in subject');
+    for (const tag of html.match(/<(td|div)\b[^>]*style="[^"]*"[^>]*>/gi) || []) {
+      const style = tag.match(/style="([^"]*)"/)[1];
+      if (/(^|;)\s*color\s*:/.test(style)) assert.ok(/background-color\s*:/.test(style), `no background: ${tag}`);
+      if (/font-size|font-weight/.test(style) && !/font-size\s*:\s*0\b/.test(style)) {
+        assert.ok(/(^|;)\s*color\s*:/.test(style), `no colour: ${tag}`);
+      }
+    }
+    const opens = (html.match(/<(table|tr|td|div)\b/gi) || []).length;
+    const closes = (html.match(/<\/(table|tr|td|div)>/gi) || []).length;
+    assert.strictEqual(opens, closes, 'unbalanced tags');
+    assert.ok(html.includes('{{ unsubscribe_url }}') && /guidance only/i.test(html));
+    assert.ok(!/undefined|NaN|\[object/.test(html), 'leaked undefined/NaN/object');
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('13. Website rendering (index.html in a DOM stub)');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The email shares the site's logic, but the site's own render functions are
+// separate code. Run the real page script with a DOM that remembers what was
+// written, at a fixed clock, and read the result back.
+
+function loadSite(nowMs) {
+  const src = fsT.readFileSync(INDEX_PATH, 'utf8').match(/<script>([\s\S]*)<\/script>\s*<\/body>/)[1];
+  const els = {};
+  const el = id => els[id] || (els[id] = {
+    id, innerHTML: '', textContent: '', className: '', style: {}, value: '',
+    getContext: () => ({ createLinearGradient: () => ({ addColorStop() {} }) }),
+    addEventListener() {}, querySelector: () => null, querySelectorAll: () => [],
+    classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {}, appendChild() {},
+  });
+  class FixedDate extends Date {
+    constructor(...a) { if (a.length) super(...a); else super(nowMs); }
+    static now() { return nowMs; }
+  }
+  const sandbox = {
+    document: { getElementById: el, querySelectorAll: () => [], querySelector: () => null,
+                addEventListener() {}, createElement: () => el('__created') },
+    window: { addEventListener() {} }, fetch: () => new Promise(() => {}),
+    Chart: function () { return { destroy() {}, update() {} }; }, moment: {},
+    setInterval() {}, setTimeout() {}, console: { log() {}, warn() {}, error() {} },
+    URL: { createObjectURL() {}, revokeObjectURL() {} }, Blob: function () {}, Image: function () {},
+    Intl, Date: FixedDate, Math, JSON, isNaN, parseInt, parseFloat, Number, Array, Object, String,
+  };
+  const ctx = vmT.createContext(sandbox);
+  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, renderFogOutlook, renderFloodGrid };',
+    ctx, { timeout: 10000 });
+  return { site: ctx.__site, els };
+}
+
+test('site: every zone shows "Allowed", never Row/Go/Clear, with the not-a-go-ahead note first', () => {
+  const { site, els } = loadSite(Date.now());
+  for (const tempF of [35, 45, 55, 72]) {
+    site.state.allHistory = historyAtTemp(tempF);
+    site.state.riverLevel = 3;
+    site.renderRowingStatus(tempF);
+    const grid = els['tiers-grid'].innerHTML, notes = els['rowing-notes'].innerHTML;
+    assert.ok(!/>(Row|Go|Clear)</.test(grid), `${tempF}F: go-ahead pill in the site grid`);
+    if (tempF === 72) assert.ok(/>Allowed</.test(grid), 'normal zone should show Allowed');
+    assert.ok(/^<div class="allowed-note"><strong>&ldquo;Allowed&rdquo; is not a go-ahead/.test(notes),
+      `${tempF}F: the note must come first: ${notes.slice(0, 80)}`);
+    assert.ok(!GO_AHEAD.test(els['rule-banner'].innerHTML), els['rule-banner'].innerHTML);
+  }
+  assert.ok(/No temperature restrictions/.test(els['rule-banner'].innerHTML));
+});
+
+test('site: the river panel labels permitted boats "Allowed"', () => {
+  const { site, els } = loadSite(Date.now());
+  site.renderFloodGrid(3);
+  assert.ok(/>Allowed</.test(els['flood-grid'].innerHTML));
+  assert.ok(!/>Clear</.test(els['flood-grid'].innerHTML));
+});
+
+test('site: the page never flashes an all-clear before data loads', () => {
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8').replace(/<!--[\s\S]*?-->/g, '');
+  const markup = html.slice(0, html.indexOf('<script>'));
+  assert.ok(/id="rule-banner" class="rule-banner neutral"/.test(markup), 'placeholder must be neutral, not green');
+  assert.ok(!GO_AHEAD.test(markup), `go-ahead phrase in static markup: ${(markup.match(GO_AHEAD) || [])[0]}`);
+  assert.ok(!/Current Conditions/.test(markup), 'the rules card must not claim to show current conditions');
+});
+
+test('site: 5 AM on 2 Oct shows fog LIKELY in the card and the top banner, with the rule', () => {
+  const { site, els } = loadSite(etDate('2026-10-02', 5).getTime());
+  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.likely_2026_10_02.response,
+    fogAlerts: null, lastTempF: 65.7 });
+  site.renderFogOutlook();
+  const box = els['fog-outlook'].innerHTML;
+  assert.ok(/fog-pill likely/.test(box) && /Fog likely at dawn this morning/.test(box), box);
+  assert.ok(/If you cannot see the house with the picket fence, do not launch\./.test(box));
+  assert.strictEqual(els['warn-fog'].style.display, 'flex');
+  assert.ok(/picket fence/.test(els['warn-fog-text'].innerHTML));
+  assert.ok(/does not change which boats are allowed/.test(els['warn-fog-text'].innerHTML));
+});
+
+test('site: a quiet morning shows the outlook but no banner; nothing renders before loading', () => {
+  const { site, els } = loadSite(etDate('2026-09-19', 6).getTime());
+  site.renderFogOutlook();
+  assert.strictEqual(els['fog-outlook'].innerHTML, '', 'must not render before the forecast has loaded');
+  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.dry.response, fogAlerts: null, lastTempF: 72.3 });
+  site.renderFogOutlook();
+  assert.ok(/Fog not indicated this morning/.test(els['fog-outlook'].innerHTML));
+  assert.ok(/picket fence/.test(els['fog-outlook'].innerHTML));
+  assert.strictEqual(els['warn-fog'].style.display, 'none');
+});
+
+test('site: a failed fog fetch says "unavailable" - never silence, never "not indicated"', () => {
+  const { site, els } = loadSite(etDate('2026-10-02', 5).getTime());
+  Object.assign(site.state, { fogLoaded: true, fogResponse: null, fogAlerts: null, lastTempF: 65 });
+  site.renderFogOutlook();
+  assert.ok(/Fog outlook unavailable/.test(els['fog-outlook'].innerHTML));
+  assert.ok(!/not indicated/.test(els['fog-outlook'].innerHTML));
+});
+
+test('site: after 10 AM the outlook is about tomorrow morning', () => {
+  const { site, els } = loadSite(etDate('2026-10-01', 14).getTime());
+  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.likely_2026_10_02.response,
+    fogAlerts: null, lastTempF: 65.7 });
+  site.renderFogOutlook();
+  assert.ok(/Fog likely at dawn tomorrow morning/.test(els['fog-outlook'].innerHTML), els['fog-outlook'].innerHTML);
+});
+
+test('site: the steam-fog check uses the river temperature once it arrives', () => {
+  const { site, els } = loadSite(etDate('2026-05-31', 2).getTime());
+  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.steam_2026_05_31.response,
+    fogAlerts: null, lastTempF: null });
+  site.renderFogOutlook();
+  assert.ok(/Fog not indicated/.test(els['fog-outlook'].innerHTML), 'no water reading yet');
+  site.state.lastTempF = 63.25;
+  site.renderFogOutlook();
+  assert.ok(/Fog possible at dawn this morning/.test(els['fog-outlook'].innerHTML));
+  assert.ok(/steam fog/.test(els['fog-outlook'].innerHTML));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('14. Fog network loader');
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('loadFogInputs: both sources fetched, NWS gets a User-Agent, one failure does not hide the other', async () => {
+  const realFetch = global.fetch;
+  const calls = [];
+  global.fetch = async (url, opts = {}) => {
+    calls.push({ url: String(url), headers: opts.headers || {} });
+    if (/api\.weather\.gov/.test(url)) throw new Error('NWS down');
+    return { ok: true, json: async () => FOG_FX.likely_2026_10_02.response };
+  };
+  try {
+    const r = await M.loadFogInputs(logic);
+    assert.strictEqual(calls.length, 2);
+    const nws = calls.find(c => /api\.weather\.gov/.test(c.url));
+    assert.ok(nws && /roworno\.com/.test(nws.headers['User-Agent']), 'NWS rejects requests without a User-Agent');
+    assert.ok(!/@/.test(nws.headers['User-Agent']), 'no personal address in the User-Agent');
+    assert.ok(calls.some(c => c.url === logic.fogOutlookUrl(M.BOATHOUSE.lat, M.BOATHOUSE.lon)));
+    assert.strictEqual(r.alerts, null, 'a failed source comes back null');
+    assert.ok(r.response && r.response.hourly, 'the other source still arrives');
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+test('loadFogInputs: total network failure yields nulls, which assess as "unknown"', async () => {
+  const realFetch = global.fetch;
+  global.fetch = async () => { throw new Error('offline'); };
+  try {
+    const r = await M.loadFogInputs(logic);
+    assert.deepStrictEqual(r, { response: null, alerts: null });
+    assert.strictEqual(logic.assessFogRisk(r.response, '2026-10-02', 65, r.alerts).level, 'unknown');
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Report only once every async test has actually finished.
+asyncChain.then(() => {
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`${passed} passed, ${failed} failed`);
+  console.log('='.repeat(60));
+  if (failed > 0) {
+    console.log('\nFailures:');
+    failures.forEach(f => console.log(`  - ${f.name}\n    ${f.err.stack.split('\n').slice(0,3).join('\n    ')}`));
+    process.exit(1);
+  }
+});

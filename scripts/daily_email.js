@@ -171,6 +171,12 @@ function loadSiteLogic(indexHtmlPath = INDEX_HTML) {
     'getFloodStatus', 'combineStatus', 'boatKeys', 'floodStatusForBoat',
     'floodSummaryLabel', 'extractTemp', 'parseLastDeviceData',
     'WMO_CODES', 'WMO_ICONS',
+    // Wording: the email must never label a status differently from the site.
+    'boatStatusLabel', 'ALLOWED_NOTE_HTML',
+    // Fog outlook: same models, thresholds, wording and rule as the website.
+    'BOATHOUSE_POINT', 'FOG_MODELS', 'FOG_RULES', 'FOG_LAUNCH_RULE',
+    'fogOutlookUrl', 'fogAlertsUrl', 'fogTarget', 'fogAdvisory',
+    'assessFogRisk', 'fogText',
   ];
   const exportSrc = EXPORTS
     .map(n => `try { __out.${n} = ${n}; } catch (e) {}`)
@@ -212,11 +218,11 @@ function loadLocalData() {
 const NOAA_BASE = 'https://api.water.noaa.gov/nwps/v1/gauges/STVC3/stageflow/';
 const STALE_MS = 6 * 3600000; // must match index.html's river staleness threshold
 
-async function fetchJson(url, timeoutMs = 20000) {
+async function fetchJson(url, timeoutMs = 20000, headers = undefined) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
+    const res = await fetch(url, { signal: ctrl.signal, headers });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } finally {
@@ -418,6 +424,31 @@ async function loadWeather() {
   }
 }
 
+// api.weather.gov rejects requests with no User-Agent. NWS asks for a point of
+// contact; the club website is the right one and needs no personal address.
+const NWS_HEADERS = {
+  'User-Agent': 'roworno.com daily conditions email (New Haven Rowing Club)',
+  'Accept': 'application/geo+json',
+};
+
+/**
+ * Raw inputs for the fog outlook: the multi-model forecast and NWS alerts.
+ * Fetched independently, so an outage of one never hides the other, and
+ * assessed in computeDigest with the website's own logic. Failures come back
+ * as null, which the assessment reports as "unavailable" - never as "low".
+ */
+async function loadFogInputs(logic) {
+  const { lat, lon } = BOATHOUSE;
+  const [fc, al] = await Promise.allSettled([
+    fetchJson(logic.fogOutlookUrl(lat, lon)),
+    fetchJson(logic.fogAlertsUrl(lat, lon), 20000, NWS_HEADERS),
+  ]);
+  return {
+    response: fc.status === 'fulfilled' ? fc.value : null,
+    alerts:   al.status === 'fulfilled' ? al.value : null,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. Compute the digest using the SITE'S OWN rules
 // ─────────────────────────────────────────────────────────────────────────────
@@ -426,7 +457,9 @@ const ZONE_LABEL = {
   winter:    'Winter Rowing in effect',
   fourOar:   'Four Oar Rule in effect',
   coldWater: 'Cold Water restrictions apply',
-  normal:    'Normal rowing conditions',
+  // Names the rule rather than declaring conditions "normal" - the data says
+  // nothing about fog, wind or the water surface.
+  normal:    'No temperature restrictions',
 };
 const ZONE_COLOR = {
   winter:    { bg: 'rgba(224,62,62,0.12)',  border: 'rgba(224,62,62,0.4)',  text: '#f07070' },
@@ -435,7 +468,7 @@ const ZONE_COLOR = {
   normal:    { bg: 'rgba(46,125,79,0.15)',  border: 'rgba(46,125,79,0.4)',  text: '#5cc98a' },
 };
 
-function computeDigest(logic, { raw, history }, river, weather, now = new Date()) {
+function computeDigest(logic, { raw, history }, river, weather, now = new Date(), fogInputs = null) {
   const tempC = logic.extractTemp(raw);
   if (tempC === null || tempC === undefined) {
     throw new Error('Could not extract water temperature from data.json');
@@ -458,11 +491,9 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
     boats: tier.boats.map(b => {
       const floodS   = logic.floodStatusForBoat(b.name, river.level);
       const combined = logic.combineStatus(b.s, floodS);
-      let label;
-      if (combined === 'no')            label = 'No';
-      else if (combined === 'caution')  label = 'Caution';
-      else if (b.note)                  label = 'Cond.';
-      else                              label = 'Go';
+      // The site's own label function: this used to be a separate copy here
+      // that said "Go" where the site said "Row".
+      const label = logic.boatStatusLabel(combined, b.note);
       return { name: b.name, status: combined, label, note: b.note || null };
     }),
   }));
@@ -472,6 +503,25 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
   // Sensor freshness — mirrors the site's 3-hour offline threshold.
   const sensorAgeMs = fetchedAt ? (now.getTime() - fetchedAt.getTime()) : null;
   const sensorStale = sensorAgeMs !== null && sensorAgeMs > 3 * 3600000;
+
+  // Fog outlook for the coming dawn, with the website's own logic and words.
+  // Missing inputs give 'unknown', which is stated, never silently dropped.
+  const fogDay = logic.fogTarget(now);
+  const fogA = logic.assessFogRisk(fogInputs && fogInputs.response, fogDay.date, tempF,
+    fogInputs && fogInputs.alerts);
+  const fogWords = logic.fogText(fogA, fogDay.label);
+  const fog = {
+    level: fogA.level,
+    advisory: fogA.advisory ? { event: fogA.advisory.event, until: fogA.advisory.until } : null,
+    steam: !!fogA.steam,
+    modelsFavorable: fogA.modelsFavorable,
+    modelsTotal: fogA.modelsTotal,
+    date: fogDay.date,
+    label: fogDay.label,
+    headline: fogWords.headline,
+    detail: fogWords.detail,
+    rule: logic.FOG_LAUNCH_RULE,
+  };
 
   return {
     dateLabel: now.toLocaleDateString('en-US', {
@@ -495,6 +545,8 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
     weather: withWeatherDescription(weather, logic),
     sensorStale,
     sensorAgeMs,
+    fog,
+    allowedNoteHtml: logic.ALLOWED_NOTE_HTML,
   };
 }
 
@@ -635,6 +687,42 @@ function renderEmailHtml(d) {
   const zoneStyle = d.zone === 'normal' ? STATUS_STYLE.go
     : (d.zone === 'winter' ? STATUS_STYLE.no : STATUS_STYLE.caution);
 
+  // ── "Allowed" is not a go-ahead ────────────────────────────────────────────
+  // Shared wording from index.html: pure ASCII with entities, and contains no
+  // markup beyond <strong>, so it is inserted as-is.
+  const allowedNoteRow = d.allowedNoteHtml
+    ? `<tr><td style="padding:0 ${PAD}px 14px ${PAD}px;background-color:${C.card};">
+        <div style="font-size:12px;line-height:1.5;color:${C.inkSoft};background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">${d.allowedNoteHtml}</div>
+      </td></tr>`
+    : '';
+
+  // ── Fog ────────────────────────────────────────────────────────────────────
+  // "likely" or "possible": a box straight under the rules banner, carrying the
+  // club's picket-fence rule. "low" or "unknown": one line in the weather
+  // section - present every day, so a missing warning is never mistaken for an
+  // all-clear. The headline and detail come from index.html's fogText(), which
+  // builds them from our own numbers and escapes anything from the NWS feed,
+  // so they are inserted as HTML; the rule text is ours and plain, escaped anyway.
+  const fog = d.fog || null;
+  const fogProminent = !!fog && (fog.level === 'likely' || fog.level === 'possible');
+  const fogBoxStyle = fog && fog.advisory ? STATUS_STYLE.no : STATUS_STYLE.caution;
+  const fogRow = fogProminent
+    ? `<tr><td style="padding:0 ${PAD}px 12px ${PAD}px;background-color:${C.card};">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+          <tr><td style="background-color:${fogBoxStyle.bg};border:1px solid ${fogBoxStyle.border};border-radius:8px;padding:12px 14px;font-family:Arial,Helvetica,sans-serif;">
+            <div style="font-size:15px;font-weight:bold;color:${fogBoxStyle.text};background-color:${fogBoxStyle.bg};">${fog.headline}</div>
+            <div style="font-size:13px;line-height:1.5;color:${fogBoxStyle.text};background-color:${fogBoxStyle.bg};padding-top:4px;">${fog.detail}</div>
+            <div style="font-size:13px;line-height:1.5;font-weight:bold;color:${fogBoxStyle.text};background-color:${fogBoxStyle.bg};padding-top:6px;">Club rule: ${esc(fog.rule)}</div>
+            <div style="font-size:12px;line-height:1.5;color:${fogBoxStyle.text};background-color:${fogBoxStyle.bg};padding-top:4px;">Fog does not change which boats are allowed.</div>
+          </td></tr>
+        </table>
+      </td></tr>`
+    : '';
+  const fogQuiet = fog && !fogProminent
+    ? `<div style="font-size:13px;line-height:1.5;color:${C.inkSoft};background-color:${C.card};padding-top:10px;font-family:Arial,Helvetica,sans-serif;"><strong>${fog.headline}.</strong> ${fog.detail}</div>
+       <div style="font-size:13px;line-height:1.5;font-weight:bold;color:${C.ink};background-color:${C.card};padding-top:4px;font-family:Arial,Helvetica,sans-serif;">Club rule: ${esc(fog.rule)}</div>`
+    : '';
+
   // ── Key numbers ────────────────────────────────────────────────────────────
   const riverStr = d.river.level !== null ? d.river.level.toFixed(1) + ' ft' : '--';
   const airStr = d.weather.available ? d.weather.tempF + '°F' : '--';
@@ -713,6 +801,8 @@ function renderEmailHtml(d) {
         </table>
       </td></tr>
 
+${fogRow}
+${allowedNoteRow}
 ${warningHtml}
 
       <tr><td style="padding:0 ${PAD}px 16px ${PAD}px;background-color:${C.card};">
@@ -734,6 +824,7 @@ ${warningHtml}
       <tr><td style="padding:8px ${PAD}px 16px ${PAD}px;background-color:${C.card};">
         ${sectionLabel('Weather — Oxford, CT')}
         ${weatherBlock}
+        ${fogQuiet}
       </td></tr>
 
       <tr><td align="center" style="padding:0 ${PAD}px 20px ${PAD}px;background-color:${C.card};">
@@ -801,8 +892,15 @@ function renderSubject(d, now = new Date()) {
   } else if (riverUnknown) {
     headline = 'Check river level';
   } else {
-    headline = 'All boats clear';
+    // Not "All boats clear": we know the rules impose nothing today, not that
+    // conditions on the water are good.
+    headline = 'No temp/river restrictions';
   }
+
+  // Fog leads the subject on a likely-fog morning, because many members read
+  // only the subject before deciding whether to drive in. "Possible" stays in
+  // the body: it fires too often to earn the subject line.
+  const fogPrefix = d.fog && d.fog.level === 'likely' ? 'FOG RISK - ' : '';
 
   const dateShort = now.toLocaleDateString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric',
@@ -815,7 +913,7 @@ function renderSubject(d, now = new Date()) {
   // Kept ASCII-only: subjects are not HTML, so entities would show literally,
   // and their encoding depends on MIME headers we do not control.
   return toAsciiSubject(
-    `NHRC ${dateShort} - ${headline} - ${d.tempF.toFixed(1)}F - ${riverPart}`);
+    `NHRC ${dateShort} - ${fogPrefix}${headline} - ${d.tempF.toFixed(1)}F - ${riverPart}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -970,8 +1068,10 @@ async function checkSubscriberHeadroom() {
 async function build() {
   const logic = loadSiteLogic();
   const local = loadLocalData();
-  const [river, weather] = await Promise.all([loadRiver(), loadWeather()]);
-  const digest = computeDigest(logic, local, river, weather);
+  const [river, weather, fogInputs] = await Promise.all([
+    loadRiver(), loadWeather(), loadFogInputs(logic),
+  ]);
+  const digest = computeDigest(logic, local, river, weather, new Date(), fogInputs);
   return { digest, html: renderEmailHtml(digest), subject: renderSubject(digest) };
 }
 
@@ -1034,7 +1134,7 @@ async function main() {
 }
 
 module.exports = {
-  loadSiteLogic, loadLocalData, loadRiver, loadWeather,
+  loadSiteLogic, loadLocalData, loadRiver, loadWeather, loadFogInputs, NWS_HEADERS,
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
   parseGaugeSeries, checkSubscriberHeadroom, isInSeason, dailySlug,
   alreadySentToday, isPrimarySendHour,
