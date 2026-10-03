@@ -1,8 +1,9 @@
 # Boathouse Camera
 
-Captures a snapshot from the Ring camera (every 30 minutes to 10am, every 60
-minutes after, 5am-4pm) and publishes it via a Cloudflare Worker, so the website
-can show current river conditions.
+Captures a snapshot from the Ring camera on a fixed timetable - 5:00, 5:30, ...
+9:30, then hourly 10:00 to 15:00 - and publishes it via a Cloudflare Worker, so
+the website can show current river conditions with the time each photo was
+taken.
 
 ```
 Ring cloud  <--  Pi Zero W (snapshot_service.js)  -->  Cloudflare Worker + R2
@@ -219,7 +220,7 @@ RestartSec=60
 # IPv6 is disabled at the router (so all DNS goes through Pi-hole), but DNS
 # still returns AAAA records for Cloudflare. Without this, every upload first
 # attempts an unroutable IPv6 address and waits for it to fail before falling
-# back. Harmless once; wasteful every 15 minutes for months.
+# back. Harmless once; wasteful on every upload for months.
 Environment=NODE_OPTIONS=--dns-result-order=ipv4first
 
 # This box also serves DNS. Cap memory so a leak here can never take Pi-hole
@@ -281,9 +282,12 @@ Once the snapshot URL is live, set this near the bottom of
 const CAMERA_SNAPSHOT_URL = 'https://nhrc-camera.YOUR-ACCOUNT.workers.dev/latest.jpg';
 ```
 
-The card stays hidden until an image loads, and hides again on any failure — so
-a dead camera removes the panel rather than freezing a stale frame on a page
-people use for safety decisions.
+The card never shows a broken or badly stale image. The Worker refuses a frame
+over 130 minutes old, and when there is no image the card says why: paused
+overnight, the first photo of the day still on its way (the first 15 minutes of
+the window), or the camera could not be reached. When there is an image, the
+caption gives the time it was taken, read from the Worker's `Last-Modified`
+header.
 
 ---
 
@@ -291,12 +295,50 @@ people use for safety decisions.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `CAMERA_INTERVAL_MINUTES` | 15 | Minimum 5. Ring throttles battery cameras to roughly one snapshot per 10 min |
+| `CAMERA_INTERVAL_MINUTES` | 30 | Minimum 5. Ring throttles battery cameras to roughly one snapshot per 10 min |
 | `CAMERA_SLOW_AFTER_HOUR` | 10 | Local hour the slower rate starts. Set equal to the window start to disable |
 | `CAMERA_SLOW_INTERVAL_MINUTES` | 60 | Interval used after that hour. Must clear the Worker's MAX_AGE_MS |
 | `CAMERA_ACTIVE_START_HOUR` / `_END_HOUR` | 5 / 16 | Boathouse local time. Both `0` disables. Night frames are black and still cost battery |
 | `CAMERA_RETRIES` | 3 | Battery cameras cannot snapshot *while recording*, so motion events cause failures worth retrying |
 | `RING_TOKEN_FILE` | `~/.nhrc-ring-token` | Must persist across reboots |
+
+## The timetable
+
+Captures happen on fixed slots counted from the window start: every
+`CAMERA_INTERVAL_MINUTES` until `CAMERA_SLOW_AFTER_HOUR`, then every
+`CAMERA_SLOW_INTERVAL_MINUTES` until the window closes. With the settings above
+that is 16 a day: 5:00, 5:30, ... 9:30, 10:00, 11:00, ... 15:00.
+
+It used to sleep a fixed interval *after* each capture instead. Every capture
+takes time, so the schedule drifted later each cycle and the first frame of the
+day landed anywhere from 5:00 to 5:29 - while the website, with no frame newer
+than the Worker's limit, told members at the dock the camera could not be
+reached. Now:
+
+- one capture per slot, however long a capture or its retries take;
+- a failed slot is not retried until the next slot (the retries happen inside
+  the cycle), so a busy camera cannot turn into a capture every wake-up;
+- the loop never sleeps more than 30 minutes and re-reads the clock each time,
+  so a daylight-saving change or clock correction cannot cost a morning;
+- after a restart it captures straight away, then rejoins the timetable.
+
+## Updating the service on the Pi
+
+After a change to `snapshot_service.js` is merged to `main`:
+
+```bash
+cd /opt/nhrc-camera
+sudo curl -fsSL -o snapshot_service.new.js \
+  https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/snapshot_service.js
+node --check snapshot_service.new.js && \
+  sudo mv snapshot_service.new.js snapshot_service.js && \
+  sudo chown nhrccam:nhrccam snapshot_service.js
+sudo systemctl restart nhrc-camera
+journalctl -u nhrc-camera -n 20 --no-pager
+```
+
+`node --check` only checks the syntax, so a truncated download can never replace
+a working service. The startup line in the journal states the timetable.
 
 ## Battery
 
@@ -349,7 +391,7 @@ Two consequences worth noting:
 
 **Permission, separately from security.** The camera belongs to someone else.
 Being able to view a shared camera is not the same as permission to republish
-its images publicly every 15 minutes. Get the owner's explicit agreement before
+its images publicly through the day. Get the owner's explicit agreement before
 going live, and tell them the framing is water-only — it is their device, their
 Ring account terms, and unwinding it later is harder than asking first.
 
@@ -415,15 +457,15 @@ Being explicit, since these are real:
   people become publicly visible with no code change and no warning. Worth a
   note in the committee's records that the framing is deliberate.
 - **Ring changing or blocking the unofficial API.** This can break without
-  notice. The failure mode is benign — the card disappears from the site — but
-  it will need attention when it happens.
+  notice. The failure mode is benign — the site's camera card says the camera
+  could not be reached — but it will need attention when it happens.
 
 ### Data retention
 
 Exactly one object exists at any time, overwritten every cycle. Nothing is
 archived, nothing enters git, and Cloudflare access logs are not enabled by
 default. If the committee wants a formal retention answer: *the current frame
-only, replaced every 15 minutes, never stored historically.*
+only, replaced at each capture (every 30-60 minutes), never stored historically.*
 
 ---
 
@@ -433,6 +475,8 @@ only, replaced every 15 minutes, never stored historically.*
 node camera/test_snapshot_service.js
 ```
 
-21 tests covering config validation, the timezone-aware active window, atomic
-token persistence and file permissions, upload auth, and retry behaviour. The
-Ring API itself is stubbed, so no credentials are needed.
+64 tests covering config validation, the timezone-aware active window, the
+capture timetable (whole days on a fake clock, including both daylight-saving
+days), atomic token persistence and file permissions, upload auth, and retry
+behaviour. Every test is hermetic: a fixed clock and a fake network, never the
+real endpoint. The Ring API itself is stubbed, so no credentials are needed.

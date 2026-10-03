@@ -2132,6 +2132,8 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
   els.__fire = (bucket, type, event = {}) => (listeners[bucket][type] || []).forEach(fn => fn(event));
   const logged = [];
   els.__logged = logged;
+  const blobs = { made: 0, live: new Set(), revoked: [] };
+  els.__blobs = blobs;
   const document = { getElementById: el, querySelectorAll: (sel) => (/#range-btns/.test(sel) ? rangeButtons : []),
     querySelector: () => null, addEventListener: on('document'), createElement: () => el('__created'),
     visibilityState: 'visible' };
@@ -2146,14 +2148,23 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     setInterval() {}, setTimeout: opts.setTimeout || (() => 0), clearTimeout: opts.clearTimeout || (() => {}),
     AbortController: opts.AbortController,
     console: { log() {}, warn: (...a) => logged.push(['warn', ...a]), error: (...a) => logged.push(['error', ...a]) },
-    URL: { createObjectURL() { return 'blob:fake'; }, revokeObjectURL() {} }, Blob: function () {}, Image: opts.Image || function () {},
+    URL: { createObjectURL() { const u = 'blob:fake-' + (++blobs.made); blobs.live.add(u); return u; },
+           revokeObjectURL(u) { blobs.live.delete(u); blobs.revoked.push(u); } },
+    Blob: function () {},
+    // By default an image fails to load, as it would with no network, and
+    // says so asynchronously like a browser.
+    Image: opts.Image || function () {
+      const self = this; let src = '';
+      Object.defineProperty(self, 'src', { get: () => src, set: (v) => { src = v; Promise.resolve().then(() => self.onerror && self.onerror()); } });
+    },
     Intl, Date: FixedDate, Math, JSON, isNaN, parseInt, parseFloat, Number, Array, Object, String,
   };
   const ctx = vmT.createContext(sandbox);
   vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, renderFogOutlook, renderFloodGrid, renderDashboard,' +
     ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData,' +
     ' loadData, loadHistory, refreshAll, loadFogOutlook, loadCameraSnapshot, historyNeedsRefresh, pickRiverLevel,' +
-    ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraOffHours };',
+    ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraOffHours,' +
+    ' cameraCaption, cameraMissingMessage, CAMERA_SNAPSHOT_URL };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -2856,6 +2867,104 @@ test('fog: an NWS advisory that has ended is not shown as in effect', async () =
   t = etDate('2026-10-02', 8, 30).getTime();
   await site.loadFogOutlook();
   assert.ok(/NWS Dense Fog Advisory in effect until 9:00/.test(els['fog-outlook'].innerHTML), 'before its end it is shown');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('13d. Boathouse camera on the website');
+// ═══════════════════════════════════════════════════════════════════════════
+
+// An image element that loads (or fails) as the test decides.
+const imageThat = (ok) => function () {
+  const self = this; let src = '';
+  Object.defineProperty(self, 'src', { get: () => src,
+    set: (v) => { src = v; Promise.resolve().then(() => (ok(v) ? self.onload && self.onload() : self.onerror && self.onerror())); } });
+};
+const frameReply = (lastModified) => Promise.resolve({ ok: true, status: 200,
+  headers: { get: (h) => (/^last-modified$/i.test(h) ? lastModified : null) },
+  blob: () => Promise.resolve({ size: 48213, type: 'image/jpeg' }) });
+const camUrl = /nhrc-camera\./;
+
+test('camera: the caption says when the photo was TAKEN, from the Worker\'s Last-Modified', async () => {
+  const t = etDate('2026-10-03', 7, 42).getTime();
+  const taken = new Date(etDate('2026-10-03', 7, 30).getTime()).toUTCString();
+  const net = fakeNet([[camUrl, () => frameReply(taken)]]);
+  const { site, els } = loadSite(t, net.fetch, { Image: imageThat(() => true) });
+  await site.loadCameraSnapshot();
+  const note = els['camera-note'].textContent;
+  assert.ok(/taken 7:30(\u202f| )AM EDT \(12 min ago\)/.test(note), note);
+  assert.ok(!/60 min/.test(note), 'no more "up to 60 min older" promise');
+  assert.ok(/^blob:fake-/.test(els['camera-img'].src), 'shown from the fetched bytes');
+  assert.strictEqual(els['camera-card'].style.display, '');
+});
+
+test('camera: an old photo says how old - the Worker serves up to 130 minutes', async () => {
+  const t = etDate('2026-10-03', 17, 5).getTime();
+  const taken = new Date(etDate('2026-10-03', 15, 0).getTime()).toUTCString();
+  const { site, els } = loadSite(t, fakeNet([[camUrl, () => frameReply(taken)]]).fetch, { Image: imageThat(() => true) });
+  await site.loadCameraSnapshot();
+  assert.ok(/taken 3:00(\u202f| )PM EDT \(2 h 5 min ago\)/.test(els['camera-note'].textContent), els['camera-note'].textContent);
+});
+
+test('camera: if the fetch route fails, the plain image route still shows the photo, with an honest bound', async () => {
+  const t = etDate('2026-10-03', 8, 0).getTime();
+  const net = fakeNet([[camUrl, () => Promise.reject(new TypeError('CORS'))]]);
+  const { site, els } = loadSite(t, net.fetch, { Image: imageThat((src) => /^https:/.test(src)) });
+  await site.loadCameraSnapshot();
+  assert.ok(/^https:\/\/nhrc-camera\./.test(els['camera-img'].src), 'the plain URL, cache-busted');
+  assert.ok(/[?&]_=\d+$/.test(els['camera-img'].src));
+  assert.ok(/can be up to 2 hours older/.test(els['camera-note'].textContent), els['camera-note'].textContent);
+});
+
+test('camera: no photo explains itself - overnight, first capture on its way, or a fault', async () => {
+  const msg = async (h, m) => {
+    const { site, els } = loadSite(etDate('2026-10-03', h, m).getTime(),
+      fakeNet([[camUrl, () => reply({}, 404)]]).fetch);
+    await site.loadCameraSnapshot();
+    assert.strictEqual(els['camera-img__parent'].style.display, 'none', 'no broken image');
+    assert.strictEqual(els['camera-card'].style.display, '', 'but the card stays');
+    return els['camera-note'].textContent;
+  };
+  assert.ok(/paused overnight/.test(await msg(4, 59)), 'before 5');
+  assert.ok(/first photo of the day is on its way/.test(await msg(5, 0)), '5:00 - the Pi is capturing now');
+  assert.ok(/first photo of the day is on its way/.test(await msg(5, 14)), '5:14');
+  assert.ok(/could not be reached/.test(await msg(5, 15)), 'from 5:15 it is a real fault');
+  assert.ok(/could not be reached/.test(await msg(12, 0)));
+  assert.ok(/paused overnight/.test(await msg(16, 0)), 'from 4 PM');
+  assert.ok(/paused overnight/.test(await msg(23, 30)));
+});
+
+test('camera: each new photo releases the previous one\'s memory', async () => {
+  let t = etDate('2026-10-03', 8, 0).getTime();
+  const { site, els } = loadSite(() => t, fakeNet([[camUrl, () => frameReply(new Date(t - 60000).toUTCString())]]).fetch,
+    { Image: imageThat(() => true) });
+  for (let i = 0; i < 5; i++) { await site.loadCameraSnapshot(); t += 5 * 60000; }
+  assert.strictEqual(els.__blobs.made, 5);
+  assert.strictEqual(els.__blobs.live.size, 1, 'only the photo on screen is kept');
+});
+
+test('camera: a photo that fails to decode is released too, and the card says why', async () => {
+  const t = etDate('2026-10-03', 9, 0).getTime();
+  const { site, els } = loadSite(t, fakeNet([[camUrl, () => frameReply(new Date(t).toUTCString())]]).fetch,
+    { Image: imageThat(() => false) });
+  await site.loadCameraSnapshot();
+  assert.strictEqual(els.__blobs.live.size, 0);
+  assert.ok(/could not be reached/.test(els['camera-note'].textContent));
+});
+
+test('camera: an image that never settles cannot block later refreshes', async () => {
+  const timers = [];
+  const net = fakeNet([[camUrl, () => frameReply(new Date().toUTCString())]]);
+  const { site } = loadSite(etDate('2026-10-03', 9, 0).getTime(), net.fetch,
+    { Image: function () { this.src = ''; }, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return 1; } });
+  const p = site.loadCameraSnapshot();
+  await settle();
+  const safety = timers.find(x => x.ms === 30000);
+  assert.ok(safety, 'a 30-second safety timer');
+  safety.fn();
+  await p;
+  site.loadCameraSnapshot();
+  await settle();
+  assert.strictEqual(net.count(camUrl), 2, 'the next refresh runs');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

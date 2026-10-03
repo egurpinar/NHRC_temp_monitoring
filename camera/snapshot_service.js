@@ -232,6 +232,117 @@ function intervalForTime(now = new Date(), cfg = CONFIG) {
   return localHour(now, cfg) >= slowAfter ? slow : cfg.intervalMinutes;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Capture timetable
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// WHY A TIMETABLE AND NOT "WAIT AN INTERVAL AFTER EACH CAPTURE"
+// The loop used to sleep a fixed interval after each cycle. Each cycle takes
+// time (a capture, an upload, sometimes 45-second retries), so the schedule
+// drifted later every capture and the phase was effectively random: the first
+// frame of the day landed anywhere from 5:00 to 5:29. Until it did, the
+// website had no frame younger than the Worker's 130-minute limit and told
+// members at the dock "the boathouse camera could not be reached" - at the
+// exact time the camera matters most, to check for fog before launching.
+//
+// Now captures happen at fixed slots - 5:00, 5:30, ... 9:30, then 10:00,
+// 11:00, ... 15:00 with the default settings - one per slot, however long a
+// capture takes. The loop never sleeps more than MAX_SLEEP_SECONDS, re-reading
+// the clock each time it wakes, so a daylight-saving change or a clock
+// correction can never cost a morning.
+
+const MAX_SLEEP_SECONDS = 30 * 60;
+const DAY_SECONDS = 86400;
+
+/** Seconds since local midnight in the boathouse timezone. */
+function localSeconds(now = new Date(), cfg = CONFIG) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: cfg.timeZone, hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(now);
+  const g = t => Number(parts.find(p => p.type === t).value);
+  return g('hour') * 3600 + g('minute') * 60 + g('second');
+}
+
+/**
+ * The window and its two rates, as seconds from the window's opening. Mirrors
+ * isWithinActiveHours (0/0 means always; start == end means never; a window
+ * may wrap midnight) and intervalForTime (two speeds only when the slow hour
+ * is after the start).
+ */
+function windowGeometry(cfg = CONFIG) {
+  const always = cfg.activeStartHour === 0 && cfg.activeEndHour === 0;
+  const startSecs = always ? 0 : Math.round(cfg.activeStartHour * 3600);
+  const lenSecs = always ? DAY_SECONDS
+    : Math.round((((cfg.activeEndHour - cfg.activeStartHour) % 24 + 24) % 24) * 3600);
+  const twoSpeed = Number.isFinite(cfg.slowAfterHour) && Number.isFinite(cfg.slowIntervalMinutes)
+    && cfg.slowAfterHour > cfg.activeStartHour;
+  const slowOffset = twoSpeed
+    ? Math.min(Math.round((cfg.slowAfterHour - cfg.activeStartHour) * 3600), lenSecs)
+    : lenSecs;
+  return {
+    startSecs, lenSecs, slowOffset,
+    fast: Math.round(cfg.intervalMinutes * 60),
+    slow: Math.round((twoSpeed ? cfg.slowIntervalMinutes : cfg.intervalMinutes) * 60),
+  };
+}
+
+/**
+ * The capture slot `now` falls in, or null when the window is closed. `key`
+ * is the slot's start in epoch seconds: unique per slot, so the loop captures
+ * once per slot however often it wakes.
+ */
+function captureSlot(now = new Date(), cfg = CONFIG) {
+  const g = windowGeometry(cfg);
+  const offset = ((localSeconds(now, cfg) - g.startSecs) % DAY_SECONDS + DAY_SECONDS) % DAY_SECONDS;
+  if (offset >= g.lenSecs) return null;
+  const slotOffset = offset < g.slowOffset
+    ? Math.floor(offset / g.fast) * g.fast
+    : g.slowOffset + Math.floor((offset - g.slowOffset) / g.slow) * g.slow;
+  return { key: Math.floor(now.getTime() / 1000) - (offset - slotOffset), offsetSecs: slotOffset };
+}
+
+/** Seconds until the next slot (or the window's next opening), capped at MAX_SLEEP_SECONDS. */
+function secondsUntilNextSlot(now = new Date(), cfg = CONFIG) {
+  const g = windowGeometry(cfg);
+  const offset = ((localSeconds(now, cfg) - g.startSecs) % DAY_SECONDS + DAY_SECONDS) % DAY_SECONDS;
+  let next;
+  if (offset >= g.lenSecs) next = DAY_SECONDS;
+  else if (offset < g.slowOffset) next = Math.min((Math.floor(offset / g.fast) + 1) * g.fast, g.slowOffset);
+  else next = g.slowOffset + (Math.floor((offset - g.slowOffset) / g.slow) + 1) * g.slow;
+  // A slot that would start at or after the window closes is tomorrow's opening.
+  if (next >= g.lenSecs && g.lenSecs < DAY_SECONDS) next = DAY_SECONDS;
+  return Math.max(1, Math.min(next - offset, MAX_SLEEP_SECONDS));
+}
+
+/**
+ * The capture loop: one capture per slot, then sleep until the next slot.
+ * deps: now() -> Date, setTimer(fn, ms), cycle() -> Promise. Injected so the
+ * tests can run whole days - and daylight-saving days - on a fake clock.
+ */
+function createScheduler(cfg, deps) {
+  let lastSlotKey = null;
+  const tick = async () => {
+    const slot = captureSlot(deps.now(), cfg);
+    if (slot && slot.key !== lastSlotKey) {
+      // Before the capture: a failed cycle is not retried until the next
+      // slot. captureWithRetry already retries within the cycle, and a slot
+      // that keeps failing must not turn into a capture every wake-up.
+      lastSlotKey = slot.key;
+      try {
+        await deps.cycle();
+      } catch (e) {
+        // Never exit on a failed cycle: a transient Ring or network error should
+        // not take the service down until someone notices days later. The image
+        // simply ages, and the website says why it has no current frame.
+        logError('cycle failed:', e.message);
+      }
+    }
+    // Half a second past the boundary, so the clock reads the new slot.
+    deps.setTimer(tick, secondsUntilNextSlot(deps.now(), cfg) * 1000 + 500);
+  };
+  return tick;
+}
+
 /**
  * Accepts either a plain hour ("19") or an hour with minutes ("4:30") and
  * returns a fractional hour, so 4:30 becomes 4.5. Returning a number rather
@@ -423,8 +534,8 @@ async function captureWithRetry(camera, cfg = CONFIG) {
 // Main loop
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runCycle(camera, cfg = CONFIG) {
-  if (!isWithinActiveHours(new Date(), cfg)) {
+async function runCycle(camera, cfg = CONFIG, now = new Date(), fetchImpl = globalThis.fetch) {
+  if (!isWithinActiveHours(now, cfg)) {
     log('Outside active hours — skipping capture.');
     return false;
   }
@@ -438,7 +549,7 @@ async function runCycle(camera, cfg = CONFIG) {
   }
   log(`Captured ${buf.length} bytes; uploading to ${hostOf(cfg.uploadUrl)}`);
   try {
-    await uploadSnapshot(buf, cfg);
+    await uploadSnapshot(buf, cfg, fetchImpl);
   } catch (e) {
     throw new Error(`UPLOAD stage — ${describeCause(e)}`);
   }
@@ -477,25 +588,16 @@ async function main() {
     process.exit(0);
   }
 
-  log(`Starting. ${describeSchedule(CONFIG)}`);
+  log(`Starting. ${describeSchedule(CONFIG)} Captures on the slot boundaries, from the window start.`);
 
-  // setTimeout that reschedules itself, not setInterval: the gap between
-  // captures is no longer a constant, so it has to be recomputed after each
-  // cycle. This also means a slow cycle delays the next one rather than letting
-  // them pile up, which setInterval would happily do on a Pi Zero W.
-  const tick = async () => {
-    try {
-      await runCycle(camera);
-    } catch (e) {
-      // Never exit on a failed cycle: a transient Ring or network error should
-      // not take the service down until someone notices days later. The image
-      // simply ages, and the website hides a snapshot it cannot load.
-      logError('cycle failed:', e.message);
-    }
-    const mins = intervalForTime(new Date(), CONFIG);
-    setTimeout(tick, mins * 60 * 1000);
-  };
-
+  // setTimeout that reschedules itself, not setInterval: the next wake-up is
+  // the next slot boundary, recomputed from the clock every time. A slow cycle
+  // can never make captures pile up, and can never shift the timetable.
+  const tick = createScheduler(CONFIG, {
+    now: () => new Date(),
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    cycle: () => runCycle(camera),
+  });
   await tick();
 }
 
@@ -504,6 +606,8 @@ module.exports = {
   readToken, writeToken, uploadSnapshot, captureWithRetry, runCycle,
   describeCause, hostOf, parseHourSetting, formatHourSetting,
   intervalForTime, localHour, describeSchedule,
+  localSeconds, windowGeometry, captureSlot, secondsUntilNextSlot, createScheduler,
+  MAX_SLEEP_SECONDS,
 };
 
 if (require.main === module) {

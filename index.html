@@ -534,7 +534,17 @@ const CAMERA_WINDOW_LABEL = `${CAMERA_START_LABEL} to ${CAMERA_END_LABEL}`;
 // describing it drifted apart the first time the hours changed.
 const CAMERA_RESUME_LABEL = '5:00 AM';
 
+// The Pi captures on fixed slots from the window start (5:00, 5:30, ...), so
+// the first frame of the day lands a minute or so after 5:00 - or a few more
+// if its first attempt hits a motion recording and has to retry. Until then
+// the page says the first photo is on its way, not that the camera is broken.
+const CAMERA_STARTUP_GRACE_MIN = 15;
+
 function loadCameraSnapshot() {
+  return once('camera', loadCameraSnapshotNow);
+}
+
+async function loadCameraSnapshotNow() {
   const card = document.getElementById('camera-card');
   const img  = document.getElementById('camera-img');
   const note = document.getElementById('camera-note');
@@ -553,48 +563,98 @@ function loadCameraSnapshot() {
   // frame for hours, which on a conditions page is worse than showing nothing.
   const bust = CAMERA_SNAPSHOT_URL + (CAMERA_SNAPSHOT_URL.includes('?') ? '&' : '?') + '_=' + Date.now();
 
-  const probe = new Image();
-  probe.onload = () => {
-    img.src = probe.src;
-    if (img.parentElement) img.parentElement.style.display = '';
-    card.style.display = '';
-    if (note) {
-      const t = new Date().toLocaleTimeString('en-US',
-        { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' });
-      // "Loaded" described when the browser fetched the image, which reads as
-      // when the photo was taken. It can be up to a capture interval older, so
-      // say so rather than implying a live view.
-      // The title already states the cadence and the window, so the caption
-      // only needs the freshness caveat: "checked" is when the browser fetched
-      // the file, which reads as when the photo was taken.
-      note.textContent = `View of the river from the boathouse. Checked ${t} ${nyTzAbbr(Date.now())}; `
-        + `the photo itself may be up to 60 min older.`;
-    }
-  };
-  // Any failure — offline camera, stale frame, network — hides the IMAGE, never
-  // leaving a broken one on a page people rely on for safety calls. But the card
-  // itself stays, saying why.
-  //
-  // A card that simply vanishes is indistinguishable from a page that is broken,
-  // or from a feature that was removed. Neither is true, and members should not
-  // have to guess: "no image, and here is why" is more useful than silence, and
-  // it makes clear the rest of the page is still trustworthy.
-  //
-  // Two different reasons, because they need different responses. Overnight is a
-  // failure by design — the camera stops at the end of the window and the server
-  // refuses a frame over 130 minutes old — and nothing is wrong. During the
-  // capture window it is a real fault worth someone looking at.
-  probe.onerror = () => {
-    if (img.parentElement) img.parentElement.style.display = 'none';
-    card.style.display = '';
-    if (!note) return;
-    note.textContent = isCameraOffHours()
-      ? `Camera paused overnight — captures run ${CAMERA_WINDOW_LABEL}. `
-        + `The river view returns at ${CAMERA_RESUME_LABEL}.`
-      : 'No image available — the boathouse camera could not be reached. '
-        + 'The water temperature, river level and weather on this page are unaffected.';
-  };
-  probe.src = bust;
+  // Fetched rather than handed straight to an <img>, because only a fetch can
+  // read when the photo was TAKEN: the Worker's Last-Modified header, which a
+  // cross-origin page may read (CORS-safelisted; the Worker allows any origin).
+  // The caption used to give the time the browser checked and promise the
+  // photo was at most 60 minutes older - while the Worker serves frames up to
+  // 130 minutes old. If the fetch fails for any reason (an older Worker without
+  // CORS, a blocked request), the plain <img> route still shows the photo,
+  // with an honest bound instead of the exact time.
+  let frame = null;
+  try { frame = await fetchCameraFrame(bust); } catch (e) { frame = null; }
+  await showCameraFrame(frame ? frame.src : bust, frame ? frame.takenAt : null, !!frame, card, img, note);
+}
+
+async function fetchCameraFrame(url) {
+  const res = await fetchWithTimeout(url);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const lm = res.headers && typeof res.headers.get === 'function' ? res.headers.get('Last-Modified') : null;
+  const blob = await res.blob();
+  if (!blob || !blob.size) throw new Error('empty frame');
+  const takenAt = lm ? Date.parse(lm) : NaN;
+  return { src: URL.createObjectURL(blob), takenAt: Number.isFinite(takenAt) ? takenAt : null };
+}
+
+let cameraBlobUrl = null;   // the blob URL on screen, released when replaced
+
+function showCameraFrame(src, takenAt, isBlob, card, img, note) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(); } };
+    const probe = new Image();
+    probe.onload = () => {
+      img.src = src;
+      if (cameraBlobUrl && cameraBlobUrl !== src) URL.revokeObjectURL(cameraBlobUrl);
+      cameraBlobUrl = isBlob ? src : null;
+      if (img.parentElement) img.parentElement.style.display = '';
+      card.style.display = '';
+      if (note) note.textContent = cameraCaption(takenAt);
+      done();
+    };
+    // Any failure — offline camera, stale frame, network — hides the IMAGE, never
+    // leaving a broken one on a page people rely on for safety calls. But the card
+    // itself stays, saying why: a card that simply vanishes is indistinguishable
+    // from a broken page or a removed feature. Overnight is a failure by design
+    // (the camera stops, and the Worker refuses a frame over 130 minutes old);
+    // the first minutes of the window are the first capture still on its way;
+    // any other time it is a real fault worth someone looking at.
+    probe.onerror = () => {
+      if (isBlob) URL.revokeObjectURL(src);
+      if (img.parentElement) img.parentElement.style.display = 'none';
+      card.style.display = '';
+      if (note) note.textContent = cameraMissingMessage(new Date());
+      done();
+    };
+    probe.src = src;
+    // An image that never settles must not hold the camera's in-flight flag,
+    // which would stop every later refresh.
+    setTimeout(done, 30000);
+  });
+}
+
+/** Caption under the photo: when it was taken, or an honest bound when unknown. */
+function cameraCaption(takenAt, now = Date.now()) {
+  const clock = (ts) => new Date(ts).toLocaleTimeString('en-US',
+    { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }) + ' ' + nyTzAbbr(ts);
+  if (takenAt === null) {
+    return `View of the river from the boathouse. Checked ${clock(now)}; the photo itself can be up to 2 hours older.`;
+  }
+  const mins = Math.max(0, Math.round((now - takenAt) / 60000));
+  const ago = mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)} h ${mins % 60} min ago`;
+  return `View of the river from the boathouse, taken ${clock(takenAt)} (${ago}).`;
+}
+
+/** Why there is no photo: overnight, the first capture still coming, or a fault. */
+function cameraMissingMessage(now = new Date()) {
+  if (isCameraOffHours(now)) {
+    return `Camera paused overnight — captures run ${CAMERA_WINDOW_LABEL}. The river view returns at ${CAMERA_RESUME_LABEL}.`;
+  }
+  if (cameraMinutesSinceStart(now) < CAMERA_STARTUP_GRACE_MIN) {
+    return `The first photo of the day is on its way — captures start at ${CAMERA_RESUME_LABEL}.`;
+  }
+  return 'No image available — the boathouse camera could not be reached. '
+    + 'The water temperature, river level and weather on this page are unaffected.';
+}
+
+/** Minutes since the capture window opened today, boathouse time (negative before). */
+function cameraMinutesSinceStart(now = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(now);
+  const h = Number(parts.find(p => p.type === 'hour').value);
+  const m = Number(parts.find(p => p.type === 'minute').value);
+  return (h + m / 60 - CAMERA_ACTIVE_START_HOUR) * 60;
 }
 
 // True between the last capture of the evening and the first of the morning,

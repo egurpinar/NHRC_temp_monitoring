@@ -19,15 +19,28 @@ const S = require('./snapshot_service.js');
 
 let passed = 0, failed = 0;
 const failures = [];
+// Async tests run one after another, each with a deadline, and the summary
+// waits for all of them. It used to wait a fixed 200 ms: a slow async test
+// would report after the exit code had already been decided.
+let asyncChain = Promise.resolve();
+const ASYNC_DEADLINE_MS = 30000;
 
 function test(name, fn) {
+  if (fn.constructor && fn.constructor.name === 'AsyncFunction') {
+    asyncChain = asyncChain.then(async () => {
+      let timer;
+      const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${ASYNC_DEADLINE_MS} ms`)), ASYNC_DEADLINE_MS);
+      });
+      try { await Promise.race([fn(), deadline]); passed++; console.log(`  PASS  ${name}`); }
+      catch (e) { failed++; failures.push([name, e]); console.log(`  FAIL  ${name}\n        ${e.message}`); }
+      finally { clearTimeout(timer); }
+    });
+    return;
+  }
   try {
     const r = fn();
-    if (r && typeof r.then === 'function') {
-      return r.then(
-        () => { passed++; console.log(`  PASS  ${name}`); },
-        (e) => { failed++; failures.push([name, e]); console.log(`  FAIL  ${name}\n        ${e.message}`); });
-    }
+    if (r && typeof r.then === 'function') throw new Error('returns a promise but is not declared async - it would not be awaited');
     passed++; console.log(`  PASS  ${name}`);
   } catch (e) {
     failed++; failures.push([name, e]);
@@ -497,20 +510,177 @@ test('an empty snapshot buffer counts as a failure', async () => {
 section('6. Cycle behaviour');
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('no capture is attempted outside active hours', async () => {
-  let called = false;
-  const camera = { getSnapshot: async () => { called = true; return Buffer.from('x'); } };
-  const nightCfg = { ...baseCfg, activeStartHour: 5, activeEndHour: 6 };
-  // Force "now" outside the window by using a one-hour window that excludes it.
-  const originalNow = Date.now;
-  try {
-    const sent = await S.runCycle(camera, { ...nightCfg, retryDelaySeconds: 0 });
-    // runCycle consults the real clock; assert only that when it declines, the
-    // camera was never woken.
-    if (sent === false) assert.strictEqual(called, false, 'camera should not be woken when skipping');
-  } finally {
-    Date.now = originalNow;
+// Every cycle test is hermetic: a fixed clock and a fake network. This test
+// used to read the real clock, so between 5 and 6 AM it really captured and
+// tried to upload to the real endpoint - and failed for lack of a network.
+const JPEG = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0xFF, 0xD9]);
+const prodCfg = { ...baseCfg, activeStartHour: 5, activeEndHour: 16,
+                  intervalMinutes: 30, slowAfterHour: 10, slowIntervalMinutes: 60, retryDelaySeconds: 0 };
+// A New York wall-clock time on a given date, whatever the offset that day.
+function ny(ymd, h, m = 0, s = 0) {
+  const [y, mo, d] = ymd.split('-').map(Number);
+  for (const off of [4, 5]) {
+    const t = new Date(Date.UTC(y, mo - 1, d, h + off, m, s));
+    const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit',
+      day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(t);
+    const g = k => p.find(x => x.type === k).value;
+    if (`${g('year')}-${g('month')}-${g('day')}` === ymd && +g('hour') === h && +g('minute') === m) return t;
   }
+  throw new Error(`no such New York time ${ymd} ${h}:${m}`);
+}
+const nyClock = (t) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit',
+  minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(t);
+
+test('outside the window the camera is never woken and nothing is uploaded', async () => {
+  let woken = 0, uploads = 0;
+  const camera = { getSnapshot: async () => { woken++; return JPEG; } };
+  const fakeFetch = async () => { uploads++; return { ok: true }; };
+  for (const [h, m] of [[0, 0], [4, 59], [16, 0], [23, 59]]) {
+    const sent = await S.runCycle(camera, prodCfg, ny('2026-08-15', h, m), fakeFetch);
+    assert.strictEqual(sent, false, `${h}:${m}`);
+  }
+  assert.strictEqual(woken, 0, 'camera woken outside the window');
+  assert.strictEqual(uploads, 0);
+});
+
+test('inside the window a cycle captures once and uploads that frame', async () => {
+  const calls = [];
+  const camera = { getSnapshot: async () => JPEG };
+  const fakeFetch = async (url, opts) => { calls.push({ url, opts }); return { ok: true }; };
+  const sent = await S.runCycle(camera, prodCfg, ny('2026-08-15', 5, 0), fakeFetch);
+  assert.strictEqual(sent, true);
+  assert.strictEqual(calls.length, 1);
+  assert.strictEqual(calls[0].url, prodCfg.uploadUrl);
+  assert.strictEqual(calls[0].opts.method, 'PUT');
+  assert.ok(Buffer.compare(calls[0].opts.body, JPEG) === 0, 'the captured frame is what is uploaded');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('6b. Capture timetable (fixed slots, no drift)');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The loop used to sleep a fixed interval AFTER each cycle, so every cycle's
+// duration pushed the schedule later and the first frame of the day landed
+// anywhere from 5:00 to 5:29. These run whole days on a fake clock.
+
+// Runs the real scheduler from `from` to `to` on a fake clock. Each cycle
+// "takes" cycleMs, advancing the clock as a real capture would.
+async function simulate(cfg, from, to, { cycleMs = 20000, fail = () => false } = {}) {
+  let t = from.getTime();
+  const captures = [], sleeps = [];
+  let pending = null;
+  const tick = S.createScheduler(cfg, {
+    now: () => new Date(t),
+    setTimer: (fn, ms) => { pending = { fn, ms }; sleeps.push(ms); },
+    cycle: async () => { captures.push(new Date(t)); t += cycleMs; if (fail(new Date(t))) throw new Error('camera busy'); },
+  });
+  await tick();
+  while (pending && t + pending.ms <= to.getTime()) {
+    const p = pending; pending = null;
+    t += p.ms;
+    await p.fn();
+  }
+  return { captures, sleeps };
+}
+const PROD_SLOTS = ['05:00', '05:30', '06:00', '06:30', '07:00', '07:30', '08:00', '08:30', '09:00', '09:30',
+                    '10:00', '11:00', '12:00', '13:00', '14:00', '15:00'];
+const hhmm = (d) => nyClock(d).slice(0, 5);
+
+test('a whole day: captures at exactly the slot times, first frame at 5:00', async () => {
+  const { captures } = await simulate(prodCfg, ny('2026-08-15', 0, 0), ny('2026-08-16', 0, 0));
+  assert.deepStrictEqual(captures.map(hhmm), PROD_SLOTS);
+  for (const c of captures) {
+    const sec = Number(nyClock(c).slice(6, 8));
+    assert.ok(sec <= 1, `capture at ${nyClock(c)} is not on the slot boundary`);
+  }
+});
+
+test('slow captures do not push the timetable later (no drift)', async () => {
+  // Three minutes per cycle - a capture that needed all its retries - every time.
+  const { captures } = await simulate(prodCfg, ny('2026-08-15', 0, 0), ny('2026-08-18', 0, 0), { cycleMs: 3 * 60000 });
+  assert.strictEqual(captures.length, 48, 'three days of 16');
+  assert.deepStrictEqual(captures.slice(32).map(hhmm), PROD_SLOTS, 'day three is still on the slots');
+});
+
+test('daylight-saving days keep the same local timetable', async () => {
+  for (const [day, next] of [['2026-03-08', '2026-03-09'], ['2026-11-01', '2026-11-02']]) {
+    const { captures } = await simulate(prodCfg, ny(day, 0, 0), ny(next, 0, 0));
+    assert.deepStrictEqual(captures.map(hhmm), PROD_SLOTS, day);
+  }
+});
+
+test('the loop wakes at least every 30 minutes, so a clock change can never cost a morning', async () => {
+  const { sleeps } = await simulate(prodCfg, ny('2026-08-15', 0, 0), ny('2026-08-17', 0, 0));
+  assert.ok(Math.max(...sleeps) <= 30 * 60000 + 500, `longest sleep ${Math.max(...sleeps)} ms`);
+  assert.ok(Math.min(...sleeps) >= 1000, 'and never spins');
+});
+
+test('a restart mid-slot captures straight away, then rejoins the timetable', async () => {
+  const { captures } = await simulate(prodCfg, ny('2026-08-15', 7, 12), ny('2026-08-15', 9, 0));
+  assert.deepStrictEqual(captures.map(hhmm), ['07:12', '07:30', '08:00', '08:30']);
+});
+
+test('a failed capture is not retried until the next slot', async () => {
+  let r = await simulate(prodCfg, ny('2026-08-15', 4, 50), ny('2026-08-15', 6, 5), { fail: () => true });
+  assert.deepStrictEqual(r.captures.map(hhmm), ['05:00', '05:30', '06:00'], 'one attempt per slot, failures included');
+  // In the hourly afternoon the loop also wakes at the half hour (its 30-minute
+  // cap); a failed slot must not be re-attempted then, draining the battery.
+  r = await simulate(prodCfg, ny('2026-08-15', 10, 0), ny('2026-08-15', 12, 5), { fail: () => true });
+  assert.deepStrictEqual(r.captures.map(hhmm), ['10:00', '11:00', '12:00']);
+  assert.ok(r.sleeps.some(ms => ms <= 30 * 60000 + 500 && ms > 29 * 60000), 'sanity: it did wake at the half hour');
+});
+
+test('the window boundaries: 4:59:59 closed, 5:00:00 open, 15:59:59 open, 16:00:00 closed', () => {
+  assert.strictEqual(S.captureSlot(ny('2026-08-15', 4, 59, 59), prodCfg), null);
+  assert.strictEqual(S.captureSlot(ny('2026-08-15', 5, 0, 0), prodCfg).offsetSecs, 0);
+  assert.strictEqual(S.captureSlot(ny('2026-08-15', 9, 59, 59), prodCfg).offsetSecs, 4.5 * 3600, '9:59 is in the 9:30 slot');
+  assert.strictEqual(S.captureSlot(ny('2026-08-15', 10, 0, 0), prodCfg).offsetSecs, 5 * 3600, '10:00 starts the slow rate');
+  assert.strictEqual(S.captureSlot(ny('2026-08-15', 15, 59, 59), prodCfg).offsetSecs, 10 * 3600, '15:59 is in the 15:00 slot');
+  assert.strictEqual(S.captureSlot(ny('2026-08-15', 16, 0, 0), prodCfg), null);
+  const a = S.captureSlot(ny('2026-08-15', 5, 31), prodCfg), b = S.captureSlot(ny('2026-08-15', 5, 59, 59), prodCfg);
+  assert.strictEqual(a.key, b.key, 'one key per slot');
+  assert.notStrictEqual(a.key, S.captureSlot(ny('2026-08-15', 6, 0), prodCfg).key);
+});
+
+test('the sleep until the next slot is exact', () => {
+  const at = (h, m, s) => S.secondsUntilNextSlot(ny('2026-08-15', h, m, s), prodCfg);
+  assert.strictEqual(at(4, 45, 0), 15 * 60, '4:45 -> 5:00');
+  assert.strictEqual(at(4, 59, 59), 1);
+  assert.strictEqual(at(5, 0, 0), 30 * 60);
+  assert.strictEqual(at(9, 45, 0), 15 * 60, '9:45 -> 10:00, the last fast slot ends at the switch');
+  assert.strictEqual(at(10, 0, 1), 30 * 60, 'an hour to 11:00, capped at 30 min');
+  assert.strictEqual(at(15, 0, 0), 30 * 60, 'no 16:00 slot: next is tomorrow, capped');
+  assert.strictEqual(at(23, 50, 0), 30 * 60);
+});
+
+test('the old 4am-7pm, 15/30-minute settings still give 42 captures a day', async () => {
+  const { captures } = await simulate(schedCfg, ny('2026-08-15', 0, 0), ny('2026-08-16', 0, 0));
+  assert.strictEqual(captures.length, 42);
+  assert.strictEqual(hhmm(captures[0]), '04:00');
+  assert.strictEqual(hhmm(captures[23]), '09:45');
+  assert.strictEqual(hhmm(captures[24]), '10:00');
+  assert.strictEqual(hhmm(captures[41]), '18:30');
+});
+
+test('a slow-rate hour off the fast grid starts its own slots', async () => {
+  const cfg = { ...prodCfg, slowAfterHour: 10.25 }; // "10:15"
+  const { captures } = await simulate(cfg, ny('2026-08-15', 9, 0), ny('2026-08-15', 12, 30));
+  assert.deepStrictEqual(captures.map(hhmm), ['09:00', '09:30', '10:00', '10:15', '11:15', '12:15']);
+});
+
+test('always-on (0/0) and a window across midnight both work', async () => {
+  const always = { ...prodCfg, activeStartHour: 0, activeEndHour: 0, slowAfterHour: 0, intervalMinutes: 60 };
+  assert.strictEqual((await simulate(always, ny('2026-08-15', 0, 0), ny('2026-08-16', 0, 0))).captures.length, 24);
+  const night = { ...prodCfg, activeStartHour: 22, activeEndHour: 2, slowAfterHour: 22, intervalMinutes: 60 };
+  const { captures } = await simulate(night, ny('2026-08-15', 12, 0), ny('2026-08-16', 12, 0));
+  assert.deepStrictEqual(captures.map(hhmm), ['22:00', '23:00', '00:00', '01:00']);
+});
+
+test('the service uses the timetable, not a fixed sleep after each cycle', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
+  const main = src.slice(src.indexOf('async function main()'));
+  assert.ok(/createScheduler\(CONFIG/.test(main), 'main() must run the slot scheduler');
+  assert.ok(!/intervalForTime\(/.test(main), 'main() must not sleep an interval after each cycle');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -571,8 +741,7 @@ test('secrets and captures are gitignored', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-Promise.resolve().then(async () => {
-  await new Promise(r => setTimeout(r, 200));
+asyncChain.then(async () => {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`${passed} passed, ${failed} failed`);
   console.log('='.repeat(60));
