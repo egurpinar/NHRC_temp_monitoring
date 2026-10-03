@@ -276,6 +276,34 @@ test('combined status is always the MORE restrictive of temp and flood', () => {
   }
 });
 
+test('SAFETY every river label names exactly the boats the flood table restricts or cautions', () => {
+  // The label is what people read - on the summary tile, the river card and in
+  // the email - so it must agree with getFloodStatus() boat for boat. At
+  // 11-12 ft it used to read "Singles & doubles restricted, 4x / 8+ caution",
+  // silent on the fours the table restricts; at 10-11 ft it left out that the
+  // fours need caution.
+  const BOATS = ['1x', '2-', '2x', '4+', '4-', '4x', '8+'];
+  for (const ft of [0.5, 3, 7.99, 8, 8.01, 8.5, 9, 9.01, 9.5, 10, 10.01, 10.5, 11, 11.01, 11.5, 12, 12.01, 13, 20]) {
+    const { text, cls } = logic.floodSummaryLabel(ft);
+    const expectNo = BOATS.filter(b => logic.getFloodStatus(b, ft) === 'no');
+    const expectCaution = BOATS.filter(b => logic.getFloodStatus(b, ft) === 'caution');
+    let saidNo = [], saidCaution = [];
+    if (/^All boats restricted/.test(text)) saidNo = BOATS.slice();
+    else if (text !== 'No river-level restrictions') {
+      for (const part of text.split(',')) {
+        const boats = part.match(/\d[x+-]/g) || [];
+        if (/restricted/.test(part)) saidNo.push(...boats);
+        else if (/caution/.test(part)) saidCaution.push(...boats);
+        else assert.fail(`${ft} ft: cannot read "${part}" in "${text}"`);
+      }
+    }
+    assert.deepStrictEqual(saidNo.sort(), expectNo.sort(), `${ft} ft "${text}": restricted boats`);
+    assert.deepStrictEqual(saidCaution.sort(), expectCaution.sort(), `${ft} ft "${text}": caution boats`);
+    assert.strictEqual(cls === 'rp-normal', !expectNo.length && !expectCaution.length,
+      `${ft} ft: green pill only when nothing is restricted`);
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 section('4. Cold-water zones');
 // ═══════════════════════════════════════════════════════════════════════════
@@ -358,6 +386,61 @@ test('total NOAA failure warns and does not fabricate a level', () => {
   const html = M.renderEmailHtml(digest);
   assert.ok(/River level unavailable/.test(html));
   assert.ok(/--/.test(html), 'level should render as -- not a made-up number');
+});
+
+function staleRiverEmail(river) {
+  const digest = M.computeDigest(logic, { raw: makeRaw(75), history: historyAtTemp(75) },
+    Object.assign({ failed: false, stale: true }, river), { available: false }, new Date());
+  return M.renderEmailHtml(digest);
+}
+
+test('stale gauge: a gauge silent for hours says hours - never "0 days"', () => {
+  const now = Date.now();
+  const html = staleRiverEmail({ level: 3.4, isEstimate: true, ageMs: 7.5 * 3600000, lastObsTs: now - 7.5 * 3600000 });
+  assert.ok(/not updated in 7 hours/.test(html), html.match(/River gauge data is stale[^<]*<\/strong>[^<]*/)[0]);
+  assert.ok(!/0 days/.test(html));
+  assert.ok(/estimated from NOAA&(rsquo|#8217);s forecast/.test(html), 'the level is the forecast estimate');
+});
+
+test('stale gauge with no forecast: the level is called the last reading, not an estimate', () => {
+  const now = Date.now();
+  const html = staleRiverEmail({ level: 3.4, isEstimate: false, ageMs: 3 * 86400000, lastObsTs: now - 3 * 86400000 });
+  assert.ok(/not updated in 3 days/.test(html));
+  assert.ok(/that last reading, not a current one/.test(html));
+  assert.ok(!/estimated from/.test(html), 'there was no forecast, so nothing was estimated');
+});
+
+test('stale gauge with no observed readings at all says so, rather than "an extended period"', () => {
+  const html = staleRiverEmail({ level: 3.2, isEstimate: true, ageMs: null, lastObsTs: null });
+  assert.ok(/observed readings for this gauge are unavailable/.test(html));
+  assert.ok(/estimated from NOAA/.test(html));
+});
+
+test('stale gauge: the website and the email use the same words', async () => {
+  const now = Date.now();
+  const obsTs = now - 9 * 3600000;
+  const series = (fc) => ({ data: fc
+    ? [{ validTime: new Date(now + 3600e3).toISOString(), primary: 3.6 }]
+    : [{ validTime: new Date(obsTs).toISOString(), primary: 3.4 }] });
+  const { site, els } = loadSite(now, (url) => okJson(series(!/observed$/.test(url))));
+  await site.loadRiverData();
+  const note = logic.riverStaleNote(now - obsTs, obsTs, true);
+  assert.ok(els['river-content'].innerHTML.includes(note), 'site river card: ' + els['river-content'].innerHTML.slice(0, 300));
+  const html = staleRiverEmail({ level: 3.6, isEstimate: true, ageMs: now - obsTs, lastObsTs: obsTs });
+  assert.ok(html.includes(M.toAsciiEntities(note)), 'email');
+  assert.ok(/Forecast estimate/.test(els['sum-river'].innerHTML), 'summary tile marks the estimate');
+});
+
+test('stale gauge, no forecast: the summary tile says the reading is not current', async () => {
+  const now = Date.now();
+  const obsTs = now - 30 * 3600000;
+  const { site, els } = loadSite(now, (url) => okJson(/observed$/.test(url)
+    ? { data: [{ validTime: new Date(obsTs).toISOString(), primary: 3.4 }] } : { data: [] }));
+  await site.loadRiverData();
+  assert.ok(/3\.4 ft/.test(els['sum-river'].innerHTML));
+  assert.ok(/not current/.test(els['sum-river'].innerHTML), els['sum-river'].innerHTML);
+  assert.ok(!/Stevenson Dam gauge</.test(els['sum-river'].innerHTML), 'must not present it as a live gauge reading');
+  assert.ok(/that last reading, not a current one/.test(els['river-content'].innerHTML));
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -1442,7 +1442,8 @@ function renderRowingStatus(tempF) {
   // Append river level context note if data available
   const lvlNote = state.riverLevel !== null
     ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:.72rem;color:var(--muted);">
-         River level: <strong style="color:var(--white);">${state.riverLevel.toFixed(1)} ft</strong>
+         River level: <strong style="color:var(--white);">${state.riverLevel.toFixed(1)} ft</strong>${state.riverLevelIsEstimate
+           ? ' (forecast estimate)' : state.riverObservedStale ? ' (last gauge reading, not current)' : ''}
          &nbsp;·&nbsp; Flood restrictions applied above where more restrictive than temperature rules.
          &nbsp;·&nbsp; <a href="https://water.noaa.gov/gauges/stvc3" target="_blank"
             style="color:var(--muted);text-decoration:underline;">NOAA gauge STVC3</a>
@@ -1598,11 +1599,16 @@ function renderSummaryRiver() {
       return;
     }
     const s = floodSummaryLabel(level);
-    // Same honesty as the river card: a forecast stand-in is never shown as a
-    // live gauge reading.
+    // Same honesty as the river card: a forecast stand-in, or a gauge reading
+    // that has stopped updating, is never shown as a live gauge reading.
+    const obs = state.riverObserved || [];
+    const lastObsTs = obs.length ? obs[obs.length - 1].ts : null;
     const source = state.riverLevelIsEstimate
       ? '<div class="summary-line" style="color:#ffd166;">Forecast estimate &mdash; gauge not reporting</div>'
-      : '<div class="summary-line">Stevenson Dam gauge</div>';
+      : (state.riverObservedStale && lastObsTs !== null)
+        ? `<div class="summary-line" style="color:#ffd166;">Gauge reading from ${new Date(lastObsTs).toLocaleString('en-US',
+            { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} &mdash; not current</div>`
+        : '<div class="summary-line">Stevenson Dam gauge</div>';
     setSummary('sum-river', `
       <div class="summary-big">${level.toFixed(1)} ft</div>${source}
       <div class="summary-river-status"><span class="river-status-pill ${s.cls}">${s.text}</span></div>`);
@@ -1980,7 +1986,12 @@ function floodStatusForBoat(boatName, levelFt) {
   return worst;
 }
 
-// Flood summary label for the pill
+// Flood summary label for the pill (river card, summary tile and the email).
+// Every boat getFloodStatus() restricts or cautions at that level must be named,
+// and nothing else - a test checks each band against the table above. Two bands
+// used to leave the fours out: 10-11 ft omitted that 4+ / 4- need caution, and
+// 11-12 ft read "Singles & doubles restricted, 4x / 8+ caution", which a rower
+// could take to mean a four may go out; the table says no.
 function floodSummaryLabel(levelFt) {
   if (levelFt === null) return null;
   // Not "All boats clear": the river level imposing no restriction says nothing
@@ -1988,8 +1999,8 @@ function floodSummaryLabel(levelFt) {
   if (levelFt <= 8)  return { cls:'rp-normal',  text:'No river-level restrictions' };
   if (levelFt <= 9)  return { cls:'rp-caution', text:'1x / 2- use caution' };
   if (levelFt <= 10) return { cls:'rp-caution', text:'1x / 2- restricted, 2x caution' };
-  if (levelFt <= 11) return { cls:'rp-danger',  text:'1x / 2- / 2x restricted' };
-  if (levelFt <= 12) return { cls:'rp-danger',  text:'Singles & doubles restricted, 4x / 8+ caution' };
+  if (levelFt <= 11) return { cls:'rp-danger',  text:'1x / 2- / 2x restricted, 4+ / 4- caution' };
+  if (levelFt <= 12) return { cls:'rp-danger',  text:'1x / 2- / 2x / 4+ / 4- restricted, 4x / 8+ caution' };
   return { cls:'rp-danger', text:'All boats restricted — river > 12 ft' };
 }
 
@@ -2076,6 +2087,30 @@ async function loadRiverData() {
   }
 }
 
+/**
+ * Words for a stale river gauge, shared with the daily email. Says how long the
+ * gauge has been silent - in hours for the first two days, since the threshold
+ * is six hours and "0 days" (what this used to print) reads as "not stale" -
+ * and what the level on screen therefore is: a forecast estimate, or the last
+ * reading when there is no forecast to fall back on. Pure ASCII with entities.
+ */
+function riverStaleNote(ageMs, lastObsTs, isEstimate) {
+  let what;
+  if (typeof lastObsTs !== 'number' || !Number.isFinite(lastObsTs) || typeof ageMs !== 'number' || !Number.isFinite(ageMs)) {
+    what = 'NOAA&rsquo;s observed readings for this gauge are unavailable.';
+  } else {
+    const hours = ageMs / 3600000;
+    const age = hours < 48 ? `${Math.floor(hours)} hours` : `${Math.floor(hours / 24)} days`;
+    const when = new Date(lastObsTs).toLocaleString('en-US', { timeZone: 'America/New_York',
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).replace(/[^\x20-\x7e]/g, ' ');
+    what = `NOAA&rsquo;s observed reading has not updated in ${age} (last reading ${when} ${nyTzAbbr(lastObsTs)}).`;
+  }
+  const shown = isEstimate
+    ? 'The level shown is estimated from NOAA&rsquo;s forecast, not a live sensor.'
+    : 'The level shown is that last reading, not a current one.';
+  return `${what} ${shown}`;
+}
+
 function renderRiverCardUnavailable(msg) {
   const el = document.getElementById('river-content');
   if (el) el.innerHTML = `<div class="river-unavailable">${msg}</div>`;
@@ -2118,17 +2153,11 @@ function renderRiverCard() {
     updatedTz = obs.length > 0 ? nyTzAbbr(obs[obs.length-1].ts) : 'ET';
   }
 
-  const staleBanner = state.riverObservedStale ? (() => {
-    const staleDays = state.riverObservedAgeMs !== null ? Math.floor(state.riverObservedAgeMs / 86400000) : null;
-    const staleDaysLabel = staleDays !== null ? `${staleDays} day${staleDays === 1 ? '' : 's'}` : 'an extended period';
-    const lastObsLabel = obs.length > 0
-      ? new Date(obs[obs.length-1].ts).toLocaleDateString('en-US', {timeZone:'America/New_York', month:'short', day:'numeric'})
-      : null;
-    return `<div class="warn-banner level-danger" style="margin-bottom:14px;">
+  const staleBanner = state.riverObservedStale ? `<div class="warn-banner level-danger" style="margin-bottom:14px;">
       <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
-      <div><strong>River gauge data is stale</strong> NOAA's observed reading hasn't updated in ${staleDaysLabel}${lastObsLabel ? ` (last reading: ${lastObsLabel})` : ''}. The level shown below is estimated from NOAA's forecast model, not a live sensor — verify at <a href="https://water.noaa.gov/gauges/stvc3" target="_blank" style="color:#f07070;text-decoration:underline;">water.noaa.gov/gauges/stvc3</a> before relying on it.</div>
-    </div>`;
-  })() : '';
+      <div><strong>River gauge data is stale</strong> ${riverStaleNote(state.riverObservedAgeMs,
+        obs.length ? obs[obs.length - 1].ts : null, state.riverLevelIsEstimate)} Verify at <a href="https://water.noaa.gov/gauges/stvc3" target="_blank" style="color:#f07070;text-decoration:underline;">water.noaa.gov/gauges/stvc3</a> before relying on it.</div>
+    </div>` : '';
 
   el.innerHTML = `
     ${staleBanner}

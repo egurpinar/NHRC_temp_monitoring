@@ -169,7 +169,7 @@ function loadSiteLogic(indexHtmlPath = INDEX_HTML) {
     'state', 'ZONE_TIERS', 'ZONE_OVERRIDE',
     'getEffectiveLevel', 'checkMorningStreak', 'nyWindowBound', 'nyTzAbbr',
     'getFloodStatus', 'combineStatus', 'boatKeys', 'floodStatusForBoat',
-    'floodSummaryLabel', 'extractTemp', 'parseLastDeviceData',
+    'floodSummaryLabel', 'riverStaleNote', 'extractTemp', 'parseLastDeviceData',
     'WMO_CODES', 'WMO_ICONS',
     // Wording: the email must never label a status differently from the site.
     'boatStatusLabel', 'ALLOWED_NOTE_HTML',
@@ -499,6 +499,11 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
   }));
 
   const floodSummary = river.level !== null ? logic.floodSummaryLabel(river.level) : null;
+  // The website's own words for a stale gauge: how long it has been silent, and
+  // whether the level shown is a forecast estimate or that last reading.
+  const riverStaleNote = river.stale && !river.failed
+    ? logic.riverStaleNote(river.ageMs, river.lastObsTs, river.isEstimate)
+    : null;
 
   // Sensor freshness — mirrors the site's 3-hour offline threshold.
   const sensorAgeMs = fetchedAt ? (now.getTime() - fetchedAt.getTime()) : null;
@@ -549,6 +554,7 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
     rows,
     river,
     floodSummary,
+    riverStaleNote,
     // Resolve the condition label and icon here, where the site's own mapping
     // is available, so the email uses the same icons the website shows.
     weather: withWeatherDescription(weather, logic),
@@ -681,8 +687,11 @@ function renderEmailHtml(d) {
   if (d.river.failed) {
     warnings.push(`<strong>River level unavailable.</strong> NOAA data could not be retrieved, so flood restrictions are not reflected below. Check the gauge before launching.`);
   } else if (d.river.stale) {
-    const days = d.river.ageMs !== null ? Math.floor(d.river.ageMs / 86400000) : null;
-    warnings.push(`<strong>River gauge data is stale.</strong> NOAA's observed reading hasn't updated in ${days !== null ? days + ' day' + (days === 1 ? '' : 's') : 'an extended period'}. The level below is estimated from NOAA's forecast, not a live sensor.`);
+    // Shared with the website (riverStaleNote in index.html). It used to say
+    // "hasn't updated in 0 days" for a gauge silent 6-23 hours, and to call the
+    // level a forecast estimate even when it was the stale reading itself.
+    warnings.push(`<strong>River gauge data is stale.</strong> ${d.riverStaleNote ||
+      'NOAA&rsquo;s observed reading is not current.'}`);
   }
 
   const warningHtml = warnings.map(w =>
