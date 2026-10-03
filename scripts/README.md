@@ -21,6 +21,8 @@ status using the site's own functions and compares against the email output.
 | `daily_email.js` | Builds and sends the digest |
 | `test_daily_email.js` | Test suite (162 tests) |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
+| `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
+| `refresh_checkout.sh` | After the wait, pulls the readings made while the job slept |
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
 
 ## Rowing season
@@ -178,6 +180,13 @@ cannot produce a second copy.
 
 The window deliberately ends before 5 AM — a digest arriving later is no use to
 someone already at the boathouse.
+
+**A run that waited must refresh its checkout.** GitHub checks the repository
+out when the job starts, so a run triggered at 9 PM that sleeps until 1 AM was
+building the email from 9 PM data: a four-hour-old water reading, reported as
+"Water sensor may be offline" (the 1 Oct 2026 digest). `refresh_checkout.sh`
+syncs to the latest commit after the wait and before the tests and the build.
+It never fails the job; if the remote cannot be reached the email is still sent.
 
 ## Safety behaviour
 

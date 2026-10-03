@@ -1112,6 +1112,22 @@ test('the workflow crons match what the tests assume', () => {
     'a sleeping run must not be cancelled mid-send by a later trigger');
 });
 
+test('SAFETY the email is built from the latest readings, not the checkout made before the wait', () => {
+  // A run triggered at 9 PM checks out the repo, sleeps until 1 AM, and used to
+  // build the email from that 9 PM checkout: the 1 Oct digest reported "Water
+  // sensor may be offline" 90 minutes after a reading. The refresh must sit
+  // after the wait and before both the tests and the build.
+  const wf = require('fs').readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'daily_email.yml'), 'utf8');
+  const at = (re) => { const m = wf.match(re); return m ? m.index : -1; };
+  const gate = at(/id:\s*gate/), refresh = at(/run:\s*bash scripts\/refresh_checkout\.sh/);
+  const tests = at(/node scripts\/test_daily_email\.js/), build = at(/daily_email\.js --json/);
+  const send = at(/daily_email\.js --send/);
+  assert.ok(refresh > 0, 'the workflow must run scripts/refresh_checkout.sh');
+  assert.ok(gate < refresh && refresh < tests && refresh < build && refresh < send,
+    'refresh must come after the wait and before the tests, the build and the send');
+  assert.ok(/bash scripts\/test_refresh_checkout\.sh/.test(wf), 'and its own tests must run before sending');
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 section('8d. Duplicate-send prevention');
 // ═══════════════════════════════════════════════════════════════════════════

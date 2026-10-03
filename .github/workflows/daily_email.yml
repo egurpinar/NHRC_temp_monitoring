@@ -97,11 +97,21 @@ jobs:
               ;;
           esac
 
+      - name: Get the readings made while this job waited
+        if: steps.gate.outputs.proceed == 'true'
+        # The checkout above was made when the job STARTED - up to five hours
+        # ago, for a run that slept until 1 AM. Building from it sent the 1 Oct
+        # digest with a 4-hour-old water reading, flagged as "sensor may be
+        # offline" although the sensor had reported 90 minutes earlier.
+        # Never fails the job: if the refresh fails, the email still goes out.
+        run: bash scripts/refresh_checkout.sh
+
       - name: Run test suite
         if: steps.gate.outputs.proceed == 'true'
         # The rules logic is safety-critical. If the tests fail, do not send.
         run: |
           bash scripts/test_send_window.sh
+          bash scripts/test_refresh_checkout.sh
           node scripts/test_daily_email.js
 
       - name: Build email (dry run preview)
