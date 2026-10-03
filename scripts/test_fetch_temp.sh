@@ -69,13 +69,41 @@ chk "history untouched by bad input" "$(jq length history.json)" "2"
 # ══════════════════════════════════════════════════════════════════════════
 section "3. Value ranges"
 # ══════════════════════════════════════════════════════════════════════════
-export GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":31}}]}}'
-LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1
+reading(){ export GOVEE_FAKE_RESPONSE="{\"payload\":{\"capabilities\":[{\"instance\":\"sensorTemperature\",\"state\":{\"value\":$1}}]}}"
+           LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1; }
+reading 31
 chk "integer value accepted" "$(jq -r '.[-1].tempF' history.json)" "31"
-export GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":-4.5}}]}}'
-LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1
-chk "sub-zero value accepted" "$(jq -r '.[-1].tempF' history.json)" "-4.5"
-chk "sub-zero converts to C" "$(jq -r '.[-1].tempC' history.json)" "-20.27"
+chk "below 0°C converts to C" "$(jq -r '.[-1].tempC' history.json)" "-0.55"
+# Between -1 and 1 °C bc writes ".55" / "-.55" - not valid JSON. Every file must
+# stay strictly valid, checked here with Python's parser, which (unlike jq)
+# rejects a missing leading zero.
+for f in 33 32.5 31 33.79; do
+  reading "$f"
+  chk "${f}F: history.json strictly valid JSON" "$(python3 -c 'import json,sys; json.load(open("history.json")); print("ok")' 2>&1)" "ok"
+  chk "${f}F: data.json strictly valid JSON" "$(python3 -c 'import json; json.load(open("data.json")); print("ok")' 2>&1)" "ok"
+done
+chk "33F stored as 0.55C" "$(python3 -c 'import json; print(json.load(open("history.json"))[-4]["tempC"])')" "0.55"
+chk "tem keeps its sign below freezing" "$(reading 31; jq -r '.data.devices[0].deviceExt.lastDeviceData' data.json | jq -r .tem)" "-55"
+# jq re-serialises numbers on the way into history.json, which would hide the
+# bug in that file - so check the raw entry the script builds, as it logs it.
+GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":33}}]}}' \
+  LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" > lead.log 2>&1
+chk "the raw entry has a leading zero (0.55)" "$(grep -o '"tempC":[^,]*' lead.log | head -1)" '"tempC":0.55'
+GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":31.5}}]}}' \
+  LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" > lead.log 2>&1
+chk "and below zero (-0.27)" "$(grep -o '"tempC":[^,]*' lead.log | head -1)" '"tempC":-0.27'
+
+# Impossible water temperatures are faults, not readings.
+cp data.json data.before; n=$(jq length history.json)
+for f in -4.5 0 0.5 27.9 100.1 150 999; do
+  reading "$f"; chk "implausible ${f}F rejected" "$?" "1"
+done
+chk "data.json untouched by implausible readings" "$(cmp -s data.json data.before && echo same)" "same"
+chk "history untouched by implausible readings" "$(jq length history.json)" "$n"
+reading 28; chk "28F (the floor) accepted" "$?" "0"
+reading 100; chk "100F (the ceiling) accepted" "$?" "0"
+MIN_PLAUSIBLE_F=-40 LOOP_MINUTES=0 GIT_COMMIT=0 GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":-4.5}}]}}' bash "$SCRIPT" >/dev/null 2>&1
+chk "the bounds can be overridden" "$(jq -r '.[-1].tempC' history.json)" "-20.27"
 # The replacement sensor advertises no "online" capability at all.
 export GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":70.0}}]}}'
 LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1

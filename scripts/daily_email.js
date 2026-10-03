@@ -543,7 +543,8 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
     tz: logic.nyTzAbbr(now.getTime()),
     tempF,
     zone: eff.zone,
-    zoneLabel: ZONE_LABEL[eff.zone] || eff.zone,
+    // A manual Safety Committee setting is labelled as one, as on the website.
+    zoneLabel: (ZONE_LABEL[eff.zone] || eff.zone) + (eff.override ? ' (set by the Safety Committee)' : ''),
     zoneColor: ZONE_COLOR[eff.zone] || ZONE_COLOR.normal,
     immediate: !!eff.immediate,
     rows,
@@ -926,8 +927,13 @@ function renderSubject(d, now = new Date()) {
 
   // Kept ASCII-only: subjects are not HTML, so entities would show literally,
   // and their encoding depends on MIME headers we do not control.
+  // A water reading over 3 hours old is marked in the subject as well as the
+  // body: the subject is all many members read, and it would otherwise show a
+  // stale temperature exactly like a current one.
+  const waterPart = `${d.tempF.toFixed(1)}F${d.sensorStale ? ' (old reading)' : ''}`;
+
   return toAsciiSubject(
-    `NHRC ${dateShort} - ${fogPrefix}${headline} - ${d.tempF.toFixed(1)}F - ${riverPart}`);
+    `NHRC ${dateShort} - ${fogPrefix}${headline} - ${waterPart} - ${riverPart}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -902,13 +902,16 @@ function updateFreshnessWarnings() {
   const gapEl   = document.getElementById('warn-gap');
   const staleEl = document.getElementById('warn-stale');
   if (ageHrs >= 6) {
-    const h = Math.floor(ageHrs), m = Math.round((ageHrs-h)*60);
+    // From whole minutes, so it can never read "6h 60m"; days once it is days.
+    const total = Math.round(ageMs / 60000);
+    const d = Math.floor(total / 1440), h = Math.floor((total % 1440) / 60), m = total % 60;
+    const span = d ? `${d} day${d === 1 ? '' : 's'} ${h}h` : `${h}h ${m}m`;
     document.getElementById('warn-gap-text').textContent =
-      ` No readings received for ${h}h ${m}m. The sensor, gateway, or GitHub Actions workflow may be offline. Last reading: ${new Date(bestTs).toLocaleString()}.`;
+      ` No readings received for ${span}. The sensor, its gateway, or the data feed may be offline. Last reading: ${fmtET(bestTs)}.`;
     gapEl.style.display='flex'; staleEl.style.display='none';
   } else if (ageMs > 45*60000) {
     document.getElementById('warn-stale-text').textContent =
-      ` Last reading was ${ageMins} minutes ago. GitHub Actions typically runs every 30 minutes — if this persists check the Actions tab.`;
+      ` Last reading was ${ageMins} minutes ago. Readings normally arrive every 15 minutes.`;
     staleEl.style.display='flex'; gapEl.style.display='none';
   } else {
     gapEl.style.display='none'; staleEl.style.display='none';
@@ -922,7 +925,7 @@ function updateInfoBar() {
   const ageMins = Math.round(ageMs/60000);
   document.getElementById('info-dot').className = ageMs > 45*60000 ? 'dot-warn' : 'dot-live';
   document.getElementById('info-last').textContent =
-    `Last reading: ${new Date(last.ts).toLocaleString()} (${ageMins<2?'just now':ageMins+' min ago'})`;
+    `Last reading: ${fmtET(last.ts)} (${ageMins<2?'just now':ageMins+' min ago'})`;
   document.getElementById('info-count').textContent =
     `${state.allHistory.length.toLocaleString()} readings`;
 }
@@ -1276,6 +1279,13 @@ function nyWindowBound(y, m, d, hour, minute) {
 // given instant. Timestamps were previously labeled with a hardcoded "EDT",
 // which is wrong for roughly 4 months a year (Nov–Mar, when NY is on EST) —
 // this makes every displayed time zone-correct instead of assuming DST.
+// A time as the page states every other time: boathouse time, with its zone.
+// Two messages used the viewer's own clock and locale instead.
+function fmtET(ts) {
+  return new Date(ts).toLocaleString('en-US', { timeZone: 'America/New_York',
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + ' ' + nyTzAbbr(ts);
+}
+
 function nyTzAbbr(ts) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York', timeZoneName: 'short',
@@ -1380,9 +1390,17 @@ function checkMorningStreak(threshold) {
   return { confirmed, noData, confirmedDays };
 }
 
+// The override is typed by hand. A typo ('cold', 'Winter') must not break the
+// page - ZONE_TIERS[typo] is undefined and the rules card would throw - so an
+// unknown value is ignored, with a notice on the rules card saying so.
+function activeOverride() {
+  return (typeof ZONE_OVERRIDE !== 'undefined' && ZONE_OVERRIDE !== null
+          && Object.prototype.hasOwnProperty.call(ZONE_TIERS, ZONE_OVERRIDE)) ? ZONE_OVERRIDE : null;
+}
+
 function getEffectiveLevel(tempF) {
   // Apply manual override if set — flood restrictions still handled downstream
-  if (typeof ZONE_OVERRIDE !== 'undefined' && ZONE_OVERRIDE !== null) {
+  if (activeOverride() !== null) {
     return {
       zone: ZONE_OVERRIDE,
       immediate: false,
@@ -1506,7 +1524,10 @@ function renderRowingStatus(tempF) {
   const banner = document.getElementById('rule-banner');
   const tiers  = ZONE_TIERS[eff.zone];
   let rule, notes, cssLevel;
-  const isOverride = (typeof ZONE_OVERRIDE !== 'undefined' && ZONE_OVERRIDE !== null);
+  const isOverride = activeOverride() !== null;
+  // A manual setting is stated as one: it used to read "awaiting 3-morning
+  // confirmation to lift" (or "3-day confirmed") and drop the zone's rules.
+  const BY_COMMITTEE = ' (set by the Safety Committee)';
 
   // Helper to build the "awaiting" message for any zone
   function awaitingMsg(zone, eff) {
@@ -1538,37 +1559,50 @@ function renderRowingStatus(tempF) {
 
   if (eff.zone === 'winter') {
     cssLevel = 'red';
-    if (eff.immediate) {
+    const zoneRules = '<strong>Eight Oar Rule:</strong> Quads (4x) and Eights (8+) only. Each rower must be certified by the Captain of Winter Rowing, wear over-the-shoulder auto-inflate life jackets, and have signed a Winter Rowing waiver. Two-boat minimum.';
+    if (isOverride) {
+      rule  = 'WINTER ROWING in effect' + BY_COMMITTEE;
+      notes = zoneRules;
+    } else if (eff.immediate) {
       rule  = 'WINTER ROWING in effect (water < 40°F)';
-      notes = '<strong>Eight Oar Rule:</strong> Quads (4x) and Eights (8+) only. Each rower must be certified by the Captain of Winter Rowing, wear over-the-shoulder auto-inflate life jackets, and have signed a Winter Rowing waiver. Two-boat minimum.';
+      notes = zoneRules;
     } else {
       rule  = 'WINTER ROWING — awaiting 3-morning confirmation to lift';
-      notes = isOverride ? '' : awaitingMsg('winter', eff) + ' <strong>Eight Oar Rule remains in effect.</strong>';
+      notes = awaitingMsg('winter', eff) + ' <strong>Eight Oar Rule remains in effect.</strong>';
     }
   } else if (eff.zone === 'fourOar') {
     cssLevel = 'yellow';
-    if (eff.immediate) {
+    const zoneRules = '<strong>Four Oar Rule:</strong> No singles or pairs for Tier 1 or 2. Tier 3 may row 2x/4+/- with auto-inflate life jackets.';
+    if (isOverride) {
+      rule  = 'FOUR OAR RULE in effect' + BY_COMMITTEE;
+      notes = zoneRules;
+    } else if (eff.immediate) {
       rule  = 'FOUR OAR RULE in effect (water 40–50°F)';
-      notes = '<strong>Four Oar Rule:</strong> No singles or pairs for Tier 1 or 2. Tier 3 may row 2x/4+/- with auto-inflate life jackets.';
+      notes = zoneRules;
     } else {
       rule  = 'FOUR OAR RULE — awaiting 3-morning confirmation to lift';
-      notes = isOverride ? '' : awaitingMsg('fourOar', eff) + ' Four Oar restrictions remain in effect.';
+      notes = awaitingMsg('fourOar', eff) + ' Four Oar restrictions remain in effect.';
     }
   } else if (eff.zone === 'coldWater') {
     cssLevel = 'yellow';
-    if (eff.immediate) {
+    const zoneRules = 'Tier 1 may row 4+, 4- and above. Tier 2 may row 2x and above. Tier 3 may row all boats. No life jackets required.';
+    if (isOverride) {
+      rule  = 'COLD WATER restrictions apply' + BY_COMMITTEE;
+      notes = zoneRules;
+    } else if (eff.immediate) {
       rule  = 'COLD WATER restrictions apply (water 51–60°F)';
-      notes = 'Tier 1 may row 4+, 4- and above. Tier 2 may row 2x and above. Tier 3 may row all boats. No life jackets required.';
+      notes = zoneRules;
     } else {
       rule  = 'COLD WATER — awaiting 3-morning confirmation to lift';
-      notes = isOverride ? '' : awaitingMsg('coldWater', eff);
+      notes = awaitingMsg('coldWater', eff);
     }
   } else {
     cssLevel = 'green';
     // Names the rule that is (not) in force rather than declaring the
     // conditions "normal": the page knows the water temperature, not whether
     // there is fog, wind or debris on the river.
-    rule  = 'No temperature restrictions (water > 60°F, 3-day confirmed)';
+    rule  = isOverride ? 'No temperature restrictions' + BY_COMMITTEE
+                       : 'No temperature restrictions (water > 60°F, 3-day confirmed)';
     notes = 'Buddy Boat advised in Spring and Fall. Carry a cell phone and marine whistle. Wear Hi-Viz tops.';
   }
 
@@ -1599,17 +1633,22 @@ function renderRowingStatus(tempF) {
 
   // Append override notice if active
   if (isOverride) {
-    const zoneName = {'normal':'Normal','coldWater':'Cold Water',
-                      'fourOar':'Four Oar Rule','winter':'Winter'}[ZONE_OVERRIDE] || ZONE_OVERRIDE;
+    // Not "Normal conditions have been declared": nothing on this page may
+    // read as a go-ahead, the committee's own notice included.
+    const zoneName = { normal: 'No temperature restrictions', coldWater: 'Cold Water restrictions',
+                       fourOar: 'the Four Oar Rule', winter: 'Winter Rowing' }[ZONE_OVERRIDE];
+    const near = { normal: '60°F', coldWater: '50°F', fourOar: '40°F', winter: '40°F' }[ZONE_OVERRIDE];
     notes += `<div style="margin-top:10px;padding:10px 14px;background:rgba(240,180,41,0.08);
       border:1px solid rgba(240,180,41,0.3);border-radius:8px;font-size:.78rem;line-height:1.6;">
       <strong style="color:#ffd166;">&#9888; Safety Committee Notice</strong><br>
-      <strong>${zoneName} conditions</strong> have been manually declared by the Safety Committee
-      to account for sensor sensitivity. The water temperature has been lingering near the
-      ${zoneName === 'Normal' ? '60°F' : zoneName === 'Cold Water' ? '50°F' : '40°F'} threshold
-      and this adjustment reflects real-world conditions at the boathouse.
-      Flood restrictions remain in effect as normal.
+      The Safety Committee has set <strong>${zoneName}</strong> manually, to account for sensor
+      sensitivity: the water temperature has been lingering near the ${near} threshold, and this
+      reflects real-world conditions at the boathouse. River-level restrictions still apply.
     </div>`;
+  } else if (typeof ZONE_OVERRIDE !== 'undefined' && ZONE_OVERRIDE !== null) {
+    notes += `<div style="margin-top:10px;font-size:.72rem;color:#f07070;">Manual zone setting
+      &ldquo;${String(ZONE_OVERRIDE).replace(/[<>&"]/g, '')}&rdquo; is not recognised, so the automatic
+      rules are shown. Valid settings: normal, coldWater, fourOar, winter.</div>`;
   }
   document.getElementById('rowing-notes').innerHTML = notes;
 

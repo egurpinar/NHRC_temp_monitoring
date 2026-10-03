@@ -487,6 +487,17 @@ test('offline sensor (>3h) produces a warning', () => {
   assert.ok(/Water sensor may be offline/.test(M.renderEmailHtml(digest)));
 });
 
+test('a stale water reading is marked in the SUBJECT too - many members read only that', () => {
+  const now = new Date();
+  const mk = (ageH) => M.computeDigest(logic, { raw: makeRaw(66.3, new Date(now - ageH * 3600000)), history: historyAtTemp(66) },
+    { level: 2.5, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: now.getTime() }, { available: false }, now);
+  const stale = M.renderSubject(mk(5), now), fresh = M.renderSubject(mk(0.5), now);
+  assert.ok(/- 66\.3F \(old reading\) - river 2\.5 ft$/.test(stale), stale);
+  assert.ok(/- 66\.3F - river 2\.5 ft$/.test(fresh), fresh);
+  assert.ok(!/old reading/.test(M.renderSubject(mk(2.9), now)), 'under 3 hours is not stale');
+  assert.ok(/^[\x20-\x7e]+$/.test(stale), 'still pure ASCII');
+});
+
 test('fresh sensor produces no offline warning', () => {
   const digest = M.computeDigest(logic,
     { raw: makeRaw(72, new Date()), history: historyAtTemp(72) },
@@ -2104,7 +2115,7 @@ section('13. Website rendering (index.html in a DOM stub)');
 // AbortController, setTimeout, clearTimeout, Image.
 function loadSite(nowMs, fetchImpl, opts = {}) {
   const clock = typeof nowMs === 'function' ? nowMs : () => nowMs;
-  const src = fsT.readFileSync(INDEX_PATH, 'utf8').match(/<script>([\s\S]*)<\/script>\s*<\/body>/)[1];
+  const src = (opts.transform || (x => x))(fsT.readFileSync(INDEX_PATH, 'utf8').match(/<script>([\s\S]*)<\/script>\s*<\/body>/)[1]);
   const els = {};
   const el = id => els[id] || (els[id] = {
     id, innerHTML: '', textContent: '', className: '', style: {}, value: '',
@@ -2825,6 +2836,43 @@ test('returning to the tab after more than a minute refreshes everything; a quic
   assert.deepStrictEqual(counts(), [3, 3, 3, 3, 3], 'restored from the back/forward cache: refreshed');
 });
 
+test('data-gap banner: whole minutes (never "6h 60m"), days once it is days, boathouse time', () => {
+  const now = etDate('2026-10-03', 7, 0).getTime();
+  const gap = (ageMs) => {
+    const { site, els } = loadSite(now);
+    site.state.lastFetchedAt = new Date(now - ageMs);
+    site.updateFreshnessWarnings();
+    assert.strictEqual(els['warn-gap'].style.display, 'flex');
+    return els['warn-gap-text'].textContent;
+  };
+  let t = gap(6 * HOUR + 59.6 * 60000);
+  assert.ok(/for 7h 0m\./.test(t), t);
+  t = gap(6 * HOUR + 59.4 * 60000);
+  assert.ok(/for 6h 59m\./.test(t), t);
+  t = gap(51 * HOUR);
+  assert.ok(/for 2 days 3h\./.test(t), t);
+  assert.ok(/Last reading: Oct 1, 4:00(\u202f| )AM EDT\./.test(t), t);
+  assert.ok(!/GitHub|Actions/.test(t), 'no developer jargon on the public page');
+});
+
+test('delayed-data banner speaks to members, not to the repository owner', () => {
+  const now = Date.now();
+  const { site, els } = loadSite(now);
+  site.state.lastFetchedAt = new Date(now - 50 * 60000);
+  site.updateFreshnessWarnings();
+  assert.strictEqual(els['warn-stale'].style.display, 'flex');
+  assert.ok(/50 minutes ago/.test(els['warn-stale-text'].textContent));
+  assert.ok(!/GitHub|Actions tab/.test(els['warn-stale-text'].textContent), els['warn-stale-text'].textContent);
+});
+
+test('the chart info bar gives the last reading in boathouse time', async () => {
+  const t = etDate('2026-10-03', 6, 30).getTime();
+  const net = fakeNet([[/^data\.json/, () => reply(makeRaw(66, new Date(t - 15 * 60000)))], [/^history\.json/, () => reply(histUpTo(t - 15 * 60000, 66))]]);
+  const { site, els } = loadSite(t, net.fetch);
+  await site.loadData();
+  assert.ok(/^Last reading: Oct 3, 6:15(\u202f| )AM EDT \(15 min ago\)$/.test(els['info-last'].textContent), els['info-last'].textContent);
+});
+
 test('the Refresh button refreshes the whole summary, not just the water reading', () => {
   const html = fsT.readFileSync(INDEX_PATH, 'utf8');
   const btn = html.match(/<button[^>]*>Refresh<\/button>/);
@@ -2965,6 +3013,87 @@ test('camera: an image that never settles cannot block later refreshes', async (
   site.loadCameraSnapshot();
   await settle();
   assert.strictEqual(net.count(camUrl), 2, 'the next refresh runs');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('13e. Safety Committee manual zone setting (ZONE_OVERRIDE)');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Dormant today (null), but the committee can set it any morning; it must
+// work, read honestly, and survive a typo.
+
+const withOverride = (v) => (src) => {
+  const out = src.replace('const ZONE_OVERRIDE = null;', `const ZONE_OVERRIDE = ${JSON.stringify(v)};`);
+  assert.notStrictEqual(out, src, 'ZONE_OVERRIDE anchor not found');
+  return out;
+};
+function overrideSite(v, tempF = 72) {
+  const r = loadSite(Date.now(), undefined, { transform: withOverride(v) });
+  r.site.state.allHistory = historyAtTemp(tempF);
+  r.site.state.riverLevel = 3;
+  r.site.renderRowingStatus(tempF);
+  return r.els;
+}
+
+test('override: each zone is stated as set by the committee, with that zone\'s rules', () => {
+  const expect = {
+    winter: [/WINTER ROWING in effect \(set by the Safety Committee\)/, /Eight Oar Rule:/],
+    fourOar: [/FOUR OAR RULE in effect \(set by the Safety Committee\)/, /Four Oar Rule:/],
+    coldWater: [/COLD WATER restrictions apply \(set by the Safety Committee\)/, /Tier 1 may row 4\+/],
+    normal: [/No temperature restrictions \(set by the Safety Committee\)/, /Buddy Boat/],
+  };
+  for (const [zone, [ruleRe, notesRe]] of Object.entries(expect)) {
+    const els = overrideSite(zone);
+    const rule = els['rule-banner'].innerHTML, notes = els['rowing-notes'].innerHTML;
+    assert.ok(ruleRe.test(rule), `${zone}: ${rule}`);
+    assert.ok(!/awaiting|3-day confirmed/.test(rule), `${zone}: a manual setting is not a confirmation: ${rule}`);
+    assert.ok(notesRe.test(notes), `${zone}: the zone's rules must still be shown`);
+    assert.ok(/Safety Committee Notice/.test(notes), `${zone}: notice`);
+    assert.ok(!GO_AHEAD.test(rule + notes), `${zone}: go-ahead wording: ${(rule + notes).match(GO_AHEAD)}`);
+    assert.ok(!/Normal conditions/i.test(notes), `${zone}: "Normal conditions" is banned wording`);
+  }
+});
+
+test('override: the tiers follow the set zone, and river restrictions still apply on top', () => {
+  const r = loadSite(Date.now(), undefined, { transform: withOverride('normal') });
+  r.site.state.allHistory = historyAtTemp(45);
+  r.site.state.riverLevel = 10.5;
+  r.site.renderRowingStatus(45);   // 45F would be Four Oar automatically
+  const grid = r.els['tiers-grid'].innerHTML;
+  const status = (tier, boat) => {
+    const block = grid.split('tier-card').filter(b => b.includes(tier))[0];
+    return (block.match(new RegExp(boat.replace(/[+/]/g, '\\$&') + '</span>\\s*<span class="boat-status (\\w+-\\w+)"')) || [])[1];
+  };
+  assert.strictEqual(status('Tier 1', '1x / 2-'), 'bs-no', 'river at 10.5 ft still restricts singles');
+  assert.strictEqual(status('Tier 1', '4x / 8+'), 'bs-go', 'the override, not 45F, decides the temperature rule');
+  assert.ok(/River-level restrictions still apply/.test(r.els['rowing-notes'].innerHTML));
+});
+
+test('override: a typo cannot break the page - it is ignored, and the card says so', () => {
+  for (const bad of ['cold', 'Winter', 'four oar', '<b>x</b>', 42]) {
+    let els;
+    assert.doesNotThrow(() => { els = overrideSite(bad, 72); }, String(bad));
+    assert.ok(/No temperature restrictions \(water > 60°F, 3-day confirmed\)/.test(els['rule-banner'].innerHTML),
+      `${bad}: automatic rules: ${els['rule-banner'].innerHTML}`);
+    assert.ok(/is not recognised/.test(els['rowing-notes'].innerHTML), `${bad}: the mistake is visible`);
+    assert.ok(!/<b>x<\/b>/.test(els['rowing-notes'].innerHTML), 'and cannot inject markup');
+  }
+});
+
+test('override: the email labels it too, and gives the same tiers', () => {
+  const tmp = path.join(require('os').tmpdir(), 'nhrc_override_index.html');
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8');
+  for (const zone of ['winter', 'fourOar', 'coldWater', 'normal']) {
+    fsT.writeFileSync(tmp, html.replace('const ZONE_OVERRIDE = null;', `const ZONE_OVERRIDE = '${zone}';`));
+    const L = M.loadSiteLogic(tmp);
+    const d = M.computeDigest(L, { raw: makeRaw(72), history: historyAtTemp(72) },
+      { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() }, { available: false }, new Date());
+    assert.strictEqual(d.zone, zone);
+    assert.ok(/\(set by the Safety Committee\)$/.test(d.zoneLabel), d.zoneLabel);
+    assert.deepStrictEqual(d.rows.map(r => r.boats.map(b => b.status)),
+      L.ZONE_TIERS[zone].map(t => t.boats.map(b => b.s === 'go' ? 'go' : b.s)), `${zone}: tiers`);
+  }
+  fsT.unlinkSync(tmp);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -19,7 +19,7 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (162 tests) |
+| `test_daily_email.js` | Test suite (207 tests): the email, and the website's script run against a fake network and clock |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
 | `refresh_checkout.sh` | After the wait, pulls the readings made while the job slept |
@@ -191,7 +191,10 @@ It never fails the job; if the remote cannot be reached the email is still sent.
 ## Safety behaviour
 
 - If the tests fail, the workflow stops and nothing is sent.
-- If the water sensor is stale (>3h), the email says so.
+- If the water sensor is stale (>3h), the email says so, and the subject marks
+  the temperature "(old reading)".
+- A manual Safety Committee zone setting (`ZONE_OVERRIDE` in `index.html`) is
+  labelled "(set by the Safety Committee)" in the email, as on the website.
 - If NOAA's river gauge is stale (>6h), the email falls back to the forecast
   value and labels it clearly as an estimate.
 - If NOAA is unreachable, the email says the river level is unavailable rather

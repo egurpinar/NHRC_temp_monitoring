@@ -35,7 +35,19 @@ GOVEE_FAKE_RESPONSE="${GOVEE_FAKE_RESPONSE:-}"
 
 recorded=0
 
+# A water temperature outside this range (°F) is a sensor or API fault, not a
+# reading: liquid water in the lake cannot be below freezing, and nothing near
+# 100°F. Recording one would act on the website's rules - a single 0°F glitch
+# forces Winter Rowing; a 150°F one could make a cold morning count as warm.
+MIN_PLAUSIBLE_F="${MIN_PLAUSIBLE_F:-28}"
+MAX_PLAUSIBLE_F="${MAX_PLAUSIBLE_F:-100}"
+
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
+
+# bc prints values between -1 and 1 without a leading zero (".55", "-.27"),
+# which is not valid JSON. jq happens to accept it today; nothing else that
+# reads these files is obliged to. Every bc result goes through this.
+lead0() { sed -E 's/^(-?)\./\10./'; }
 
 call_api() {
   if [ -n "$GOVEE_FAKE_RESPONSE" ]; then
@@ -70,7 +82,12 @@ take_reading() {
     return 1
   fi
 
-  TEMP_C=$(echo "scale=2; ($TEMP_F - 32) * 5 / 9" | bc)
+  if ! awk -v f="$TEMP_F" -v lo="$MIN_PLAUSIBLE_F" -v hi="$MAX_PLAUSIBLE_F" 'BEGIN { exit !(f >= lo && f <= hi) }'; then
+    log "Implausible water temperature ${TEMP_F}F (outside ${MIN_PLAUSIBLE_F}-${MAX_PLAUSIBLE_F}F) - leaving data.json untouched"
+    return 1
+  fi
+
+  TEMP_C=$(echo "scale=2; ($TEMP_F - 32) * 5 / 9" | bc | lead0)
   TEM=$(echo "scale=0; ($TEMP_C * 100)/1" | bc)
   [ -z "$ONLINE" ] && ONLINE=true
 
@@ -93,7 +110,7 @@ take_reading() {
       fetchedAt: $ts
     }' > data.json || { log "failed writing data.json"; return 1; }
 
-  TEMP_F_CLEAN=$(echo "scale=2; $TEMP_F / 1" | bc)
+  TEMP_F_CLEAN=$(echo "scale=2; $TEMP_F / 1" | bc | lead0)
   NEW_ENTRY="{\"ts\":\"$FETCHED_AT\",\"tempC\":$TEMP_C,\"tempF\":$TEMP_F_CLEAN}"
   log "New entry: $NEW_ENTRY"
 
