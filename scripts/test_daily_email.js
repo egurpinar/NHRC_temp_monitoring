@@ -3106,9 +3106,25 @@ test('camera: an unknown or missing role is never presented as the dock camera',
 test('camera: the title states the around-the-clock cadence, and no daylight window', () => {
   const { site, els } = loadSite(Date.now());
   site.loadCameraSnapshot();
-  assert.strictEqual(els['camera-title'].textContent, 'Boathouse Camera — Still Image, Updates every 5 min');
+  assert.strictEqual(els['camera-title'].textContent, 'Boathouse Camera — Still Image, Updates every 15 min');
   const html = fsT.readFileSync(INDEX_PATH, 'utf8');
   assert.ok(!/paused overnight|first photo of the day|returns at 5:00/.test(html), 'no leftovers from the daylight-only camera');
+});
+
+test('camera: what the page says about the Pi matches the Pi\'s own defaults', () => {
+  // The page describes the Pi's timetable in constants it cannot read from the
+  // Pi. In October 2026 the two drifted: the page said "every 5 min" while the
+  // Pi ran every 15. Tie them to the service's defaults.
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8');
+  const svc = fsT.readFileSync(path.join(__dirname, '..', 'camera', 'snapshot_service.js'), 'utf8');
+  const piMinutes = Number(/CAMERA_INTERVAL_MINUTES \|\| (\d+)\)/.exec(svc)[1]);
+  const label = /const CAMERA_CADENCE_LABEL = 'every (\d+) min';/.exec(html);
+  assert.ok(label, 'CAMERA_CADENCE_LABEL not found');
+  assert.strictEqual(Number(label[1]), piMinutes, `page says every ${label[1]} min, the Pi's default is ${piMinutes}`);
+  const piStart = Number(/BACKUP_ACTIVE_START_HOUR, (\d+)\)/.exec(svc)[1]);
+  const piEnd = Number(/BACKUP_ACTIVE_END_HOUR, (\d+)\)/.exec(svc)[1]);
+  assert.strictEqual(Number(/const CAMERA_BACKUP_START_HOUR = (\d+);/.exec(html)[1]), piStart);
+  assert.strictEqual(Number(/const CAMERA_BACKUP_END_HOUR = (\d+);/.exec(html)[1]), piEnd);
 });
 
 // A camera Worker whose photo changes when the test says so; HEAD and GET
@@ -3135,19 +3151,19 @@ test('camera: every minute the page asks for a newer photo, and downloads only a
   await site.loadCameraSnapshot();
   assert.deepStrictEqual([w.gets, w.heads], [1, 0]);
   assert.ok(/taken 9:00(\u202f| )AM EDT \(1 min ago\)/.test(els['camera-note'].textContent), els['camera-note'].textContent);
-  // Thirty minutes, a check each minute, a new photo every five.
-  for (let minute = 1; minute <= 30; minute++) {
+  // Forty-five minutes, a check each minute, a new photo every fifteen.
+  for (let minute = 1; minute <= 45; minute++) {
     t += 60000;
-    if (minute % 5 === 0) w.photoAt = t - 20000;   // the Pi uploads a little after each slot
+    if (minute % 15 === 0) w.photoAt = t - 20000;   // the Pi uploads a little after each slot
     await site.checkCameraForNewPhoto();
   }
-  assert.strictEqual(w.heads, 30, 'one small check a minute');
-  assert.strictEqual(w.gets, 1 + 6, 'the photo itself only when it changed');
+  assert.strictEqual(w.heads, 45, 'one small check a minute');
+  assert.strictEqual(w.gets, 1 + 3, 'the photo itself only when it changed');
   assert.ok(/\(0 min ago\)|just now/.test(els['camera-note'].textContent), els['camera-note'].textContent);
   // A minute later, with no new photo, only the caption's age moves on.
   t += 60000;
   await site.checkCameraForNewPhoto();
-  assert.strictEqual(w.gets, 7);
+  assert.strictEqual(w.gets, 4);
   assert.ok(/\(1 min ago\)/.test(els['camera-note'].textContent), els['camera-note'].textContent);
 });
 

@@ -523,25 +523,27 @@ const CAMERA_SNAPSHOT_URL = 'https://nhrc-camera.gurpinar-emre.workers.dev/lates
 
 // How the page keeps the photo current. Every CAMERA_CHECK_SECONDS it asks the
 // Worker whether a newer photo exists - a HEAD request, a few hundred bytes -
-// and downloads the photo only when it has changed. Downloading it every
-// minute instead would cost each open phone several MB an hour; every 5
-// minutes, as before, would often show a photo ten minutes old now that one
-// is taken every five. If the check cannot be made (an older Worker, a
+// and downloads the photo only when it has changed, so a new photo shows
+// within about a minute of the Pi taking it. Re-downloading on a timer instead
+// would cost each open phone several MB an hour (every minute) or show each
+// new photo late (every 15). If the check cannot be made (an older Worker, a
 // blocked request), the photo is re-downloaded every CAMERA_REFRESH_MINUTES.
 const CAMERA_CHECK_SECONDS = 60;
 const CAMERA_REFRESH_MINUTES = 5;
 
 // TWO CAMERAS, ONE PHOTO. The Pi (camera/snapshot_service.js) captures the
-// hardwired dock camera ("Dock Wired") every 5 minutes around the clock. The
-// battery-powered "Downstream Lot" camera is a backup only: used once the dock
-// camera has been failing for about half an hour (six missed captures), and
-// then only 5am-4pm, every 30-60 minutes, to spare its battery. Each photo says
-// which camera took it.
+// hardwired dock camera ("Dock Wired") every 15 minutes, on the quarter hour,
+// around the clock. (Not more often: Ring only provides a new photo of this
+// camera every 15 minutes, so asking every 5 got nothing new in between -
+// tried in October 2026.) The battery-powered "Downstream Lot" camera is a
+// backup only: used once the dock camera has missed two captures in a row
+// (about half an hour), and then only 5am-4pm, every 30-60 minutes, to spare
+// its battery. Each photo says which camera took it.
 //
 // These describe the Pi's settings so the page can explain itself; they do not
 // control the cameras. If the Pi's settings change (CAMERA_INTERVAL_MINUTES,
 // BACKUP_ACTIVE_START_HOUR / _END_HOUR in /opt/nhrc-camera/env), change these.
-const CAMERA_CADENCE_LABEL = 'every 5 min';
+const CAMERA_CADENCE_LABEL = 'every 15 min';
 const CAMERA_BACKUP_START_HOUR = 5;
 const CAMERA_BACKUP_END_HOUR = 16;
 const CAMERA_BACKUP_WINDOW_LABEL = '5am–4pm';
