@@ -1774,6 +1774,8 @@ if (HAVE_FFMPEG) {
           this.onRefreshTokenUpdated = { subscribe() {} }; }
         async getCameras() {
           note({ ev: 'getCameras' });
+          // Stands in for a Pi Zero's slow sign-in to Ring.
+          if (process.env.FAKE_SLOW_CAMERAS_MS) await new Promise(r => setTimeout(r, Number(process.env.FAKE_SLOW_CAMERAS_MS)));
           return ['Dock Wired', 'Downstream Lot'].map(name => ({ name,
             async getSnapshot() { note({ ev: 'snapshot', camera: name }); return JPEG; },
             async startLiveCall() { note({ ev: 'live', camera: name });
@@ -1843,6 +1845,30 @@ if (HAVE_FFMPEG) {
     assert.strictEqual(fs.readdirSync(path.join(box.tlOut, 'tests')).filter(f => f.endsWith('.jpg')).length, 1);
     assert.strictEqual(r.signal, 'SIGKILL', 'still running after the test capture (stopped by the test)');
   }, 60000);
+
+  test('end to end: a test signal while the service is still starting does not stop it', async () => {
+    const box = timelapseSandbox();
+    let sent = false;
+    const r = await box.run([], { TIMELAPSE_TIMES: '3:00', TIMELAPSE_RECORD_SECONDS: '4', FAKE_SLOW_CAMERAS_MS: '1500' }, {
+      // Sent while it is still signing in to Ring, as on the Pi 12 s after a restart.
+      onStart: (child) => { const iv = setInterval(() => {
+        if (box.events().some(e => e.ev === 'construct')) { clearInterval(iv); sent = true; child.kill('SIGUSR2'); } }, 20); },
+      until: (o) => /Snapshot uploaded/.test(o) });
+    assert.ok(sent, 'the signal was sent');
+    assert.ok(/Timelapse test requested while the service is still starting; send it again once the journal says "Test it now"\./.test(r.out), r.out);
+    assert.ok(/Test it now with: sudo kill -USR2 \d+/.test(r.out) && /Snapshot uploaded/.test(r.out), 'it started up as usual');
+    assert.strictEqual(r.signal, 'SIGKILL', 'still running until the test stopped it - not ended by the signal');
+    assert.ok(!box.events().some(e => e.ev === 'live'), 'a signal that came too early takes no picture');
+  }, 60000);
+
+  test('end to end: with the timelapse off, a test signal says so and stops nothing', async () => {
+    const box = timelapseSandbox();
+    const r = await box.run([], {}, {
+      onStart: (child, out) => { const iv = setInterval(() => { if (/Snapshot uploaded/.test(out())) { clearInterval(iv); child.kill('SIGUSR2'); } }, 50); },
+      until: (o) => /Timelapse test requested/.test(o), maxMs: 15000 });
+    assert.ok(/Timelapse test requested, but the timelapse is off \(TIMELAPSE_TIMES is not set\)\./.test(r.out), r.out);
+    assert.strictEqual(r.signal, 'SIGKILL', 'still running until the test stopped it');
+  });
 
   test('end to end: a capture that kills the service is not tried again when systemd restarts it', async () => {
     const box = timelapseSandbox();

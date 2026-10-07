@@ -1293,6 +1293,25 @@ function describeTimelapse(cfg = CONFIG) {
 async function main() {
   const args = process.argv.slice(2);
 
+  // The timelapse test (SIGUSR2) is listened for from the very first moment,
+  // because a signal nobody listens for ends the program. On the Pi in
+  // October 2026 one sent 12 s after a restart - while the Pi Zero was still
+  // signing in to Ring, before the timelapse existed - stopped the service.
+  let timelapse = null;
+  process.on('SIGUSR2', () => {
+    if (timelapse) {
+      // A test capture inside the running service - so under the same systemd
+      // limits as the scheduled ones. Saved under tests/.
+      log('Timelapse test requested.');
+      timelapse.captureNow().catch((e) => logError('Timelapse test failed:', e.message));
+    } else if (!timelapseOn(CONFIG)) {
+      log('Timelapse test requested, but the timelapse is off (TIMELAPSE_TIMES is not set).');
+    } else {
+      log('Timelapse test requested while the service is still starting; '
+        + 'send it again once the journal says "Test it now".');
+    }
+  });
+
   const problems = validateConfig();
   if (problems.length) {
     logError('Configuration problems:');
@@ -1343,7 +1362,6 @@ async function main() {
 
   // The timelapse, if configured. A problem with it is logged and never stops
   // the dock photos.
-  let timelapse = null;
   if (timelapseOn(CONFIG)) {
     let camera = null;
     try {
@@ -1360,12 +1378,6 @@ async function main() {
     }
     timelapse = createTimelapse(CONFIG, { camera: () => camera, now: () => new Date() });
     log(`Timelapse: ${describeTimelapse(CONFIG)}. Test it now with: sudo kill -USR2 ${process.pid}`);
-    // A test capture on request, inside the running service - so under the
-    // same systemd limits as the scheduled ones. Saved under tests/.
-    process.on('SIGUSR2', () => {
-      log('Timelapse test requested.');
-      timelapse.captureNow().catch((e) => logError('Timelapse test failed:', e.message));
-    });
   }
 
   // setTimeout that reschedules itself, not setInterval: the next wake-up is

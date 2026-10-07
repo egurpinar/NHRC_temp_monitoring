@@ -513,11 +513,17 @@ cat /proc/$(systemctl show -p MainPID --value nhrc-camera)/oom_score_adj
 ### Test it
 
 A test capture runs inside the service, under the same limits as the real
-ones, and is saved in `timelapse/tests/` so it never joins the timelapse:
+ones, and is saved in `timelapse/tests/` so it never joins the timelapse. Wait
+until the journal shows `Test it now with: sudo kill -USR2 ...` - on a Pi Zero
+about half a minute after a restart - then:
 
 ```bash
 sudo kill -USR2 $(systemctl show -p MainPID --value nhrc-camera)
 ```
+
+(Sent sooner, it is only noted: `Timelapse test requested while the service is
+still starting`. The first timelapse version, of October 7, 2026, stopped
+instead, until systemd restarted it a minute later.)
 
 A minute later:
 
@@ -733,7 +739,7 @@ club's Pi only for making the construction timelapse, deleted once it is made.*
 node camera/test_snapshot_service.js
 ```
 
-133 tests covering config validation, the timezone-aware windows, the capture
+135 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including
 both daylight-saving days and day-long outages), camera selection, atomic token
 persistence and file permissions, upload auth and retry behaviour, the Worker
