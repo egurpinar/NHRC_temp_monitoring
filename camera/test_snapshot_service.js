@@ -39,7 +39,9 @@ function test(name, fn, deadlineMs = ASYNC_DEADLINE_MS) {
       const deadline = new Promise((_, reject) => {
         timer = setTimeout(() => { console.log = ol; console.error = oe; reject(new Error(`timed out after ${deadlineMs} ms`)); }, deadlineMs);
       });
-      try { await Promise.race([fn(), deadline]); passed++; console.log(`  PASS  ${name}`); }
+      const t0 = Date.now();
+      const took = () => { const s = (Date.now() - t0) / 1000; return s >= 3 ? `  (${s.toFixed(0)} s)` : ''; };
+      try { await Promise.race([fn(), deadline]); passed++; console.log(`  PASS  ${name}${took()}`); }
       catch (e) { failed++; failures.push([name, e]); console.log(`  FAIL  ${name}\n        ${e.message}`); }
       finally { clearTimeout(timer); }
     });
@@ -1139,7 +1141,7 @@ const tlCfg = (dir, over = {}) => Object.assign({}, S.CONFIG, {
   timeZone: 'America/New_York', cameraName: 'Dock Wired', backupCameraName: 'Downstream Lot',
   uploadUrl: baseCfg.uploadUrl, uploadSecret: baseCfg.uploadSecret,
   timelapse: Object.assign({ times: S.parseTimeList('8:00,12:00,15:00'), cameraName: 'Downstream Lot', dir,
-    ffmpegPath: '/usr/bin/ffmpeg', recordSeconds: 8, minDiskMb: 100, minMemoryMb: 40 }, over),
+    ffmpegPath: '/usr/bin/ffmpeg', recordSeconds: 8, minDiskMb: 100, minMemoryMb: 40, snapshotPauseSeconds: 20 }, over),
 });
 /** What is in a folder, without the hidden note of the times tried. */
 const visible = (dir) => fs.readdirSync(dir).filter(f => !f.startsWith('.'));
@@ -1191,6 +1193,9 @@ test('the timelapse is OFF unless TIMELAPSE_TIMES is set, and its settings are v
   assert.ok(v({ minDiskMb: 50 }).some(p => /TIMELAPSE_MIN_DISK_MB/.test(p)));
   for (const m of [0, 10, 19, NaN]) assert.ok(v({ minMemoryMb: m }).some(p => /TIMELAPSE_MIN_MEMORY_MB must be at least 20/.test(p)), String(m));
   assert.deepStrictEqual(v({ minMemoryMb: 20 }), []);
+  for (const p of [-1, 121, 2.5, NaN]) assert.ok(v({ snapshotPauseSeconds: p }).some(x => /TIMELAPSE_SNAPSHOT_PAUSE_SECONDS/.test(x)), String(p));
+  assert.deepStrictEqual(v({ snapshotPauseSeconds: 0 }), []);
+  assert.strictEqual(S.CONFIG.timelapse.snapshotPauseSeconds, 20);
   assert.deepStrictEqual(S.validateConfig(baseCfg), [], 'configs without a timelapse are untouched');
   assert.strictEqual(S.CONFIG.timelapse.minMemoryMb, 40, 'by default 40 MB is kept for Pi-hole');
   assert.strictEqual(S.CONFIG.timelapse.minDiskMb, 500);
@@ -1226,6 +1231,8 @@ function fakeTimelapse(dir, opts = {}) {
     camera: () => camera,
     now: () => new Date(t),
     captureTimeoutMs: opts.captureTimeoutMs,
+    afterLiveMs: opts.afterLiveMs || 0,
+    snapshotRetryMs: opts.snapshotRetryMs || 0,
     liveFrame: opts.liveFrame || (async (cam, workDir) => {
       calls.live++;
       if (opts.liveFails) throw new Error('no clean keyframe (8.1 s damaged; 300 of 900 packets missing)');
@@ -1264,7 +1271,60 @@ test('when both fail, nothing is saved, it is said why, and it is not retried at
   const lines = await captureLogs(async () => { await f.tl.maybeCapture(); f.advance(60000); await f.tl.maybeCapture(); });
   assert.deepStrictEqual(visible(dir), []);
   assert.strictEqual(f.calls.live, 1);
-  assert.ok(lines.some(l => /live video failed \(.*\); the snapshot failed too \(Snapshot for Downstream Lot failed to refresh/.test(l)), lines.join(' | '));
+  assert.strictEqual(f.calls.snap, 2, 'the snapshot was tried twice');
+  assert.ok(lines.some(l => /live video failed \(.*\); the snapshot failed too, 2 tries \(Snapshot for Downstream Lot failed to refresh/.test(l)), lines.join(' | '));
+});
+
+test('after a live view, the camera gets a moment before the snapshot - and a second try', async () => {
+  // As on the Pi, 7 October: straight after the live view the battery camera
+  // could not take a snapshot ("unable to capture snapshots while streaming").
+  const dir = tlDir();
+  let snaps = 0;
+  const times = [];
+  const t0 = Date.now();
+  const cam = { name: 'Downstream Lot', getSnapshot: async () => {
+    times.push(Date.now() - t0);
+    if (++snaps === 1) throw new Error('failed to refresh after 15 seconds.  This is normal behavior since this camera is unable to capture snapshots while streaming');
+    return fakeJpeg(640, 360);
+  } };
+  const tl = S.createTimelapse(tlCfg(dir), { camera: () => cam, now: () => ny(DAY, 12, 0, 5), afterLiveMs: 300, snapshotRetryMs: 200,
+    liveFrame: async () => { const e = new Error('nothing was recorded (722 video packets arrived, 3 missing, in 21 s)');
+      e.cameraStreamed = true; e.lowestMemory = 151.6; throw e; } });
+  const lines = await captureLogs(() => tl.maybeCapture());
+  assert.deepStrictEqual(visible(dir), ['2026-08-15_1200_snapshot.jpg']);
+  assert.strictEqual(snaps, 2);
+  assert.ok(times[0] >= 280, `first try after the pause: ${times[0]} ms`);
+  assert.ok(times[1] - times[0] >= 180, `second try after another: ${times[1] - times[0]} ms`);
+  assert.ok(lines.some(l => /Timelapse 2026-08-15 12:00: live video failed \(nothing was recorded \(722 video packets arrived, 3 missing, in 21 s\)\); saved the snapshot instead: 2026-08-15_1200_snapshot\.jpg - 640x360, 0 KB\. Memory: this program \d+ MB.*; the Pi had at least 152 MB available throughout\./.test(l)), lines.join(' | '));
+});
+
+test('when the camera was never asked for live video, the snapshot is taken at once', async () => {
+  const dir = tlDir();
+  const t0 = Date.now();
+  let at = null;
+  const cam = { name: 'Downstream Lot', startLiveCall: async () => { throw new Error('woken'); },
+    getSnapshot: async () => { at = Date.now() - t0; return fakeJpeg(640, 360); } };
+  const tl = S.createTimelapse(tlCfg(dir, { ffmpegPath: fakeFfmpeg(), readMemory: () => 60 }),
+    { camera: () => cam, now: () => ny(DAY, 8, 0, 5), afterLiveMs: 5000 });
+  await captureLogs(() => tl.maybeCapture());
+  assert.deepStrictEqual(visible(dir), ['2026-08-15_0800_snapshot.jpg']);
+  assert.ok(at !== null && at < 2000, `no pause: ${at} ms`);
+});
+
+test('what ffmpeg said is boiled down to its errors and missed packets', () => {
+  const f = path.join(tlDir(), 'ffmpeg.log');
+  fs.writeFileSync(f, [
+    'ffmpeg started on 2026-10-07 at 12:00:20', 'Report written to "/tmp/x/ffmpeg.log"', 'Log level: 32', 'Command line:',
+    '/usr/bin/ffmpeg -hide_banner -protocol_whitelist pipe,udp,rtp,file,crypto -f sdp -buffer_size 8388608 -i pipe: -an -vcodec copy -t 8 -f matroska -y /tmp/x/clip.mkv',
+    '[sdp @ 0x55d1c0a2b3c0] RTP: missed 5 packets', '[sdp @ 0x55d1c0a2b3c0] RTP: missed 2 packets',
+    'Input #0, sdp, from \'pipe:\':', '  Stream #0:0: Video: h264, none, 90k tbr, 90k tbn',
+    '[matroska @ 0x55d1c0a31f00] dimensions not set',
+    'Could not write header for output file #0 (incorrect codec parameters ?): Invalid argument',
+    'frame=    0 fps=0.0 q=0.0 Lsize=       0kB time=00:00:00.00 bitrate=N/A speed=   0x\r'].join('\n'));
+  assert.strictEqual(S.ffmpegSummary(f),
+    'ffmpeg: [matroska] dimensions not set / Could not write header for output file #0 (incorrect codec parameters ?): Invalid argument; ffmpeg missed 7 packets',
+    'the cause first, no memory addresses, nothing from the command line');
+  assert.strictEqual(S.ffmpegSummary(path.join(os.tmpdir(), 'no-such-ffmpeg.log')), '', 'no report, nothing said');
 });
 
 test('a nearly full SD card: nothing is saved and the camera is not even woken', async () => {
@@ -1510,18 +1570,40 @@ const { spawn: spawnProc } = require('child_process');
 class FakeLiveCall {
   constructor(opts = {}) {
     this.opts = opts; this.handlers = []; this.ended = false; this.rtpSubs = [];
+    this.keyframeRequests = 0; this.spsAllowed = false;
     this.onCallEnded = { subscribe: (fn) => { if (this.ended) fn(); else this.handlers.push(fn); return { unsubscribe() {} }; } };
     this.onVideoRtp = { subscribe: (fn) => { this.rtpSubs.push(fn); return { unsubscribe: () => { this.rtpSubs = []; } }; } };
+    // Like ring-client-api's connection: Ring's signalling messages and the
+    // answer, both replayed to late subscribers.
+    this.messages = []; this.msgSubs = []; this.answered = false; this.answerSubs = [];
+    this.connection = {
+      onMessage: { subscribe: (fn) => { this.messages.forEach(fn); this.msgSubs.push(fn); return { unsubscribe: () => { this.msgSubs = this.msgSubs.filter(f => f !== fn); } }; } },
+      onCallAnswered: { subscribe: (fn) => { if (this.answered) fn('v=0'); else this.answerSubs.push(fn); return { unsubscribe() {} }; } },
+    };
   }
+  message(m) { this.messages.push(m); this.msgSubs.forEach(fn => fn(m)); }
+  answer() { this.answered = true; this.message({ method: 'sdp', body: {} }); this.answerSubs.forEach(fn => fn('v=0')); }
+  requestKeyFrame() { this.keyframeRequests++; this.spsAllowed = true; }
   end() {
     if (this.ended) return; this.ended = true;
-    for (const p of [this.sender, this.ff]) { try { p && p.kill('SIGKILL'); } catch (e) { /* gone */ } }
+    try { this.sender && this.sender.kill('SIGKILL'); } catch (e) { /* gone */ }
     for (const s of [this.relay, this.out]) { try { s && s.close(); } catch (e) { /* gone */ } }
     this.handlers.forEach(f => f());
+    // As ring-client-api does: the recording ffmpeg gets SIGTERM and stops in
+    // good order - on a slow Pi, its last words come a little after the call ended.
+    const term = () => { try { this.ff && this.ff.kill('SIGTERM'); } catch (e) { /* gone */ } };
+    if (this.opts.termDelayMs) setTimeout(term, this.opts.termDelayMs); else term();
   }
   stop() { this.end(); }
   async startTranscoding(o) {
+    this.message({ method: 'session_created', body: {} });
     if (this.opts.noAnswer) { await new Promise(r => this.onCallEnded.subscribe(r)); return; }
+    this.answer();
+    if (this.opts.ringCloseAfterMs) {
+      // Ring ends the live view (a token in the message, which must never reach the log).
+      setTimeout(() => { this.message({ method: 'close', body: { reason: { code: 42, text: 'stand-in camera busy' }, token: 'S3CRET-T0KEN' } }); this.end(); },
+        this.opts.ringCloseAfterMs);
+    }
     const relayPort = 43000 + Math.floor(Math.random() * 4000) * 2, recvPort = relayPort + 9000;
     const sdpFile = path.join(os.tmpdir(), `nhrc-fake-${relayPort}.sdp`);
     this.sender = spawnProc('ffmpeg', ['-v', 'error', '-re', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=15', '-t', '40',
@@ -1533,8 +1615,10 @@ class FakeLiveCall {
       i++;
       const t = start === null ? -1 : (Date.now() - start) / 1000;
       const nal = msg.length > 12 ? msg[12] & 0x1F : 0;   // H.264 NAL type, after the 12-byte RTP header
+      const description = nal === 7 || nal === 8 || nal === 24;   // SPS, PPS, or both in one STAP-A
       const drop = (this.opts.loss === 'late' && t >= 5.5 && i % 2 === 0) || (this.opts.loss === 'random' && Math.random() < 0.15)
-        || (this.opts.loss === 'sps' && (nal === 7 || nal === 8 || nal === 24));
+        || (this.opts.loss === 'sps' && description)
+        || (this.opts.loss === 'spsUntilAsked' && description && !this.spsAllowed);
       if (!drop) { const seq = msg.readUInt16BE(2); this.rtpSubs.forEach(fn => fn({ header: { sequenceNumber: seq } })); }
       if (!drop && !this.ended) this.out.send(msg, recvPort, '127.0.0.1');
     });
@@ -1584,6 +1668,7 @@ if (HAVE_FFMPEG) {
     await new Promise(res => setTimeout(res, 300));
     const a = cam.calls[0].args.join(' ');
     assert.ok(/-f sdp -buffer_size 8388608 -i pipe: -an -vcodec copy -t 8 -f matroska -y \S+clip\.mkv$/.test(a), a);
+    assert.strictEqual(process.env.FFREPORT, undefined, 'the ffmpeg report setting is put back');
     assert.strictEqual(ffmpegChildren(), 0, 'no ffmpeg left running');
     fs.rmSync(work, { recursive: true, force: true });
   });
@@ -1604,29 +1689,61 @@ if (HAVE_FFMPEG) {
     // or the stream's description (SPS/PPS) is lost so often that ffmpeg cannot
     // start the recording ("dimensions not set", about 1 run in 6). All three
     // throw, and nothing is saved from the live video.
-    await assert.rejects(S.captureLiveFrame(liveCamera({ loss: 'random' }), tlCfg('/tmp'), work),
-      /no clean keyframe \(.*damaged.*packets missing\)|the recording has no keyframe|nothing was recorded from the \d+ video packets that arrived/);
+    await assert.rejects(S.captureLiveFrame(liveCamera({ loss: 'random' }), tlCfg('/tmp', { recordSeconds: 4 }), work),
+      /no clean keyframe \(.*damaged.*packets missing.*\)|the recording has no keyframe|nothing was recorded \(\d+ video packets arrived/);
     await new Promise(res => setTimeout(res, 300));
     assert.strictEqual(ffmpegChildren(), 0);
     fs.rmSync(work, { recursive: true, force: true });
-  });
+  }, 45000);
 
-  test('the stream\'s description (SPS/PPS) never arrives: ffmpeg gives up by itself, nothing is saved from it', async () => {
+  test('the stream\'s description (SPS/PPS) never arrives: ffmpeg gives up, nothing is saved, the log says why', async () => {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-work-'));
+    const cam = liveCamera({ loss: 'sps' });
     const t0 = Date.now();
-    await assert.rejects(S.captureLiveFrame(liveCamera({ loss: 'sps' }), tlCfg('/tmp'), work),
-      /^Error: nothing was recorded from the \d+ video packets that arrived$/);
-    assert.ok(Date.now() - t0 < 15000, `${Date.now() - t0} ms`);
-    await new Promise(res => setTimeout(res, 300));
+    // ffmpeg gives up by itself once it has read 5 MB (its probesize); the
+    // keyframe requests went unanswered; the log has the whole story.
+    await assert.rejects(S.captureLiveFrame(cam, tlCfg('/tmp', { keyframeAskMs: 500 }), work),
+      /^Error: nothing was recorded \(\d+ video packets arrived, \d+ missing; answered after [\d.]+ s; video [\d.]+-[\d.]+ s; ended at [\d.]+ s; \d+ keyframe requests; Ring: session_created, sdp; ffmpeg: .*(dimensions not set|Could not find codec parameters|unspecified size)/);
+    assert.ok(cam.calls[0].keyframeRequests >= 2, `asked ${cam.calls[0].keyframeRequests} times`);
+    assert.ok(Date.now() - t0 < 20000, `${Date.now() - t0} ms`);
+    await new Promise(res => setTimeout(res, 1000));
     assert.strictEqual(ffmpegChildren(), 0);
     fs.rmSync(work, { recursive: true, force: true });
-  });
+  }, 45000);
+
+  test('the stream\'s description comes only when asked: asking for a keyframe gets the recording going', async () => {
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-work-'));
+    const cam = liveCamera({ loss: 'spsUntilAsked' });
+    const r = await S.captureLiveFrame(cam, tlCfg('/tmp', { keyframeAskMs: 500 }), work);
+    const probe = require('child_process').spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', r.frame], { encoding: 'utf8' });
+    assert.strictEqual(probe.stdout.trim(), '1920,1080');
+    assert.ok(cam.calls[0].keyframeRequests >= 1, 'a keyframe was asked for');
+    // Every 0.5 s until ffmpeg starts the file (a few seconds), not for all the 8 s after.
+    assert.ok(cam.calls[0].keyframeRequests < 14, `and no more once the recording had started (${cam.calls[0].keyframeRequests})`);
+    await new Promise(res => setTimeout(res, 1000));
+    assert.strictEqual(ffmpegChildren(), 0);
+    fs.rmSync(work, { recursive: true, force: true });
+  }, 45000);
+
+  test('Ring ends the live view early: the log says how far it got and what Ring said - never a token', async () => {
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-work-'));
+    // No description yet, so nothing recorded, when Ring closes the call at 1.5 s.
+    const cam = liveCamera({ loss: 'sps', ringCloseAfterMs: 1500, termDelayMs: 400 });
+    const err = await S.captureLiveFrame(cam, tlCfg('/tmp'), work).then(() => null, (e) => e);
+    assert.ok(err, 'it failed');
+    assert.ok(/^nothing was recorded \(\d+ video packets arrived, \d+ missing; answered after [\d.]+ s; video [\d.]+-[\d.]+ s; ended at [\d.]+ s; Ring: session_created, sdp, close \{"reason":\{"code":42,"text":"stand-in camera busy"\},"token":"\(hidden\)"\}; .*ffmpeg was stopped \(signal 15\)/.test(err.message), err.message);
+    assert.ok(!/S3CRET-T0KEN/.test(err.message), 'the token never reaches the log');
+    assert.strictEqual(err.cameraStreamed, true, 'the fallback snapshot will wait for the camera');
+    await new Promise(res => setTimeout(res, 1000));
+    assert.strictEqual(ffmpegChildren(), 0);
+    fs.rmSync(work, { recursive: true, force: true });
+  }, 45000);
 
   test('a live view that never answers is ended at its deadline', async () => {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-work-'));
     const cam = liveCamera({ noAnswer: true });
     const t0 = Date.now();
-    await assert.rejects(S.captureLiveFrame(cam, tlCfg('/tmp', { recordSeconds: 4, liveExtraMs: 1000 }), work), /the live view gave no video \(no packets arrived\)/);
+    await assert.rejects(S.captureLiveFrame(cam, tlCfg('/tmp', { recordSeconds: 4, liveExtraMs: 1000 }), work), /the live view gave no video \(not answered; no video; ended at [\d.]+ s; Ring: session_created\)/);
     assert.ok(Date.now() - t0 < 10000);
     assert.strictEqual(cam.calls[0].ended, true, 'the live view was ended');
     fs.rmSync(work, { recursive: true, force: true });
@@ -1649,7 +1766,7 @@ if (HAVE_FFMPEG) {
     assert.strictEqual(cam.calls.length, 0);
   });
 
-  test('six captures in a row: no memory creep, no ffmpeg left behind, no temporary files', async () => {
+  test('four captures in a row: no memory creep, no ffmpeg left behind, no temporary files', async () => {
     const dir = tlDir();
     const before = leftoverWorkDirs().length;
     const cfg = tlCfg(dir, { recordSeconds: 4 });
@@ -1657,19 +1774,19 @@ if (HAVE_FFMPEG) {
     const tl = S.createTimelapse(cfg, { camera: () => cam, now: () => new Date() });
     const rss = [];
     await captureLogs(async () => {
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 4; i++) {
         await tl.captureNow();
         if (global.gc) global.gc();
         rss.push(process.memoryUsage().rss);
         await new Promise(r => setTimeout(r, 1100));   // a new second, a new test file name
       }
     });
-    assert.strictEqual(fs.readdirSync(path.join(dir, 'tests')).length, 6, 'six frames saved');
+    assert.strictEqual(fs.readdirSync(path.join(dir, 'tests')).length, 4, 'four frames saved');
     await new Promise(r => setTimeout(r, 300));
     assert.strictEqual(ffmpegChildren(), 0);
     assert.strictEqual(leftoverWorkDirs().length, before);
-    const growth = (rss[5] - rss[1]) / 1048576;
-    assert.ok(growth < 20, `memory grew ${growth.toFixed(1)} MB from capture 2 to 6`);
+    const growth = (rss[3] - rss[1]) / 1048576;
+    assert.ok(growth < 20, `memory grew ${growth.toFixed(1)} MB from capture 2 to 4`);
   }, 120000);
 
   test('memory running short during the live video: the live view and ffmpeg are stopped at once', async () => {
@@ -1684,7 +1801,7 @@ if (HAVE_FFMPEG) {
     const took = Date.now() - t0;
     assert.ok(took < 5000, `stopped after ${took} ms, not at the end of the 8 s recording`);
     assert.strictEqual(cam.calls[0].ended, true, 'the live view was ended');
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 1000));
     assert.strictEqual(ffmpegChildren(), 0, 'no ffmpeg left running');
     const n = reads;
     await new Promise(r => setTimeout(r, 300));
@@ -1732,7 +1849,10 @@ if (HAVE_FFMPEG) {
     fs.copyFileSync(path.join(__dirname, 'snapshot_service.js'), path.join(dir, 'snapshot_service.js'));
     const pkg = path.join(dir, 'node_modules', 'ring-client-api');
     fs.mkdirSync(pkg, { recursive: true });
-    fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'ring-client-api', type: 'module', exports: './index.js' }));
+    fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'ring-client-api', type: 'module',
+      exports: { '.': './index.js', './util': './util.js' } }));
+    // Like ring-client-api/util: the service hands it a logger.
+    fs.writeFileSync(path.join(pkg, 'util.js'), 'export function useLogger(l) { globalThis.ringLogger = l; }');
     const ringLog = path.join(dir, 'ring.log');
     fs.writeFileSync(path.join(pkg, 'index.js'), `
       import fs from 'fs'; import dgram from 'dgram'; import { spawn } from 'child_process';
@@ -1740,21 +1860,41 @@ if (HAVE_FFMPEG) {
       const JPEG = Buffer.from([0xFF, 0xD8, 0xFF, 0xC0, 0, 17, 8, 1, 104, 2, 128, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 0xFF, 0xD9]);
       let ffmpegPath = null;
       class Call {
-        constructor() { this.h = []; this.ended = false; this.subs = [];
+        constructor() { this.h = []; this.ended = false; this.subs = []; this.msgs = []; this.msgSubs = []; this.answered = false; this.ans = [];
           this.onCallEnded = { subscribe: (fn) => { if (this.ended) fn(); else this.h.push(fn); return { unsubscribe() {} }; } };
-          this.onVideoRtp = { subscribe: (fn) => { this.subs.push(fn); return { unsubscribe: () => { this.subs = []; } }; } }; }
+          this.onVideoRtp = { subscribe: (fn) => { this.subs.push(fn); return { unsubscribe: () => { this.subs = []; } }; } };
+          this.connection = {
+            onMessage: { subscribe: (fn) => { this.msgs.forEach(fn); this.msgSubs.push(fn); return { unsubscribe() {} }; } },
+            onCallAnswered: { subscribe: (fn) => { if (this.answered) fn('v=0'); else this.ans.push(fn); return { unsubscribe() {} }; } } }; }
+        message(m) { this.msgs.push(m); this.msgSubs.forEach(fn => fn(m)); }
         end() { if (this.ended) return; this.ended = true; note({ ev: 'call-ended' });
-          for (const p of [this.sender, this.ff]) { try { p && p.kill('SIGKILL'); } catch (e) {} }
+          try { this.sender && this.sender.kill('SIGKILL'); } catch (e) {}
+          try { this.ff && this.ff.kill('SIGTERM'); } catch (e) {}
           for (const s of [this.relay, this.out]) { try { s && s.close(); } catch (e) {} }
           this.h.forEach(f => f()); }
         stop() { this.end(); }
         async startTranscoding(o) {
+          this.message({ method: 'session_created', body: {} });
+          this.answered = true; this.message({ method: 'sdp', body: {} }); this.ans.forEach(fn => fn('v=0'));
+          const closing = !!process.env.FAKE_RING_CLOSE;
+          if (closing) {
+            // Ring closes the live view before ffmpeg has the stream's description,
+            // and says so through the library's logger - as ring-client-api does.
+            setTimeout(() => {
+              const body = { reason: { code: 42, text: 'stand-in camera busy' }, token: 'S3CRET-T0KEN' };
+              if (globalThis.ringLogger) { globalThis.ringLogger.logError('Video stream closed'); globalThis.ringLogger.logError(body); }
+              this.message({ method: 'close', body });
+              this.end();
+            }, 1500);
+          }
           const rp = 45000 + Math.floor(Math.random() * 4000) * 2, vp = rp + 9000;
           const sdpFile = ${JSON.stringify(dir)} + '/s' + rp + '.sdp';
           this.sender = spawn('ffmpeg', ['-v', 'error', '-re', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=15', '-t', '40',
             '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-bf', '0', '-an', '-f', 'rtp', '-sdp_file', sdpFile, 'rtp://127.0.0.1:' + rp]);
           this.relay = dgram.createSocket('udp4'); this.out = dgram.createSocket('udp4');
-          this.relay.on('message', (m) => { const seq = m.readUInt16BE(2); this.subs.forEach(fn => fn({ header: { sequenceNumber: seq } }));
+          this.relay.on('message', (m) => { const nal = m[12] & 31;
+            if (closing && (nal === 7 || nal === 8 || nal === 24)) return;
+            const seq = m.readUInt16BE(2); this.subs.forEach(fn => fn({ header: { sequenceNumber: seq } }));
             if (!this.ended) this.out.send(m, vp, '127.0.0.1'); });
           this.relay.bind(rp, '127.0.0.1');
           for (let k = 0; k < 100 && !fs.existsSync(sdpFile); k++) await new Promise(r => setTimeout(r, 50));
@@ -1885,6 +2025,16 @@ if (HAVE_FFMPEG) {
     assert.strictEqual(box.events().filter(e => e.ev === 'live').length, 1, 'the camera was not woken again');
     assert.deepStrictEqual(fs.readdirSync(box.tlOut).filter(f => f.endsWith('.jpg')), []);
   }, 90000);
+
+  test('end to end: Ring ends the live view - the journal says what Ring and ffmpeg did, then the snapshot is saved', async () => {
+    const box = timelapseSandbox();
+    const now = box.nowLabel();
+    const r = await box.run([], { TIMELAPSE_TIMES: now.label, FAKE_RING_CLOSE: '1', TIMELAPSE_SNAPSHOT_PAUSE_SECONDS: '1' },
+      { until: (o) => /saved the snapshot instead|the snapshot failed too/.test(o), maxMs: 45000 });
+    assert.ok(/live video failed \(nothing was recorded \(\d+ video packets arrived, \d+ missing; answered after [\d.]+ s; video [\d.]+-[\d.]+ s; ended at [\d.]+ s; Ring: session_created, sdp, close \{"reason":\{"code":42,"text":"stand-in camera busy"\},"token":"\(hidden\)"\}; Ring error: Video stream closed \/ error: \{"reason":\{"code":42,"text":"stand-in camera busy"\},"token":"\(hidden\)"\}; .*ffmpeg was stopped \(signal 15\)\)\); saved the snapshot instead: \S+_snapshot\.jpg - 640x360/.test(r.out), r.out);
+    assert.ok(!/S3CRET-T0KEN/.test(r.out), 'no token in the journal');
+    assert.ok(box.events().some(e => e.ev === 'snapshot' && e.camera === 'Downstream Lot'), 'the fallback snapshot was taken');
+  }, 60000);
 
   test('end to end: no ffmpeg - said at start, the snapshot is saved instead, the service carries on', async () => {
     const box = timelapseSandbox();

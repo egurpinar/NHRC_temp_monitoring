@@ -545,7 +545,8 @@ What else the journal can say:
 | `not started: only N MB of memory available` | The Pi was short of memory; the camera was not even woken for the live video |
 | `stopped: the memory available fell to N MB` | Stopped mid-capture to keep memory for Pi-hole |
 | `no clean keyframe (...)` | Too many packets lost on the way (usually Wi-Fi at either end) |
-| `nothing was recorded from the N video packets that arrived` | The same, losing even the video's description |
+| `nothing was recorded (...)` | Video arrived, but ffmpeg never started the file: the video's description (SPS/PPS) did not arrive whole, or the live view ended first. The brackets say how it went - when Ring answered, when video came and stopped, what Ring and ffmpeg said |
+| `the snapshot failed too, 2 tries (...)` | No frame for that time today. If it says the camera was streaming, raise `TIMELAPSE_SNAPSHOT_PAUSE_SECONDS` |
 | `already tried before the service restarted` | The service restarted inside that time's window; that time is skipped today |
 | `only N MB free on the SD card` | Nothing saved: copy the frames off and delete them |
 
@@ -589,6 +590,7 @@ sudo systemctl restart nhrc-camera
 | `TIMELAPSE_RECORD_SECONDS` | 8 | Seconds of video recorded; 4-20 |
 | `TIMELAPSE_MIN_MEMORY_MB` | 40 | Memory always kept for Pi-hole; at least 20 |
 | `TIMELAPSE_MIN_DISK_MB` | 500 | Disk always kept free; at least 100 |
+| `TIMELAPSE_SNAPSHOT_PAUSE_SECONDS` | 20 | After a failed live video, the wait before the fallback snapshot (tried twice, 30 s apart): a battery camera cannot take one while it is still streaming |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | `ffprobe` must be next to it |
 
 ## Battery
@@ -739,7 +741,7 @@ club's Pi only for making the construction timelapse, deleted once it is made.*
 node camera/test_snapshot_service.js
 ```
 
-135 tests covering config validation, the timezone-aware windows, the capture
+141 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including
 both daylight-saving days and day-long outages), camera selection, atomic token
 persistence and file permissions, upload auth and retry behaviour, the Worker
@@ -751,7 +753,9 @@ stubbed, so no credentials are needed.
 The timelapse tests use real ffmpeg (skipped where it is not installed): a
 1920x1080 H.264 stream sent over RTP through a relay that can lose packets,
 recorded with the arguments ring-client-api builds. They cover damaged
-keyframes, a live view that never answers or starts too late, memory running
-short while recording and while decoding (stand-ins for `/proc/meminfo`), six
-captures in a row with nothing left behind, and the service killed in the
-middle of a capture and restarted.
+keyframes, a stream whose description (SPS/PPS) never arrives or comes only
+when a keyframe is asked for, Ring ending the live view early (and what the
+journal then says), a live view that never answers or starts too late, memory
+running short while recording and while decoding (stand-ins for
+`/proc/meminfo`), four captures in a row with nothing left behind, and the
+service killed in the middle of a capture and restarted.

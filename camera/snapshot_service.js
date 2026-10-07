@@ -129,6 +129,10 @@ const CONFIG = {
     // video starts only with 40 MB more than this available, and is stopped
     // at once if the Pi falls below it.
     minMemoryMb: Number(process.env.TIMELAPSE_MIN_MEMORY_MB || 40),
+    // When the live video fails, the 640x360 snapshot is saved instead -
+    // after this pause: a battery camera cannot take one while it streams,
+    // nor straight after (the snapshot is tried twice, 30 s apart).
+    snapshotPauseSeconds: Number(process.env.TIMELAPSE_SNAPSHOT_PAUSE_SECONDS || 20),
   },
 
   // Ring battery cameras cannot take a snapshot while recording, so a capture
@@ -230,6 +234,9 @@ function validateConfig(cfg = CONFIG) {
     if (!path.isAbsolute(String(tl.ffmpegPath || ''))) problems.push('FFMPEG_PATH must be an absolute path');
     if (!(tl.minDiskMb >= 100)) problems.push('TIMELAPSE_MIN_DISK_MB must be at least 100');
     if (!(tl.minMemoryMb >= 20)) problems.push('TIMELAPSE_MIN_MEMORY_MB must be at least 20 (memory kept for Pi-hole)');
+    if (!(Number.isInteger(tl.snapshotPauseSeconds) && tl.snapshotPauseSeconds >= 0 && tl.snapshotPauseSeconds <= 120)) {
+      problems.push('TIMELAPSE_SNAPSHOT_PAUSE_SECONDS must be a whole number from 0 to 120');
+    }
   }
   return problems;
 }
@@ -653,6 +660,13 @@ async function connectRing(cfg = CONFIG) {
     // the library never starts it.
     ...(timelapseOn(cfg) ? { ffmpegPath: cfg.timelapse.ffmpegPath } : {}),
   });
+  if (timelapseOn(cfg)) {
+    // So a failed live view can say what Ring did (see ringNotes).
+    try {
+      const util = await import('ring-client-api/util');
+      util.useLogger({ logInfo: (...m) => ringNotes.note('info', m), logError: (m) => ringNotes.note('error', [m]) });
+    } catch (e) { /* a version without the hook: failures say less */ }
+  }
 
   // THE CRITICAL SUBSCRIPTION. Ring issues a new refresh token roughly hourly.
   // If these are not persisted, the next cold start fails AND the account's push
@@ -846,6 +860,13 @@ const CAPTURE_TIMEOUT_MS = 6 * 60 * 1000;     // the whole capture, fallback inc
 const SOCKET_BUFFER_BYTES = 8 * 1024 * 1024;  // ffmpeg's receive buffer (the system caps it at net.core.rmem_max)
 const LIVE_MEMORY_NEED_MB = 40;               // headroom, on top of TIMELAPSE_MIN_MEMORY_MB, to start the live video
 const MEMORY_CHECK_MS = 500;                  // how often the memory is checked during a capture
+// The fallback snapshot. A battery camera cannot take one while it streams,
+// nor straight after: on the Pi the first try, made at once, failed with
+// "unable to capture snapshots while streaming" (7 October 2026). So: a pause
+// first (TIMELAPSE_SNAPSHOT_PAUSE_SECONDS), and a second try.
+const SNAPSHOT_TRIES = 2;
+const SNAPSHOT_RETRY_MS = 30 * 1000;
+const KEYFRAME_ASK_MS = 2000;                 // until the recording starts, a keyframe is asked for this often
 
 function timelapseOn(cfg = CONFIG) {
   return !!(cfg.timelapse && cfg.timelapse.times && cfg.timelapse.times.length);
@@ -984,6 +1005,62 @@ async function decodeKeyframe(ffmpeg, clip, t, out, halt = null) {
   return r.code === 0 && !r.stderr.trim() && fs.existsSync(out) && fs.statSync(out).size > 0;
 }
 
+/**
+ * The gist of what the recording ffmpeg said (FFREPORT, written next to the
+ * clip): its first three errors - the cause comes first - and how many packets
+ * it reported missing. '' when it said nothing of note.
+ */
+function ffmpegSummary(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return ''; }
+  let lines = text.split(/[\r\n]+/).map(s => s.replace(/ @ 0x[0-9a-f]+/g, '').trim()).filter(Boolean);
+  const cmd = lines.findIndex(l => l === 'Command line:');
+  if (cmd >= 0) lines = lines.slice(cmd + 2);   // past the header and the command itself
+  let missed = 0;
+  for (const l of lines) for (const m of l.matchAll(/missed (\d+) packets/g)) missed += Number(m[1]);
+  const errors = [...new Set(lines.filter(l => !/missed \d+ packets/.test(l)
+    && /error|could not|not set|invalid|failed|unable|unspecified/i.test(l)))].slice(0, 3).map(l => l.slice(0, 160));
+  const signal = lines.map(l => /received signal (\d+)/.exec(l)).find(Boolean);
+  const parts = [];
+  if (errors.length) parts.push(`ffmpeg: ${errors.join(' / ')}`);
+  if (missed) parts.push(`ffmpeg missed ${missed} packets`);
+  // Stopped from outside: the live view ended before ffmpeg was done.
+  if (signal) parts.push(`ffmpeg was stopped (signal ${signal[1]})`);
+  return parts.join('; ');
+}
+
+/** Hides anything that looks like a token or ticket, before text reaches the journal. */
+function redact(text) {
+  return String(text)
+    .replace(/((?:token|ticket|auth[a-z_]*)=)[^&\s"']+/gi, '$1(hidden)')
+    .replace(/("(?:[a-z_]*token|ticket|authorization)"\s*:\s*")[^"]*"/gi, '$1(hidden)"');
+}
+
+/** An object as one short line of text, for a log. */
+function briefly(x, max = 160) {
+  let s;
+  if (typeof x === 'string') s = x;
+  else if (x instanceof Error) s = x.message;
+  else { try { s = JSON.stringify(x); } catch (e) { s = String(x); } }
+  return redact(String(s).replace(/\s+/g, ' ').trim()).slice(0, max);
+}
+
+/**
+ * ring-client-api logs nothing by default (it writes to the "debug" package).
+ * During a timelapse capture its messages are kept, so a capture that fails
+ * can say what Ring did; outside captures they are dropped, as before.
+ */
+const ringNotes = {
+  on: false,
+  lines: [],
+  start() { this.on = true; this.lines = []; },
+  stop() { this.on = false; const l = this.lines; this.lines = []; return l; },
+  note(kind, args) {
+    if (!this.on || this.lines.length >= 50) return;
+    this.lines.push(`${kind === 'error' ? 'error: ' : ''}${args.map(a => briefly(a)).join(' ')}`);
+  },
+};
+
 /** Counts RTP packets by sequence number (16-bit, wrapping), and how many are missing. */
 class SequenceCounter {
   constructor() { this.seqs = new Set(); this.last = null; this.cycles = 0; }
@@ -1047,15 +1124,54 @@ async function captureLiveFrame(camera, cfg, workDir) {
   try {
     const r = await recordAndPick(camera, tl, workDir, ffprobe, halt);
     return Object.assign(r, { lowestMemory: watch.lowest });
+  } catch (e) {
+    // For the log, and for the fallback: the camera was asked for live video,
+    // so it needs a moment before it can take a snapshot.
+    e.lowestMemory = watch.lowest;
+    e.cameraStreamed = true;
+    throw e;
   } finally {
     watch.stop();
   }
 }
 
 async function recordAndPick(camera, tl, workDir, ffprobe, halt) {
+  ringNotes.start();
+  try {
+    return await recordAndPickInner(camera, tl, workDir, ffprobe, halt);
+  } finally {
+    ringNotes.stop();
+  }
+}
+
+async function recordAndPickInner(camera, tl, workDir, ffprobe, halt) {
   const clip = path.join(workDir, 'clip.mkv');
+  // What the recording ffmpeg says goes to a file (FFREPORT), so a failure can
+  // say why: ring-client-api keeps ffmpeg's messages to itself.
+  const ffLog = path.join(workDir, 'ffmpeg.log');
   const seen = new SequenceCounter();
   const t0 = Date.now();
+  // How the live view went, for the log when it fails.
+  const at = { answered: null, first: null, last: null, ended: null };
+  const ringSaid = [];
+  let canSeeAnswer = false, asks = 0;
+  const story = () => {
+    const s = (t) => ((t - t0) / 1000).toFixed(1);
+    const parts = [
+      canSeeAnswer ? (at.answered !== null ? `answered after ${s(at.answered)} s` : 'not answered') : '',
+      at.first !== null ? `video ${s(at.first)}-${s(at.last)} s` : 'no video',
+      at.ended !== null ? `ended at ${s(at.ended)} s` : '',
+      asks ? `${asks} keyframe request${asks === 1 ? '' : 's'}` : '',
+    ].filter(Boolean);
+    if (ringSaid.length) parts.push(`Ring: ${ringSaid.join(', ')}`);
+    const errors = ringNotes.lines.filter(l => l.startsWith('error: ')).slice(0, 3);
+    if (errors.length) parts.push(`Ring ${errors.join(' / ')}`);
+    const ff = ffmpegSummary(ffLog);
+    if (ff) parts.push(ff);
+    return parts.join('; ');
+  };
+  const recording = () => { try { return fs.statSync(clip).size > 0; } catch (e) { return false; } };
+
   const starting = Promise.resolve().then(() => camera.startLiveCall());
   let call;
   try {
@@ -1070,15 +1186,43 @@ async function recordAndPick(camera, tl, workDir, ffprobe, halt) {
   // Ending the live view ends its ffmpeg too (ring-client-api stops it).
   const endCall = () => { try { call.stop(); } catch (e) { /* already ended */ } };
   halt.kills.add(endCall);
-  let sub = null;
+  const subs = [];
+  const unsubscribeAll = () => subs.forEach(x => { try { x.unsubscribe(); } catch (e) { /* gone */ } });
+  // Ring's side of the call (its signalling messages, when it answered), from
+  // ring-client-api's connection object - not a public API, so only if there.
+  try {
+    const conn = call.connection;
+    if (conn && conn.onMessage && typeof conn.onMessage.subscribe === 'function') {
+      subs.push(conn.onMessage.subscribe((m) => {
+        const method = m && m.method;
+        if (!method || method === 'ice' || method === 'pong') return;
+        const text = method === 'close' ? `close ${briefly(m.body, 120)}`
+          : method === 'notification' ? `notification ${briefly(m.body && m.body.text, 60)}` : method;
+        if (ringSaid[ringSaid.length - 1] !== text && ringSaid.length < 12) ringSaid.push(text);
+      }));
+    }
+    if (conn && conn.onCallAnswered && typeof conn.onCallAnswered.subscribe === 'function') {
+      canSeeAnswer = true;
+      subs.push(conn.onCallAnswered.subscribe(() => { if (at.answered === null) at.answered = Date.now(); }));
+    }
+  } catch (e) { /* only for the log */ }
+  let asker = null;
   try {
     halt.check();
-    const ended = new Promise((r) => call.onCallEnded.subscribe(() => r()));
-    try { sub = call.onVideoRtp.subscribe((rtp) => seen.add(rtp && rtp.header && rtp.header.sequenceNumber)); }
-    catch (e) { /* counting is a nicety */ }
+    const ended = new Promise((r) => call.onCallEnded.subscribe(() => { at.ended = Date.now(); r(); }));
+    try {
+      subs.push(call.onVideoRtp.subscribe((rtp) => {
+        const now = Date.now();
+        if (at.first === null) at.first = now;
+        at.last = now;
+        seen.add(rtp && rtp.header && rtp.header.sequenceNumber);
+      }));
+    } catch (e) { /* counting is a nicety */ }
     // Ends the live view - and with it ffmpeg - whatever happens.
     const stopper = setTimeout(endCall,
       tl.recordSeconds * 1000 + (tl.liveExtraMs || LIVE_EXTRA_MS));
+    const report = process.env.FFREPORT;
+    process.env.FFREPORT = `file=${ffLog}:level=32`;
     try {
       await call.startTranscoding({
         input: ['-buffer_size', String(SOCKET_BUFFER_BYTES)],
@@ -1086,27 +1230,42 @@ async function recordAndPick(camera, tl, workDir, ffprobe, halt) {
         video: ['-vcodec', 'copy'],
         output: ['-t', String(tl.recordSeconds), '-f', 'matroska', '-y', clip],
       });
+      // ffmpeg starts recording only once a keyframe has brought it the
+      // stream's description (SPS/PPS). ring-client-api asks the camera for
+      // one once; until the recording has started, ask again every 2 s.
+      asker = setInterval(() => {
+        if (recording()) { clearInterval(asker); return; }
+        if (typeof call.requestKeyFrame === 'function') {
+          try { call.requestKeyFrame(); asks++; } catch (e) { /* only a request */ }
+        }
+      }, tl.keyframeAskMs || KEYFRAME_ASK_MS);
       await ended;
     } finally {
+      clearInterval(asker);
       clearTimeout(stopper);
+      if (report === undefined) delete process.env.FFREPORT; else process.env.FFREPORT = report;
     }
   } finally {
     halt.kills.delete(endCall);
     endCall();
-    if (sub) { try { sub.unsubscribe(); } catch (e) { /* gone */ } }
+    unsubscribeAll();
   }
   halt.check();
   const liveSeconds = (Date.now() - t0) / 1000;
-  if (!fs.existsSync(clip) || !fs.statSync(clip).size) {
-    // With heavy loss ffmpeg can fail to start the recording at all ("dimensions
-    // not set": the stream's description never arrived intact).
+  const packets = `${seen.received} video packets arrived, ${seen.missing} missing`;
+  if (!recording()) {
+    // ffmpeg never started the file: the stream's description (SPS/PPS) did
+    // not arrive whole, or the live view ended first - the story says which.
+    // ffmpeg is still stopping (ring-client-api has just signalled it): let
+    // it finish its report first.
+    await new Promise((r) => setTimeout(r, tl.reportSettleMs !== undefined ? tl.reportSettleMs : 1500));
     throw new Error(seen.received
-      ? `nothing was recorded from the ${seen.received} video packets that arrived`
-      : 'the live view gave no video (no packets arrived)');
+      ? `nothing was recorded (${packets}; ${story()})`
+      : `the live view gave no video (${story()})`);
   }
   const keys = await keyframeTimes(ffprobe, clip, halt);
   halt.check();
-  if (!keys.length) throw new Error('the recording has no keyframe');
+  if (!keys.length) throw new Error(`the recording has no keyframe (${packets}; ${story()})`);
   const frame = path.join(workDir, 'frame.jpg');
   const checked = [];
   for (const k of keys.slice(-MAX_KEYFRAMES_TRIED).reverse()) {
@@ -1115,7 +1274,7 @@ async function recordAndPick(camera, tl, workDir, ffprobe, halt) {
     checked.push(`${k.toFixed(1)} s ${ok ? 'clean' : 'damaged'}`);
     if (ok) return { frame, liveSeconds, missing: seen.missing, received: seen.received, checked };
   }
-  throw new Error(`no clean keyframe (${checked.join(', ')}; ${seen.missing} of ${seen.received + seen.missing} packets missing)`);
+  throw new Error(`no clean keyframe (${checked.join(', ')}; ${seen.missing} of ${seen.received + seen.missing} packets missing; ${story()})`);
 }
 
 /** Writes a file into place in one step, readable by the Pi's user for copying off. */
@@ -1182,27 +1341,49 @@ function createTimelapse(cfg, deps) {
     }
   };
 
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  const afterLiveMs = deps.afterLiveMs !== undefined ? deps.afterLiveMs
+    : (Number.isFinite(cfg.timelapse.snapshotPauseSeconds) ? cfg.timelapse.snapshotPauseSeconds : 20) * 1000;
+  const retryMs = deps.snapshotRetryMs !== undefined ? deps.snapshotRetryMs : SNAPSHOT_RETRY_MS;
+
   async function attempt(camera, workDir, dir, base) {
-    let liveError;
+    let live;
     try {
       const r = await liveFrame(camera, workDir);
       const dest = path.join(dir, `${base}.jpg`);
       saveAtomically(r.frame, dest);
       return Object.assign({ kind: 'live', dest }, r);
     } catch (e) {
-      liveError = e.message;
+      live = e;
     }
-    let snap;
-    try {
-      snap = await withTimeout(Promise.resolve().then(() => camera.getSnapshot()), 30 * 1000, 'the snapshot');
-    } catch (e) {
-      throw new Error(`live video failed (${liveError}); the snapshot failed too (${e.message})`);
+    // The 640x360 snapshot instead. A battery camera cannot take one while it
+    // is still streaming: if it was asked for live video, give it a moment,
+    // and a second chance.
+    if (live.cameraStreamed) await pause(afterLiveMs);
+    let snap = null, snapError = null;
+    for (let i = 0; i < SNAPSHOT_TRIES && !snap; i++) {
+      if (i) await pause(retryMs);
+      try {
+        snap = await withTimeout(Promise.resolve().then(() => camera.getSnapshot()), 30 * 1000, 'the snapshot');
+        if (!snap || !snap.length) { snap = null; snapError = new Error('the snapshot was empty'); }
+      } catch (e) {
+        snapError = e;
+      }
     }
-    if (!snap || !snap.length) throw new Error(`live video failed (${liveError}); the snapshot was empty`);
+    if (!snap) {
+      const err = new Error(`live video failed (${live.message}); the snapshot failed too, `
+        + `${SNAPSHOT_TRIES} tries (${snapError.message})`);
+      err.lowestMemory = live.lowestMemory;
+      throw err;
+    }
     const dest = path.join(dir, `${base}_snapshot.jpg`);
     saveAtomically(snap, dest);
-    return { kind: 'snapshot', dest, liveError };
+    return { kind: 'snapshot', dest, liveError: live.message, lowestMemory: live.lowestMemory };
   }
+
+  /** "; the Pi had at least 120 MB available throughout", when the memory was watched. */
+  const lowestNote = (x) => (x && typeof x.lowestMemory === 'number'
+    ? `; the Pi had at least ${Math.round(x.lowestMemory)} MB available throughout` : '');
 
   async function captureOne(label, dir, base) {
     if (busy) { log(`${label}: a timelapse capture is already running; skipped.`); return null; }
@@ -1229,17 +1410,16 @@ function createTimelapse(cfg, deps) {
       const size = jpegSize(buf);
       const what = `${size ? `${size.width}x${size.height}` : 'size unknown'}, ${Math.round(buf.length / 1024)} KB`;
       if (r.kind === 'live') {
-        const lowest = typeof r.lowestMemory === 'number'
-          ? `; the Pi had at least ${Math.round(r.lowestMemory)} MB available throughout` : '';
         log(`${label}: saved ${path.basename(r.dest)} - ${what}, from live video (${r.liveSeconds.toFixed(0)} s; `
           + `${r.missing} of ${r.received + r.missing} packets missing; keyframes checked: ${r.checked.join(', ')}); `
-          + `took ${((Date.now() - t0) / 1000).toFixed(0)} s. Memory: ${memoryReport()}${lowest}.`);
+          + `took ${((Date.now() - t0) / 1000).toFixed(0)} s. Memory: ${memoryReport()}${lowestNote(r)}.`);
       } else {
-        logError(`${label}: live video failed (${r.liveError}); saved the snapshot instead: ${path.basename(r.dest)} - ${what}.`);
+        logError(`${label}: live video failed (${r.liveError}); saved the snapshot instead: ${path.basename(r.dest)} - ${what}. `
+          + `Memory: ${memoryReport()}${lowestNote(r)}.`);
       }
       return r;
     } catch (e) {
-      logError(`${label}: ${e.message}. Memory: ${memoryReport()}.`);
+      logError(`${label}: ${e.message}. Memory: ${memoryReport()}${lowestNote(e)}.`);
       return null;
     } finally {
       const cleanUp = () => {
@@ -1408,7 +1588,7 @@ module.exports = {
   // Timelapse
   parseTimeList, timelapseOn, localDateParts, timelapseFile, timelapseDue, withTimeout, runTool, keyframeTimes,
   decodeKeyframe, SequenceCounter, jpegSize, captureLiveFrame, saveAtomically, freeMb, memoryReport,
-  createTimelapse, describeTimelapse, availableMb, watchMemory, CaptureStop,
+  createTimelapse, describeTimelapse, availableMb, watchMemory, CaptureStop, ffmpegSummary, redact, briefly, ringNotes,
   TIMELAPSE_WINDOW_MINUTES, CAPTURE_TIMEOUT_MS, MAX_KEYFRAMES_TRIED, LIVE_MEMORY_NEED_MB,
 };
 
