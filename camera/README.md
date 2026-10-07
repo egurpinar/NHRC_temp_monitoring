@@ -354,6 +354,7 @@ settings change.
 | `BACKUP_ACTIVE_START_HOUR` / `_END_HOUR` | 5 / 16 | Backup window. Night frames are dark and still cost battery |
 | `CAMERA_RETRIES` | 3 | Battery cameras cannot snapshot *while recording*, so motion events cause failures worth retrying |
 | `RING_TOKEN_FILE` | `~/.nhrc-ring-token` | Must persist across reboots |
+| `TIMELAPSE_TIMES` | (off) | Full-resolution frames saved on the Pi at these times - see [Timelapse](#timelapse-optional) |
 
 ## The timetable
 
@@ -417,6 +418,172 @@ journalctl -u nhrc-camera -n 20 --no-pager
 
 `node --check` only checks the syntax, so a truncated download can never replace
 a working service. The startup line in the journal states the timetable.
+
+## Timelapse (optional)
+
+For the construction timelapse a member asked for: at set times (8:00, 12:00
+and 15:00), right after that slot's dock photo, one **1920x1080** frame from
+the Downstream Lot camera's **live video** is saved **on the Pi**, in
+`/opt/nhrc-camera/timelapse/` as `2026-10-08_0800.jpg` and so on. Ring
+snapshots are only 640x360, which is why it uses the live video.
+
+Nothing here is uploaded or shown on the website, and the frames must never be
+committed to this repository. Unlike the website's single photo, they **are
+kept**: copy them off, and delete them from the Pi once the timelapse is made.
+Each frame is a live view of about 30 seconds from a battery camera, three
+times a day: agree that with the camera's owner.
+
+Off unless `TIMELAPSE_TIMES` is set: without it, the service does exactly what
+it did before.
+
+### Pi-hole comes first
+
+This Pi also serves the house's DNS, and a live video is the heaviest thing it
+does. In the October 2026 test it kept the processor fully busy for about 30
+seconds, and ffmpeg used up to 86 MB. So:
+
+- **Memory is kept for Pi-hole.** The live video starts only with at least
+  80 MB available (`TIMELAPSE_MIN_MEMORY_MB`, 40, plus 40 MB of headroom), and
+  the memory is checked twice a second throughout. Below 40 MB the live view
+  and ffmpeg are stopped at once and the snapshot is saved instead. With the
+  service running the Pi had about 170 MB available (August 2026), so this
+  should only act when something else is short of memory.
+- **Pi-hole gets the processor first** (`Nice=10`, `CPUWeight=20` below), and
+  if memory ever ran out the kernel would stop this service, never Pi-hole
+  (`OOMScoreAdjust=500`). The service's `MemoryMax` stays as it was.
+- **Light work while the video arrives.** The video is recorded as it comes,
+  without decoding, then the latest keyframes are decoded one at a time,
+  single-threaded. (In the first test, decoding as the video arrived, the
+  picture came out smeared.)
+- **Every step has a deadline.** ffmpeg is killed at its deadline, the live
+  view is always ended, temporary files are always removed, and a whole
+  capture, the fallback included, is given up after 6 minutes.
+- **No damaged pictures.** A keyframe with any decoding error is refused. If
+  no clean one arrives, the 640x360 snapshot is saved instead
+  (`..._snapshot.jpg`), so the day is not missed.
+- **Never a restart loop.** Each time is tried once a day, and noted on disk
+  (`timelapse/.tried`) before it starts: if a capture ever brought the service
+  down, the restarted service does not try it again.
+- **The disk keeps 500 MB free** (`TIMELAPSE_MIN_DISK_MB`). A frame is
+  100-500 KB, so about 1.5 MB a day.
+
+### Setting it up
+
+ffmpeg first, if it is not there yet:
+
+```bash
+sudo apt install -y --no-install-recommends ffmpeg
+```
+
+Room in the network buffers for a burst of video packets (at the default 176 KB
+a test lost 627 packets and every keyframe was damaged; at 8 MB it lost 2):
+
+```bash
+printf 'net.core.rmem_max=8388608\nnet.core.rmem_default=8388608\n' | sudo tee /etc/sysctl.d/90-nhrc-camera.conf
+sudo sysctl -p /etc/sysctl.d/90-nhrc-camera.conf
+```
+
+Pi-hole first, and a netlink socket, which the live video needs to list the
+Pi's network addresses (the service is otherwise as locked down as before):
+
+```bash
+sudo mkdir -p /etc/systemd/system/nhrc-camera.service.d
+printf '[Service]\nNice=10\nCPUWeight=20\nOOMScoreAdjust=500\nRestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK\n' | sudo tee /etc/systemd/system/nhrc-camera.service.d/timelapse.conf
+```
+
+The times:
+
+```bash
+sudo grep -q '^TIMELAPSE_TIMES=' /opt/nhrc-camera/env || echo 'TIMELAPSE_TIMES=8:00,12:00,15:00' | sudo tee -a /opt/nhrc-camera/env
+```
+
+Then `sudo systemctl daemon-reload`, so systemd reads the new settings, and
+update `snapshot_service.js` as in the section above. Its restart starts the
+timelapse, and the journal says so: `Timelapse: "Downstream Lot" at 08:00,
+12:00, 15:00 ...`.
+
+Check that the protections are in place - `Nice=10`, `CPUWeight=20`,
+`OOMScoreAdjust=500`, `AF_NETLINK` in the list, and `500` from the last line:
+
+```bash
+systemctl show nhrc-camera -p Nice -p CPUWeight -p OOMScoreAdjust -p RestrictAddressFamilies -p MemoryMax
+cat /proc/$(systemctl show -p MainPID --value nhrc-camera)/oom_score_adj
+```
+
+### Test it
+
+A test capture runs inside the service, under the same limits as the real
+ones, and is saved in `timelapse/tests/` so it never joins the timelapse:
+
+```bash
+sudo kill -USR2 $(systemctl show -p MainPID --value nhrc-camera)
+```
+
+A minute later:
+
+```bash
+journalctl -u nhrc-camera -n 5 --no-pager
+```
+
+```
+Timelapse test: saved 2026-10-08_040512.jpg - 1920x1080, 250 KB, from live video (28 s;
+1 of 770 packets missing; keyframes checked: 8.1 s clean); took 40 s. Memory: this program
+110 MB; the Pi had at least 120 MB available throughout.
+```
+
+What else the journal can say:
+
+| Journal | Meaning |
+|---|---|
+| `live video failed (...); saved the snapshot instead` | The day has a 640x360 frame. The reason is in the brackets |
+| `not started: only N MB of memory available` | The Pi was short of memory; the camera was not even woken for the live video |
+| `stopped: the memory available fell to N MB` | Stopped mid-capture to keep memory for Pi-hole |
+| `no clean keyframe (...)` | Too many packets lost on the way (usually Wi-Fi at either end) |
+| `nothing was recorded from the N video packets that arrived` | The same, losing even the video's description |
+| `already tried before the service restarted` | The service restarted inside that time's window; that time is skipped today |
+| `only N MB free on the SD card` | Nothing saved: copy the frames off and delete them |
+
+### The frames
+
+On your Mac, copy them off (with the Pi's address if its name does not
+resolve):
+
+```bash
+mkdir -p ~/Desktop/timelapse
+scp 'emre@pihole2:/opt/nhrc-camera/timelapse/*.jpg' ~/Desktop/timelapse/
+```
+
+Then, with ffmpeg on the Mac (`brew install ffmpeg`), one video from all of
+them, or from one time of day for even light (`'*_1200*.jpg'`):
+
+```bash
+cd ~/Desktop/timelapse
+ffmpeg -framerate 12 -pattern_type glob -i '*.jpg' -vf scale=1920:-2 -c:v libx264 -pix_fmt yuv420p timelapse.mp4
+```
+
+Once they are safely on the Mac, they can be deleted from the Pi (the service
+owns them, hence `sudo`):
+
+```bash
+sudo rm /opt/nhrc-camera/timelapse/*.jpg
+```
+
+To turn it off, delete the `TIMELAPSE_TIMES` line and restart:
+
+```bash
+sudo sed -i '/^TIMELAPSE_TIMES=/d' /opt/nhrc-camera/env
+sudo systemctl restart nhrc-camera
+```
+
+| Variable | Default | Notes |
+|---|---|---|
+| `TIMELAPSE_TIMES` | (off) | Local times, e.g. `8:00,12:00,15:00`. Each is due for 15 minutes (one dock slot) |
+| `TIMELAPSE_CAMERA_NAME` | `RING_BACKUP_CAMERA_NAME` | The camera to film |
+| `TIMELAPSE_DIR` | `/opt/nhrc-camera/timelapse` | Must be inside `ReadWritePaths` |
+| `TIMELAPSE_RECORD_SECONDS` | 8 | Seconds of video recorded; 4-20 |
+| `TIMELAPSE_MIN_MEMORY_MB` | 40 | Memory always kept for Pi-hole; at least 20 |
+| `TIMELAPSE_MIN_DISK_MB` | 500 | Disk always kept free; at least 100 |
+| `FFMPEG_PATH` | `/usr/bin/ffmpeg` | `ffprobe` must be next to it |
 
 ## Battery
 
@@ -518,7 +685,9 @@ DNS. Mitigations:
   package install scripts executing arbitrary code on the Pi.
 - **Dedicated unprivileged user, no shell, no home directory.**
 - **systemd containment** — `NoNewPrivileges`, restricted address families,
-  read-only filesystem apart from one directory.
+  read-only filesystem apart from one directory. The timelapse adds
+  `AF_NETLINK`, which the live video uses to list the Pi's network addresses;
+  without root privileges it cannot change the network through it.
 - **`MemoryMax=200M`** — a runaway process gets killed rather than triggering
   the OOM killer, which might otherwise choose Pi-hole.
 
@@ -551,6 +720,11 @@ archived, nothing enters git, and Cloudflare access logs are not enabled by
 default. If the committee wants a formal retention answer: *the current frame
 only, replaced at each capture (every 15 minutes), never stored historically.*
 
+The one exception is the timelapse, when it is on: three frames a day from the
+Downstream Lot camera are kept on the Pi's SD card - never uploaded, never in
+git - until they are copied off and deleted. Its retention answer: *kept on the
+club's Pi only for making the construction timelapse, deleted once it is made.*
+
 ---
 
 ## Tests
@@ -559,7 +733,7 @@ only, replaced at each capture (every 15 minutes), never stored historically.*
 node camera/test_snapshot_service.js
 ```
 
-93 tests covering config validation, the timezone-aware windows, the capture
+133 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including
 both daylight-saving days and day-long outages), camera selection, atomic token
 persistence and file permissions, upload auth and retry behaviour, the Worker
@@ -567,3 +741,11 @@ itself (run in Node against an in-memory R2), and the real service process end
 to end, with a stand-in Ring library. Every test is hermetic: a
 fixed clock and a fake network, never the real endpoint. The Ring API itself is
 stubbed, so no credentials are needed.
+
+The timelapse tests use real ffmpeg (skipped where it is not installed): a
+1920x1080 H.264 stream sent over RTP through a relay that can lose packets,
+recorded with the arguments ring-client-api builds. They cover damaged
+keyframes, a live view that never answers or starts too late, memory running
+short while recording and while decoding (stand-ins for `/proc/meminfo`), six
+captures in a row with nothing left behind, and the service killed in the
+middle of a capture and restarted.

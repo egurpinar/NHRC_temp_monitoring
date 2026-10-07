@@ -51,6 +51,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { spawn } = require('child_process');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Configuration (environment variables — see camera/README.md)
@@ -110,6 +111,25 @@ const CONFIG = {
   },
 
   timeZone: process.env.CAMERA_TIMEZONE || 'America/New_York',
+
+  // TIMELAPSE - off unless TIMELAPSE_TIMES is set (e.g. "8:00,12:00,15:00").
+  // At each of those local times, right after that slot's dock photo, one
+  // full-resolution frame from the camera's live video is saved ON THIS PI,
+  // never uploaded. See "Timelapse" below and camera/README.md.
+  timelapse: {
+    times: parseTimeList(process.env.TIMELAPSE_TIMES),
+    cameraName: process.env.TIMELAPSE_CAMERA_NAME || process.env.RING_BACKUP_CAMERA_NAME || '',
+    dir: process.env.TIMELAPSE_DIR || '/opt/nhrc-camera/timelapse',
+    ffmpegPath: process.env.FFMPEG_PATH || '/usr/bin/ffmpeg',
+    recordSeconds: Number(process.env.TIMELAPSE_RECORD_SECONDS || 8),
+    // The SD card always keeps this much free: nothing is saved below it.
+    minDiskMb: Number(process.env.TIMELAPSE_MIN_DISK_MB || 500),
+    // This Pi also serves the house's DNS, so it always keeps this much
+    // memory available for Pi-hole (MemAvailable in /proc/meminfo). The live
+    // video starts only with 40 MB more than this available, and is stopped
+    // at once if the Pi falls below it.
+    minMemoryMb: Number(process.env.TIMELAPSE_MIN_MEMORY_MB || 40),
+  },
 
   // Ring battery cameras cannot take a snapshot while recording, so a capture
   // that coincides with a motion event fails. Retry a couple of times rather
@@ -195,7 +215,41 @@ function validateConfig(cfg = CONFIG) {
       problems.push('RING_CAMERA_NAME and RING_BACKUP_CAMERA_NAME name the same camera');
     }
   }
+  const tl = cfg.timelapse;
+  if (tl && tl.times && tl.times.length) {
+    for (const t of tl.times) {
+      if (!Number.isFinite(t.minutes)) problems.push(`TIMELAPSE_TIMES: "${t.label}" is not a time like 8:00 or 15:30`);
+    }
+    if (!String(tl.cameraName || '').trim()) {
+      problems.push('TIMELAPSE_TIMES is set but there is no camera for it: set TIMELAPSE_CAMERA_NAME (or RING_BACKUP_CAMERA_NAME)');
+    }
+    if (!(Number.isInteger(tl.recordSeconds) && tl.recordSeconds >= 4 && tl.recordSeconds <= 20)) {
+      problems.push('TIMELAPSE_RECORD_SECONDS must be a whole number from 4 to 20');
+    }
+    if (!path.isAbsolute(String(tl.dir || ''))) problems.push('TIMELAPSE_DIR must be an absolute path');
+    if (!path.isAbsolute(String(tl.ffmpegPath || ''))) problems.push('FFMPEG_PATH must be an absolute path');
+    if (!(tl.minDiskMb >= 100)) problems.push('TIMELAPSE_MIN_DISK_MB must be at least 100');
+    if (!(tl.minMemoryMb >= 20)) problems.push('TIMELAPSE_MIN_MEMORY_MB must be at least 20 (memory kept for Pi-hole)');
+  }
   return problems;
+}
+
+/**
+ * "8:00,12:00,15:00" -> [{ minutes: 480, label: '08:00' }, ...], sorted, each
+ * time once. An entry that is not a time keeps minutes NaN, for validation to
+ * name. Unset or empty means no timelapse.
+ */
+function parseTimeList(raw) {
+  if (raw === undefined || raw === null || !String(raw).trim()) return [];
+  const out = [];
+  for (const part of String(raw).split(',').map(s => s.trim()).filter(Boolean)) {
+    const m = /^(\d{1,2})(?::([0-5]\d))?$/.exec(part);
+    const minutes = m && Number(m[1]) < 24 ? Number(m[1]) * 60 + Number(m[2] || 0) : NaN;
+    const label = Number.isFinite(minutes)
+      ? `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}` : part;
+    if (!out.some(o => o.minutes === minutes && Number.isFinite(minutes))) out.push({ minutes, label });
+  }
+  return out.sort((a, b) => (a.minutes || 0) - (b.minutes || 0));
 }
 
 /**
@@ -442,6 +496,16 @@ function createScheduler(cfg, deps) {
         }
       }
     }
+    // Anything that should follow the photos (the timelapse), after them so
+    // it can never delay one. Its failure is contained here: the timetable
+    // goes on regardless.
+    if (deps.afterSlot) {
+      try {
+        await deps.afterSlot();
+      } catch (e) {
+        logError('after-slot task failed:', e.message);
+      }
+    }
     // Half a second past the boundary, so the clock reads the new slot.
     deps.setTimer(tick, secondsUntilNextSlot(deps.now(), cfg) * 1000 + 500);
   };
@@ -585,6 +649,9 @@ async function connectRing(cfg = CONFIG) {
     // pull frames from one shared camera.
     locationModePollingSeconds: 0,
     controlCenterDisplayName: 'NHRC Boathouse Camera',
+    // The timelapse's live video goes through ffmpeg; without a timelapse
+    // the library never starts it.
+    ...(timelapseOn(cfg) ? { ffmpegPath: cfg.timelapse.ffmpegPath } : {}),
   });
 
   // THE CRITICAL SUBSCRIPTION. Ring issues a new refresh token roughly hourly.
@@ -739,6 +806,490 @@ function describeTimetable(cfg = CONFIG) {
   return `${rate}, ${describeWindow(cfg)}`;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Timelapse
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// For a construction timelapse: at each TIMELAPSE_TIMES, one FULL-RESOLUTION
+// frame (1920x1080) from the camera's live video - Ring snapshots are only
+// 640x360 - saved on this Pi as TIMELAPSE_DIR/YYYY-MM-DD_HHMM.jpg. Never
+// uploaded, never on the website.
+//
+// THIS PI ALSO SERVES THE HOUSE'S DNS, so the capture is gentle and fails safe:
+// - It runs right after the slot's dock photo, never during one.
+// - The video is RECORDED without decoding (light work), then decoded
+//   afterwards, one keyframe at a time, single-threaded. In the first test on
+//   the Pi Zero, decoding as the video arrived, the picture came out smeared
+//   (October 2026).
+// - Every step has a deadline. ffmpeg is killed at its deadline, the live view
+//   is always ended, and the temporary files always removed.
+// - Memory is kept for Pi-hole: the live video starts only with room to spare
+//   (TIMELAPSE_MIN_MEMORY_MB + 40 MB available), and the memory is checked
+//   twice a second throughout - below TIMELAPSE_MIN_MEMORY_MB the live view
+//   and ffmpeg are stopped at once.
+// - A damaged keyframe is never saved. If no clean one arrives, the 640x360
+//   snapshot is saved instead (..._snapshot.jpg), so the day is not missed.
+// - Nothing is written unless the disk has TIMELAPSE_MIN_DISK_MB free.
+// - Each time is tried once a day, and that is noted on disk before it starts:
+//   a capture that brought the service down is not tried again on restart, so
+//   it can never become a restart loop.
+// - systemd lowers the service's priority below Pi-hole's and makes the kernel
+//   stop it first if memory ever runs out; the network buffers are raised -
+//   see camera/README.md, "Timelapse".
+
+const TIMELAPSE_WINDOW_MINUTES = 15;          // a time is due from T until T+15 min: one dock slot
+const LIVE_START_TIMEOUT_MS = 30 * 1000;      // to get the live view going
+const LIVE_EXTRA_MS = 45 * 1000;              // connection set-up, on top of the recording itself
+const FFMPEG_STEP_TIMEOUT_MS = 45 * 1000;     // each ffprobe or decode run
+const MAX_KEYFRAMES_TRIED = 4;
+const CAPTURE_TIMEOUT_MS = 6 * 60 * 1000;     // the whole capture, fallback included, whatever happens
+const SOCKET_BUFFER_BYTES = 8 * 1024 * 1024;  // ffmpeg's receive buffer (the system caps it at net.core.rmem_max)
+const LIVE_MEMORY_NEED_MB = 40;               // headroom, on top of TIMELAPSE_MIN_MEMORY_MB, to start the live video
+const MEMORY_CHECK_MS = 500;                  // how often the memory is checked during a capture
+
+function timelapseOn(cfg = CONFIG) {
+  return !!(cfg.timelapse && cfg.timelapse.times && cfg.timelapse.times.length);
+}
+
+/** Local date, minutes of the day and hhmmss in the boathouse timezone. */
+function localDateParts(now = new Date(), cfg = CONFIG) {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: cfg.timeZone, year: 'numeric', month: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(now);
+  const g = (t) => p.find(x => x.type === t).value;
+  return { date: `${g('year')}-${g('month')}-${g('day')}`, minutes: Number(g('hour')) * 60 + Number(g('minute')),
+           hhmmss: `${g('hour')}${g('minute')}${g('second')}` };
+}
+
+/** Where the frame for `date` at time `t` is saved; kind 'live' or 'snapshot'. */
+function timelapseFile(cfg, date, t, kind = 'live') {
+  return path.join(cfg.timelapse.dir, `${date}_${t.label.replace(':', '')}${kind === 'snapshot' ? '_snapshot' : ''}.jpg`);
+}
+
+/**
+ * The times due now: inside their 15-minute window, not saved yet, not tried
+ * yet today (a failed time is not retried at every wake). After a restart
+ * within the window the saved file is what says it is done.
+ */
+function timelapseDue(now, cfg, exists, tried) {
+  if (!timelapseOn(cfg)) return [];
+  const { date, minutes } = localDateParts(now, cfg);
+  return cfg.timelapse.times
+    .filter(t => Number.isFinite(t.minutes) && minutes >= t.minutes && minutes < t.minutes + TIMELAPSE_WINDOW_MINUTES
+      && !tried.has(`${date} ${t.label}`)
+      && !exists(timelapseFile(cfg, date, t, 'live')) && !exists(timelapseFile(cfg, date, t, 'snapshot')))
+    .map(t => ({ date, time: t }));
+}
+
+/** Rejects after `ms` (the work itself is stopped by its own deadlines). */
+function withTimeout(promise, ms, what) {
+  let timer;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} took longer than ${Math.round(ms / 1000)} s`)), ms);
+  });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+/** The memory the Pi has available (MemAvailable, in MB), or null where it cannot be read. */
+function availableMb() {
+  try {
+    const m = /^MemAvailable:\s+(\d+) kB/m.exec(fs.readFileSync('/proc/meminfo', 'utf8'));
+    return m ? Number(m[1]) / 1024 : null;
+  } catch (e) { return null; }
+}
+
+/**
+ * Stops everything one capture runs - the live view, every ffmpeg - at once.
+ * The memory watch pulls it when the Pi runs short.
+ */
+class CaptureStop {
+  constructor() { this.reason = null; this.kills = new Set(); }
+  stop(reason) {
+    if (this.reason) return;
+    this.reason = reason;
+    for (const kill of [...this.kills]) { try { kill(); } catch (e) { /* already gone */ } }
+  }
+  check() { if (this.reason) throw new Error(this.reason); }
+}
+
+/**
+ * Checks the Pi's available memory now and every `everyMs` until stopped,
+ * keeping the lowest seen. Below `floorMb` it calls onLow, once.
+ */
+function watchMemory(floorMb, onLow, read = availableMb, everyMs = MEMORY_CHECK_MS) {
+  let timer = null;
+  const w = { lowest: null, low: null, stop() { clearInterval(timer); } };
+  const check = () => {
+    const mb = read();
+    if (typeof mb !== 'number' || !Number.isFinite(mb)) return;
+    if (w.lowest === null || mb < w.lowest) w.lowest = mb;
+    if (w.low === null && mb < floorMb) {
+      w.low = mb;
+      try { onLow(mb); } catch (e) { /* stopping is best effort */ }
+    }
+  };
+  timer = setInterval(check, everyMs);
+  check();
+  return w;
+}
+
+/**
+ * Runs ffmpeg or ffprobe, killing it at its deadline - or at once when the
+ * capture is stopped. Never rejects.
+ */
+function runTool(cmd, args, timeoutMs = FFMPEG_STEP_TIMEOUT_MS, halt = null) {
+  return new Promise((resolve) => {
+    if (halt && halt.reason) { resolve({ code: null, stdout: '', stderr: halt.reason }); return; }
+    let out = '', err = '', done = false;
+    let p;
+    try {
+      p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      resolve({ code: null, stdout: '', stderr: e.message });
+      return;
+    }
+    const kill = () => { try { p.kill('SIGKILL'); } catch (e) { /* gone */ } };
+    const timer = setTimeout(kill, timeoutMs);
+    if (halt) halt.kills.add(kill);
+    p.stdout.on('data', (d) => { if (out.length < 1e6) out += d; });
+    p.stderr.on('data', (d) => { if (err.length < 1e5) err += d; });
+    const finish = (code) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (halt) halt.kills.delete(kill);
+      resolve({ code, stdout: out, stderr: err });
+    };
+    p.on('error', (e) => { err += e.message; finish(null); });
+    p.on('close', (code) => finish(code));
+  });
+}
+
+/** Keyframe times (seconds) in a recorded clip. */
+async function keyframeTimes(ffprobe, clip, halt = null) {
+  const r = await runTool(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-skip_frame', 'nokey',
+    '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'csv=p=0', clip], FFMPEG_STEP_TIMEOUT_MS, halt);
+  if (r.code !== 0) return [];
+  return r.stdout.split('\n').map(s => s.trim()).filter(s => s && s !== 'N/A').map(Number).filter(Number.isFinite);
+}
+
+/**
+ * Decodes the keyframe at `t` to a JPEG, single-threaded, refusing a damaged
+ * one: lost packets make the decoder report errors - and otherwise smear the
+ * last good row down the picture.
+ */
+async function decodeKeyframe(ffmpeg, clip, t, out, halt = null) {
+  try { fs.unlinkSync(out); } catch (e) { /* none */ }
+  const r = await runTool(ffmpeg, ['-v', 'error', '-threads', '1', '-xerror', '-err_detect', 'explode',
+    '-skip_frame', 'nokey', '-ss', String(t), '-i', clip, '-frames:v', '1', '-q:v', '2', '-y', out], FFMPEG_STEP_TIMEOUT_MS, halt);
+  return r.code === 0 && !r.stderr.trim() && fs.existsSync(out) && fs.statSync(out).size > 0;
+}
+
+/** Counts RTP packets by sequence number (16-bit, wrapping), and how many are missing. */
+class SequenceCounter {
+  constructor() { this.seqs = new Set(); this.last = null; this.cycles = 0; }
+  add(seq) {
+    if (typeof seq !== 'number') return;
+    if (this.last !== null && seq < this.last && this.last - seq > 30000) this.cycles++;
+    this.last = seq;
+    this.seqs.add(this.cycles * 65536 + seq);
+  }
+  get received() { return this.seqs.size; }
+  get missing() {
+    if (!this.seqs.size) return 0;
+    let lo = Infinity, hi = -Infinity;
+    for (const s of this.seqs) { if (s < lo) lo = s; if (s > hi) hi = s; }
+    return hi - lo + 1 - this.seqs.size;
+  }
+}
+
+/** Width and height from a JPEG's start-of-frame marker, or null. */
+function jpegSize(buf) {
+  let i = 2;
+  while (buf && i + 9 < buf.length) {
+    if (buf[i] !== 0xFF) { i++; continue; }
+    const marker = buf[i + 1];
+    if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { i += 2; continue; }
+    if ((marker >= 0xC0 && marker <= 0xC3) || (marker >= 0xC5 && marker <= 0xC7) || (marker >= 0xC9 && marker <= 0xCB)
+        || (marker >= 0xCD && marker <= 0xCF)) {
+      return { height: buf.readUInt16BE(i + 5), width: buf.readUInt16BE(i + 7) };
+    }
+    i += 2 + buf.readUInt16BE(i + 2);
+  }
+  return null;
+}
+
+/**
+ * Records recordSeconds of the camera's live video WITHOUT decoding it, then
+ * decodes the latest keyframes one at a time and returns the first clean one.
+ * Throws when there is none: the caller falls back to a snapshot.
+ *
+ * Memory comes first: the camera is not even woken without room for the
+ * video and ffmpeg on top of what is kept for Pi-hole, and from then on the
+ * memory is watched - below TIMELAPSE_MIN_MEMORY_MB everything is stopped.
+ */
+async function captureLiveFrame(camera, cfg, workDir) {
+  const tl = cfg.timelapse;
+  const ffprobe = path.join(path.dirname(tl.ffmpegPath), 'ffprobe');
+  if (!fs.existsSync(tl.ffmpegPath) || !fs.existsSync(ffprobe)) {
+    throw new Error(`ffmpeg is not installed at ${tl.ffmpegPath} (sudo apt install -y --no-install-recommends ffmpeg)`);
+  }
+  const readMemory = tl.readMemory || availableMb;   // the tests stand in for /proc/meminfo
+  const floor = tl.minMemoryMb;
+  const before = readMemory();
+  if (typeof before === 'number' && before < floor + LIVE_MEMORY_NEED_MB) {
+    throw new Error(`not started: only ${Math.round(before)} MB of memory available; the live video starts with `
+      + `${floor + LIVE_MEMORY_NEED_MB} MB or more (${floor} MB is kept for Pi-hole)`);
+  }
+  const halt = new CaptureStop();
+  const watch = watchMemory(floor, (mb) => {
+    halt.stop(`stopped: the memory available fell to ${Math.round(mb)} MB, below the ${floor} MB kept for Pi-hole`);
+  }, readMemory, tl.memoryCheckMs || MEMORY_CHECK_MS);
+  try {
+    const r = await recordAndPick(camera, tl, workDir, ffprobe, halt);
+    return Object.assign(r, { lowestMemory: watch.lowest });
+  } finally {
+    watch.stop();
+  }
+}
+
+async function recordAndPick(camera, tl, workDir, ffprobe, halt) {
+  const clip = path.join(workDir, 'clip.mkv');
+  const seen = new SequenceCounter();
+  const t0 = Date.now();
+  const starting = Promise.resolve().then(() => camera.startLiveCall());
+  let call;
+  try {
+    call = await withTimeout(starting, tl.startTimeoutMs || LIVE_START_TIMEOUT_MS, 'starting the live view');
+  } catch (e) {
+    // ring-client-api retries an unreachable server for ever. If the live view
+    // does start after we gave up, end it at once: nobody is recording it, and
+    // it would keep the battery camera streaming.
+    starting.then((late) => { try { late.stop(); } catch (err) { /* gone */ } }, () => {});
+    throw e;
+  }
+  // Ending the live view ends its ffmpeg too (ring-client-api stops it).
+  const endCall = () => { try { call.stop(); } catch (e) { /* already ended */ } };
+  halt.kills.add(endCall);
+  let sub = null;
+  try {
+    halt.check();
+    const ended = new Promise((r) => call.onCallEnded.subscribe(() => r()));
+    try { sub = call.onVideoRtp.subscribe((rtp) => seen.add(rtp && rtp.header && rtp.header.sequenceNumber)); }
+    catch (e) { /* counting is a nicety */ }
+    // Ends the live view - and with it ffmpeg - whatever happens.
+    const stopper = setTimeout(endCall,
+      tl.recordSeconds * 1000 + (tl.liveExtraMs || LIVE_EXTRA_MS));
+    try {
+      await call.startTranscoding({
+        input: ['-buffer_size', String(SOCKET_BUFFER_BYTES)],
+        audio: ['-an'],
+        video: ['-vcodec', 'copy'],
+        output: ['-t', String(tl.recordSeconds), '-f', 'matroska', '-y', clip],
+      });
+      await ended;
+    } finally {
+      clearTimeout(stopper);
+    }
+  } finally {
+    halt.kills.delete(endCall);
+    endCall();
+    if (sub) { try { sub.unsubscribe(); } catch (e) { /* gone */ } }
+  }
+  halt.check();
+  const liveSeconds = (Date.now() - t0) / 1000;
+  if (!fs.existsSync(clip) || !fs.statSync(clip).size) {
+    // With heavy loss ffmpeg can fail to start the recording at all ("dimensions
+    // not set": the stream's description never arrived intact).
+    throw new Error(seen.received
+      ? `nothing was recorded from the ${seen.received} video packets that arrived`
+      : 'the live view gave no video (no packets arrived)');
+  }
+  const keys = await keyframeTimes(ffprobe, clip, halt);
+  halt.check();
+  if (!keys.length) throw new Error('the recording has no keyframe');
+  const frame = path.join(workDir, 'frame.jpg');
+  const checked = [];
+  for (const k of keys.slice(-MAX_KEYFRAMES_TRIED).reverse()) {
+    const ok = await decodeKeyframe(tl.ffmpegPath, clip, k, frame, halt);
+    halt.check();
+    checked.push(`${k.toFixed(1)} s ${ok ? 'clean' : 'damaged'}`);
+    if (ok) return { frame, liveSeconds, missing: seen.missing, received: seen.received, checked };
+  }
+  throw new Error(`no clean keyframe (${checked.join(', ')}; ${seen.missing} of ${seen.received + seen.missing} packets missing)`);
+}
+
+/** Writes a file into place in one step, readable by the Pi's user for copying off. */
+function saveAtomically(source, dest) {
+  const tmp = path.join(path.dirname(dest), `.${path.basename(dest)}.tmp`);
+  if (Buffer.isBuffer(source)) fs.writeFileSync(tmp, source);
+  else fs.copyFileSync(source, tmp);
+  fs.chmodSync(tmp, 0o644);
+  fs.renameSync(tmp, dest);
+}
+
+/** Free space (MB) on the disk holding `dir`, or null when it cannot be read. */
+function freeMb(dir) {
+  try {
+    const s = fs.statfsSync(dir);
+    return (Number(s.bavail) * Number(s.bsize)) / 1048576;
+  } catch (e) { return null; }
+}
+
+/** "this program 95 MB; the service 160 MB now, 186 MB at most so far, of 200 MB allowed" */
+function memoryReport() {
+  let text = `this program ${Math.round(process.memoryUsage().rss / 1048576)} MB`;
+  try {
+    const line = fs.readFileSync('/proc/self/cgroup', 'utf8').split('\n').find(l => l.startsWith('0::'));
+    const dir = path.join('/sys/fs/cgroup', line.slice(3).trim());
+    const read = (f) => { try { return fs.readFileSync(path.join(dir, f), 'utf8').trim(); } catch (e) { return null; } };
+    const mb = (v) => (v && /^\d+$/.test(v) ? Math.round(Number(v) / 1048576) : null);
+    const cur = mb(read('memory.current')), peak = mb(read('memory.peak')), max = mb(read('memory.max'));
+    if (cur !== null) {
+      text += `; the service ${cur} MB now${peak !== null ? `, ${peak} MB at most so far` : ''}${max !== null ? `, of ${max} MB allowed` : ''}`;
+    }
+  } catch (e) { /* not on systemd's cgroup v2 */ }
+  return text;
+}
+
+/**
+ * The timelapse: maybeCapture() after every dock slot, captureNow() for a test
+ * (SIGUSR2). One capture at a time; every outcome is logged, nothing thrown.
+ * deps: camera() -> the camera or null, now(), and for the tests exists(file),
+ * liveFrame(camera, workDir).
+ */
+function createTimelapse(cfg, deps) {
+  const exists = deps.exists || fs.existsSync;
+  const liveFrame = deps.liveFrame || ((camera, workDir) => captureLiveFrame(camera, cfg, workDir));
+  const tried = new Set();
+  let today = null, busy = false;
+
+  // The times tried today are also noted on disk, BEFORE each capture starts:
+  // if a capture ever brought the service down (killed for memory, say), the
+  // restarted service does not try it again - so it cannot loop, waking the
+  // battery camera and loading the Pi every minute or so.
+  const record = path.join(cfg.timelapse.dir, '.tried');
+  const triedOnDisk = (date) => {
+    try {
+      return fs.readFileSync(record, 'utf8').split('\n').map(s => s.trim()).filter(s => s.startsWith(`${date} `));
+    } catch (e) { return []; }
+  };
+  const noteTried = () => {
+    try {
+      fs.mkdirSync(cfg.timelapse.dir, { recursive: true, mode: 0o755 });
+      saveAtomically(Buffer.from([...tried].join('\n') + '\n'), record);
+    } catch (e) {
+      logError(`Timelapse: could not note the attempt in ${record} (${e.message}).`);
+    }
+  };
+
+  async function attempt(camera, workDir, dir, base) {
+    let liveError;
+    try {
+      const r = await liveFrame(camera, workDir);
+      const dest = path.join(dir, `${base}.jpg`);
+      saveAtomically(r.frame, dest);
+      return Object.assign({ kind: 'live', dest }, r);
+    } catch (e) {
+      liveError = e.message;
+    }
+    let snap;
+    try {
+      snap = await withTimeout(Promise.resolve().then(() => camera.getSnapshot()), 30 * 1000, 'the snapshot');
+    } catch (e) {
+      throw new Error(`live video failed (${liveError}); the snapshot failed too (${e.message})`);
+    }
+    if (!snap || !snap.length) throw new Error(`live video failed (${liveError}); the snapshot was empty`);
+    const dest = path.join(dir, `${base}_snapshot.jpg`);
+    saveAtomically(snap, dest);
+    return { kind: 'snapshot', dest, liveError };
+  }
+
+  async function captureOne(label, dir, base) {
+    if (busy) { log(`${label}: a timelapse capture is already running; skipped.`); return null; }
+    const camera = deps.camera();
+    if (!camera) {
+      logError(`${label}: no camera "${cfg.timelapse.cameraName}" on the account; skipped.`);
+      return null;
+    }
+    busy = true;
+    let workDir = null;
+    let inner = null;
+    try {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+      const free = freeMb(dir);
+      if (free !== null && free < cfg.timelapse.minDiskMb) {
+        logError(`${label}: only ${Math.round(free)} MB free on the SD card (it keeps ${cfg.timelapse.minDiskMb} MB free); nothing saved.`);
+        return null;
+      }
+      workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-timelapse-'));
+      const t0 = Date.now();
+      inner = attempt(camera, workDir, dir, base);
+      const r = await withTimeout(inner, deps.captureTimeoutMs || CAPTURE_TIMEOUT_MS, 'the capture');
+      const buf = fs.readFileSync(r.dest);
+      const size = jpegSize(buf);
+      const what = `${size ? `${size.width}x${size.height}` : 'size unknown'}, ${Math.round(buf.length / 1024)} KB`;
+      if (r.kind === 'live') {
+        const lowest = typeof r.lowestMemory === 'number'
+          ? `; the Pi had at least ${Math.round(r.lowestMemory)} MB available throughout` : '';
+        log(`${label}: saved ${path.basename(r.dest)} - ${what}, from live video (${r.liveSeconds.toFixed(0)} s; `
+          + `${r.missing} of ${r.received + r.missing} packets missing; keyframes checked: ${r.checked.join(', ')}); `
+          + `took ${((Date.now() - t0) / 1000).toFixed(0)} s. Memory: ${memoryReport()}${lowest}.`);
+      } else {
+        logError(`${label}: live video failed (${r.liveError}); saved the snapshot instead: ${path.basename(r.dest)} - ${what}.`);
+      }
+      return r;
+    } catch (e) {
+      logError(`${label}: ${e.message}. Memory: ${memoryReport()}.`);
+      return null;
+    } finally {
+      const cleanUp = () => {
+        if (workDir) { try { fs.rmSync(workDir, { recursive: true, force: true }); } catch (e) { /* gone */ } }
+        busy = false;
+      };
+      // If the overall deadline fired, the work is still winding down: free
+      // the slot only when it has, so two captures can never overlap.
+      if (inner) inner.then(cleanUp, cleanUp); else cleanUp();
+    }
+  }
+
+  async function maybeCapture() {
+    const now = deps.now();
+    const { date } = localDateParts(now, cfg);
+    if (date !== today) {
+      tried.clear();
+      today = date;
+      for (const k of triedOnDisk(date)) tried.add(k);
+      for (const job of timelapseDue(now, cfg, exists, new Set())) {
+        if (tried.has(`${job.date} ${job.time.label}`)) {
+          log(`Timelapse ${job.date} ${job.time.label}: already tried before the service restarted; `
+            + 'not tried again today.');
+        }
+      }
+    }
+    for (const job of timelapseDue(now, cfg, exists, tried)) {
+      tried.add(`${job.date} ${job.time.label}`);
+      noteTried();
+      await captureOne(`Timelapse ${job.date} ${job.time.label}`, cfg.timelapse.dir,
+        `${job.date}_${job.time.label.replace(':', '')}`);
+    }
+  }
+
+  async function captureNow() {
+    const p = localDateParts(deps.now(), cfg);
+    return captureOne('Timelapse test', path.join(cfg.timelapse.dir, 'tests'), `${p.date}_${p.hhmmss}`);
+  }
+
+  return { maybeCapture, captureNow, busy: () => busy };
+}
+
+/** "08:00, 12:00, 15:00" */
+function describeTimelapse(cfg = CONFIG) {
+  const tl = cfg.timelapse;
+  return `"${tl.cameraName}" at ${tl.times.map(t => t.label).join(', ')} -> ${tl.dir} `
+    + `(full resolution from ${tl.recordSeconds} s of live video; the snapshot if that fails; `
+    + `keeps ${tl.minMemoryMb} MB of memory for Pi-hole and ${tl.minDiskMb} MB of disk free)`;
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -760,6 +1311,9 @@ async function main() {
       : 'none'}`);
     log(`  token file   : ${CONFIG.tokenFile} (${readToken() ? 'present' : 'MISSING'})`);
     log(`  upload to    : ${CONFIG.uploadUrl}`);
+    log(`  timelapse    : ${timelapseOn(CONFIG)
+      ? `${describeTimelapse(CONFIG)}; ffmpeg ${fs.existsSync(CONFIG.timelapse.ffmpegPath) ? 'found' : 'MISSING'}`
+      : 'off'}`);
     return;
   }
 
@@ -787,6 +1341,33 @@ async function main() {
 
   log('Starting. Captures on the slot boundaries, from the window start.');
 
+  // The timelapse, if configured. A problem with it is logged and never stops
+  // the dock photos.
+  let timelapse = null;
+  if (timelapseOn(CONFIG)) {
+    let camera = null;
+    try {
+      camera = findCamera(await api.getCameras(), CONFIG.timelapse.cameraName);
+    } catch (e) {
+      logError(`Timelapse: ${e.message}`);
+    }
+    if (!camera) {
+      logError(`Timelapse: no camera matching "${CONFIG.timelapse.cameraName}" - no timelapse frames until this is fixed.`);
+    }
+    if (!fs.existsSync(CONFIG.timelapse.ffmpegPath)) {
+      logError(`Timelapse: ffmpeg is not installed at ${CONFIG.timelapse.ffmpegPath} - frames will be 640x360 snapshots `
+        + 'until it is (sudo apt install -y --no-install-recommends ffmpeg).');
+    }
+    timelapse = createTimelapse(CONFIG, { camera: () => camera, now: () => new Date() });
+    log(`Timelapse: ${describeTimelapse(CONFIG)}. Test it now with: sudo kill -USR2 ${process.pid}`);
+    // A test capture on request, inside the running service - so under the
+    // same systemd limits as the scheduled ones. Saved under tests/.
+    process.on('SIGUSR2', () => {
+      log('Timelapse test requested.');
+      timelapse.captureNow().catch((e) => logError('Timelapse test failed:', e.message));
+    });
+  }
+
   // setTimeout that reschedules itself, not setInterval: the next wake-up is
   // the next slot boundary, recomputed from the clock every time. A slow cycle
   // can never make captures pile up, and can never shift the timetable.
@@ -798,6 +1379,7 @@ async function main() {
     cycle: (role) => role === 'backup'
       ? runCycle(backup, backupCfg, new Date(), globalThis.fetch, 'backup')
       : runCycle(primary, CONFIG, new Date(), globalThis.fetch, 'primary'),
+    afterSlot: timelapse ? () => timelapse.maybeCapture() : undefined,
   });
   await tick();
 }
@@ -811,6 +1393,11 @@ module.exports = {
   MAX_SLEEP_SECONDS,
   findCamera, pickCameras, pickCamera, backupConfig, scheduleProblems, headerSafe, describeWindow,
   describeTimetable,
+  // Timelapse
+  parseTimeList, timelapseOn, localDateParts, timelapseFile, timelapseDue, withTimeout, runTool, keyframeTimes,
+  decodeKeyframe, SequenceCounter, jpegSize, captureLiveFrame, saveAtomically, freeMb, memoryReport,
+  createTimelapse, describeTimelapse, availableMb, watchMemory, CaptureStop,
+  TIMELAPSE_WINDOW_MINUTES, CAPTURE_TIMEOUT_MS, MAX_KEYFRAMES_TRIED, LIVE_MEMORY_NEED_MB,
 };
 
 if (require.main === module) {
