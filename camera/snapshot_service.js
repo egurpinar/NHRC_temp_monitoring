@@ -114,14 +114,18 @@ const CONFIG = {
 
   // TIMELAPSE - off unless TIMELAPSE_TIMES is set (e.g. "8:00,12:00,15:00").
   // At each of those local times, right after that slot's dock photo, one
-  // full-resolution frame from the camera's live video is saved ON THIS PI,
-  // never uploaded. See "Timelapse" below and camera/README.md.
+  // frame from the camera's live video - sharper than its 640x360 snapshots -
+  // is saved ON THIS PI, never uploaded. See "Timelapse" below and
+  // camera/README.md.
   timelapse: {
     times: parseTimeList(process.env.TIMELAPSE_TIMES),
     cameraName: process.env.TIMELAPSE_CAMERA_NAME || process.env.RING_BACKUP_CAMERA_NAME || '',
     dir: process.env.TIMELAPSE_DIR || '/opt/nhrc-camera/timelapse',
     ffmpegPath: process.env.FFMPEG_PATH || '/usr/bin/ffmpeg',
-    recordSeconds: Number(process.env.TIMELAPSE_RECORD_SECONDS || 8),
+    // Ring's live view starts at a low resolution and steps up as it runs. In
+    // daylight on the Pi (October 2026): 848x480 after 5 s, 1280x720 by 18 s;
+    // at night 1920x1080 within 8 s. The frame comes from the end.
+    recordSeconds: Number(process.env.TIMELAPSE_RECORD_SECONDS || 20),
     // The SD card always keeps this much free: nothing is saved below it.
     minDiskMb: Number(process.env.TIMELAPSE_MIN_DISK_MB || 500),
     // This Pi also serves the house's DNS, so it always keeps this much
@@ -824,10 +828,11 @@ function describeTimetable(cfg = CONFIG) {
 // Timelapse
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// For a construction timelapse: at each TIMELAPSE_TIMES, one FULL-RESOLUTION
-// frame (1920x1080) from the camera's live video - Ring snapshots are only
-// 640x360 - saved on this Pi as TIMELAPSE_DIR/YYYY-MM-DD_HHMM.jpg. Never
-// uploaded, never on the website.
+// For a construction timelapse: at each TIMELAPSE_TIMES, one frame from the
+// end of TIMELAPSE_RECORD_SECONDS of the camera's live video - 1280x720 in
+// daylight, up to 1920x1080 at night; Ring snapshots are only 640x360 - saved
+// on this Pi as TIMELAPSE_DIR/YYYY-MM-DD_HHMM.jpg. Never uploaded, never on
+// the website.
 //
 // THIS PI ALSO SERVES THE HOUSE'S DNS, so the capture is gentle and fails safe:
 // - It runs right after the slot's dock photo, never during one.
@@ -1466,7 +1471,7 @@ function createTimelapse(cfg, deps) {
 function describeTimelapse(cfg = CONFIG) {
   const tl = cfg.timelapse;
   return `"${tl.cameraName}" at ${tl.times.map(t => t.label).join(', ')} -> ${tl.dir} `
-    + `(full resolution from ${tl.recordSeconds} s of live video; the snapshot if that fails; `
+    + `(a frame from the end of ${tl.recordSeconds} s of live video; the snapshot if that fails; `
     + `keeps ${tl.minMemoryMb} MB of memory for Pi-hole and ${tl.minDiskMb} MB of disk free)`;
 }
 

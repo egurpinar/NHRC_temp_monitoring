@@ -1962,7 +1962,7 @@ if (HAVE_FFMPEG) {
     const box = timelapseSandbox();
     const now = box.nowLabel();
     const r = await box.run([], { TIMELAPSE_TIMES: now.label, TIMELAPSE_RECORD_SECONDS: '4' }, { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)|Timelapse.*: no camera/.test(o) });
-    assert.ok(/Timelapse: "Downstream Lot" at \d\d:\d\d -> \S+timelapse \(full resolution from 4 s of live video; the snapshot if that fails; keeps 40 MB of memory for Pi-hole and 500 MB of disk free\)\. Test it now with: sudo kill -USR2 \d+/.test(r.out), r.out);
+    assert.ok(/Timelapse: "Downstream Lot" at \d\d:\d\d -> \S+timelapse \(a frame from the end of 4 s of live video; the snapshot if that fails; keeps 40 MB of memory for Pi-hole and 500 MB of disk free\)\. Test it now with: sudo kill -USR2 \d+/.test(r.out), r.out);
     assert.ok(/saved \d{4}-\d\d-\d\d_\d{4}\.jpg - 1920x1080, \d+ KB, from live video/.test(r.out), r.out);
     assert.ok(/; the Pi had at least \d+ MB available throughout\./.test(r.out), 'the real /proc/meminfo was watched');
     const files = fs.readdirSync(box.tlOut).filter(f => f.endsWith('.jpg'));
@@ -2050,7 +2050,7 @@ if (HAVE_FFMPEG) {
     const box = timelapseSandbox();
     let r = await box.run(['--check'], { TIMELAPSE_TIMES: '8:00,12:00,15:00' });
     assert.strictEqual(r.code, 0, r.out);
-    assert.ok(/timelapse {4}: "Downstream Lot" at 08:00, 12:00, 15:00 -> \S+ \(full resolution from 8 s of live video; the snapshot if that fails; keeps 40 MB of memory for Pi-hole and 500 MB of disk free\); ffmpeg found/.test(r.out), r.out);
+    assert.ok(/timelapse {4}: "Downstream Lot" at 08:00, 12:00, 15:00 -> \S+ \(a frame from the end of 20 s of live video; the snapshot if that fails; keeps 40 MB of memory for Pi-hole and 500 MB of disk free\); ffmpeg found/.test(r.out), r.out);
     r = await box.run(['--check'], {});
     assert.ok(/timelapse {4}: off/.test(r.out), r.out);
     r = await box.run([], { TIMELAPSE_TIMES: '8:00,noon' });

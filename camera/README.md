@@ -422,15 +422,22 @@ a working service. The startup line in the journal states the timetable.
 ## Timelapse (optional)
 
 For the construction timelapse a member asked for: at set times (8:00, 12:00
-and 15:00), right after that slot's dock photo, one **1920x1080** frame from
-the Downstream Lot camera's **live video** is saved **on the Pi**, in
+and 15:00), right after that slot's dock photo, one frame from the Downstream
+Lot camera's **live video** is saved **on the Pi**, in
 `/opt/nhrc-camera/timelapse/` as `2026-10-08_0800.jpg` and so on. Ring
 snapshots are only 640x360, which is why it uses the live video.
+
+**Resolution: 1280x720 in daylight.** Ring's live view starts at a low
+resolution and steps up as it runs. On the Pi in October 2026, by day:
+848x480 after 5 seconds, 1280x720 by 18 seconds; at night 1920x1080 within 8
+seconds. So it records 20 seconds (`TIMELAPSE_RECORD_SECONDS`, at most 20)
+and keeps a frame from the end. A longer live view might reach 1920x1080 by
+day, at the cost of more of the battery camera's charge; 1280x720 was chosen.
 
 Nothing here is uploaded or shown on the website, and the frames must never be
 committed to this repository. Unlike the website's single photo, they **are
 kept**: copy them off, and delete them from the Pi once the timelapse is made.
-Each frame is a live view of about 30 seconds from a battery camera, three
+Each frame is a live view of about 45 seconds from a battery camera, three
 times a day: agree that with the camera's owner.
 
 Off unless `TIMELAPSE_TIMES` is set: without it, the service does exactly what
@@ -439,8 +446,8 @@ it did before.
 ### Pi-hole comes first
 
 This Pi also serves the house's DNS, and a live video is the heaviest thing it
-does. In the October 2026 test it kept the processor fully busy for about 30
-seconds, and ffmpeg used up to 86 MB. So:
+does. In the October 2026 tests it kept the processor fully busy for as long
+as the live view lasted, and ffmpeg used up to 86 MB. So:
 
 - **Memory is kept for Pi-hole.** The live video starts only with at least
   80 MB available (`TIMELAPSE_MIN_MEMORY_MB`, 40, plus 40 MB of headroom), and
@@ -532,10 +539,12 @@ journalctl -u nhrc-camera -n 5 --no-pager
 ```
 
 ```
-Timelapse test: saved 2026-10-08_040512.jpg - 1920x1080, 250 KB, from live video (28 s;
-1 of 770 packets missing; keyframes checked: 8.1 s clean); took 40 s. Memory: this program
-110 MB; the Pi had at least 120 MB available throughout.
+Timelapse test: saved 2026-10-07_140901.jpg - 1280x720, 179 KB, from live video (32 s;
+0 of 1680 packets missing; keyframes checked: 18.0 s clean); took 47 s. Memory: this
+program 77 MB; the Pi had at least 242 MB available throughout.
 ```
+
+(The Pi on 7 October 2026, in daylight.)
 
 What else the journal can say:
 
@@ -587,7 +596,7 @@ sudo systemctl restart nhrc-camera
 | `TIMELAPSE_TIMES` | (off) | Local times, e.g. `8:00,12:00,15:00`. Each is due for 15 minutes (one dock slot) |
 | `TIMELAPSE_CAMERA_NAME` | `RING_BACKUP_CAMERA_NAME` | The camera to film |
 | `TIMELAPSE_DIR` | `/opt/nhrc-camera/timelapse` | Must be inside `ReadWritePaths` |
-| `TIMELAPSE_RECORD_SECONDS` | 8 | Seconds of video recorded; 4-20 |
+| `TIMELAPSE_RECORD_SECONDS` | 20 | Seconds of video recorded, 4-20. The resolution rises as the live view runs (see above) |
 | `TIMELAPSE_MIN_MEMORY_MB` | 40 | Memory always kept for Pi-hole; at least 20 |
 | `TIMELAPSE_MIN_DISK_MB` | 500 | Disk always kept free; at least 100 |
 | `TIMELAPSE_SNAPSHOT_PAUSE_SECONDS` | 20 | After a failed live video, the wait before the fallback snapshot (tried twice, 30 s apart): a battery camera cannot take one while it is still streaming |
