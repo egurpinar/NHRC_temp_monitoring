@@ -124,7 +124,7 @@ const CONFIG = {
     ffmpegPath: process.env.FFMPEG_PATH || '/usr/bin/ffmpeg',
     // Ring's live view starts at a low resolution and steps up as it runs. In
     // daylight on the Pi (October 2026): 848x480 after 5 s, 1280x720 by 18 s;
-    // at night 1920x1080 within 8 s. The frame comes from the end.
+    // at night 1920x1080 within 8 s. The sharpest clean keyframe is kept.
     recordSeconds: Number(process.env.TIMELAPSE_RECORD_SECONDS || 20),
     // The SD card always keeps this much free: nothing is saved below it.
     minDiskMb: Number(process.env.TIMELAPSE_MIN_DISK_MB || 500),
@@ -828,11 +828,11 @@ function describeTimetable(cfg = CONFIG) {
 // Timelapse
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// For a construction timelapse: at each TIMELAPSE_TIMES, one frame from the
-// end of TIMELAPSE_RECORD_SECONDS of the camera's live video - 1280x720 in
-// daylight, up to 1920x1080 at night; Ring snapshots are only 640x360 - saved
-// on this Pi as TIMELAPSE_DIR/YYYY-MM-DD_HHMM.jpg. Never uploaded, never on
-// the website.
+// For a construction timelapse: at each TIMELAPSE_TIMES, the sharpest clean
+// keyframe of TIMELAPSE_RECORD_SECONDS of the camera's live video - 848x480
+// to 1280x720 in daylight, up to 1920x1080 at night; Ring snapshots are only
+// 640x360 - saved on this Pi as TIMELAPSE_DIR/YYYY-MM-DD_HHMM.jpg. Never
+// uploaded, never on the website.
 //
 // THIS PI ALSO SERVES THE HOUSE'S DNS, so the capture is gentle and fails safe:
 // - It runs right after the slot's dock photo, never during one.
@@ -990,12 +990,53 @@ function runTool(cmd, args, timeoutMs = FFMPEG_STEP_TIMEOUT_MS, halt = null) {
   });
 }
 
-/** Keyframe times (seconds) in a recorded clip. */
-async function keyframeTimes(ffprobe, clip, halt = null) {
+/** The keyframes of a recorded clip, in time order: [{ t (seconds), width, height }]. */
+async function keyframeInfo(ffprobe, clip, halt = null) {
   const r = await runTool(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-skip_frame', 'nokey',
-    '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'csv=p=0', clip], FFMPEG_STEP_TIMEOUT_MS, halt);
+    '-show_entries', 'frame=best_effort_timestamp_time,width,height', '-of', 'json', clip], FFMPEG_STEP_TIMEOUT_MS, halt);
   if (r.code !== 0) return [];
-  return r.stdout.split('\n').map(s => s.trim()).filter(s => s && s !== 'N/A').map(Number).filter(Number.isFinite);
+  let frames;
+  try { frames = JSON.parse(r.stdout).frames || []; } catch (e) { return []; }
+  return frames.map(f => ({ t: Number(f.best_effort_timestamp_time), width: Number(f.width) || 0, height: Number(f.height) || 0 }))
+    .filter(f => Number.isFinite(f.t)).sort((a, b) => a.t - b.t);
+}
+
+/**
+ * The keyframes to try, best first: the sharpest (most pixels), then the
+ * latest. Ring changes a live view's resolution as it goes - on the Pi one
+ * 20 s recording ended at 1280x720, the next at 848x480 (October 2026) - so
+ * the last keyframe is not always the sharpest.
+ */
+function keyframeOrder(frames, max = MAX_KEYFRAMES_TRIED) {
+  return frames.slice().sort((a, b) => (b.width * b.height - a.width * a.height) || (b.t - a.t)).slice(0, max);
+}
+
+/** How the resolution went: "640x360 from 0.0 s, 848x480 from 4.2 s". */
+function resolutionTimeline(frames) {
+  const parts = [];
+  let last = null;
+  for (const f of frames) {
+    const res = `${f.width}x${f.height}`;
+    if (res !== last) { parts.push(`${res} from ${f.t.toFixed(1)} s`); last = res; }
+  }
+  return parts.join(', ');
+}
+
+/**
+ * Decodes the clip's keyframes, best first (keyframeOrder), until one is
+ * clean. { frame, checked, resolutions }, frame null when none is.
+ */
+async function pickKeyframe(ffmpeg, ffprobe, clip, frame, halt = null) {
+  const keys = await keyframeInfo(ffprobe, clip, halt);
+  const checked = [];
+  if (halt) halt.check();
+  for (const k of keyframeOrder(keys)) {
+    const ok = await decodeKeyframe(ffmpeg, clip, k.t, frame, halt);
+    if (halt) halt.check();
+    checked.push(`${k.t.toFixed(1)} s ${k.width}x${k.height} ${ok ? 'clean' : 'damaged'}`);
+    if (ok) return { frame, checked, resolutions: resolutionTimeline(keys), keys: keys.length };
+  }
+  return { frame: null, checked, resolutions: resolutionTimeline(keys), keys: keys.length };
 }
 
 /**
@@ -1268,18 +1309,15 @@ async function recordAndPickInner(camera, tl, workDir, ffprobe, halt) {
       ? `nothing was recorded (${packets}; ${story()})`
       : `the live view gave no video (${story()})`);
   }
-  const keys = await keyframeTimes(ffprobe, clip, halt);
+  const pick = await pickKeyframe(tl.ffmpegPath, ffprobe, clip, path.join(workDir, 'frame.jpg'), halt);
   halt.check();
-  if (!keys.length) throw new Error(`the recording has no keyframe (${packets}; ${story()})`);
-  const frame = path.join(workDir, 'frame.jpg');
-  const checked = [];
-  for (const k of keys.slice(-MAX_KEYFRAMES_TRIED).reverse()) {
-    const ok = await decodeKeyframe(tl.ffmpegPath, clip, k, frame, halt);
-    halt.check();
-    checked.push(`${k.toFixed(1)} s ${ok ? 'clean' : 'damaged'}`);
-    if (ok) return { frame, liveSeconds, missing: seen.missing, received: seen.received, checked };
+  if (!pick.keys) throw new Error(`the recording has no keyframe (${packets}; ${story()})`);
+  if (pick.frame) {
+    return { frame: pick.frame, liveSeconds, missing: seen.missing, received: seen.received,
+      checked: pick.checked, resolutions: pick.resolutions };
   }
-  throw new Error(`no clean keyframe (${checked.join(', ')}; ${seen.missing} of ${seen.received + seen.missing} packets missing; ${story()})`);
+  throw new Error(`no clean keyframe (${pick.checked.join(', ')}; ${seen.missing} of ${seen.received + seen.missing} packets missing; `
+    + `resolution ${pick.resolutions}; ${story()})`);
 }
 
 /** Writes a file into place in one step, readable by the Pi's user for copying off. */
@@ -1416,7 +1454,8 @@ function createTimelapse(cfg, deps) {
       const what = `${size ? `${size.width}x${size.height}` : 'size unknown'}, ${Math.round(buf.length / 1024)} KB`;
       if (r.kind === 'live') {
         log(`${label}: saved ${path.basename(r.dest)} - ${what}, from live video (${r.liveSeconds.toFixed(0)} s; `
-          + `${r.missing} of ${r.received + r.missing} packets missing; keyframes checked: ${r.checked.join(', ')}); `
+          + `${r.missing} of ${r.received + r.missing} packets missing; `
+          + `${r.resolutions ? `resolution ${r.resolutions}; ` : ''}keyframes checked: ${r.checked.join(', ')}); `
           + `took ${((Date.now() - t0) / 1000).toFixed(0)} s. Memory: ${memoryReport()}${lowestNote(r)}.`);
       } else {
         logError(`${label}: live video failed (${r.liveError}); saved the snapshot instead: ${path.basename(r.dest)} - ${what}. `
@@ -1471,7 +1510,7 @@ function createTimelapse(cfg, deps) {
 function describeTimelapse(cfg = CONFIG) {
   const tl = cfg.timelapse;
   return `"${tl.cameraName}" at ${tl.times.map(t => t.label).join(', ')} -> ${tl.dir} `
-    + `(a frame from the end of ${tl.recordSeconds} s of live video; the snapshot if that fails; `
+    + `(the sharpest frame of ${tl.recordSeconds} s of live video; the snapshot if that fails; `
     + `keeps ${tl.minMemoryMb} MB of memory for Pi-hole and ${tl.minDiskMb} MB of disk free)`;
 }
 
@@ -1591,7 +1630,8 @@ module.exports = {
   findCamera, pickCameras, pickCamera, backupConfig, scheduleProblems, headerSafe, describeWindow,
   describeTimetable,
   // Timelapse
-  parseTimeList, timelapseOn, localDateParts, timelapseFile, timelapseDue, withTimeout, runTool, keyframeTimes,
+  parseTimeList, timelapseOn, localDateParts, timelapseFile, timelapseDue, withTimeout, runTool, keyframeInfo,
+  keyframeOrder, resolutionTimeline, pickKeyframe,
   decodeKeyframe, SequenceCounter, jpegSize, captureLiveFrame, saveAtomically, freeMb, memoryReport,
   createTimelapse, describeTimelapse, availableMb, watchMemory, CaptureStop, ffmpegSummary, redact, briefly, ringNotes,
   TIMELAPSE_WINDOW_MINUTES, CAPTURE_TIMEOUT_MS, MAX_KEYFRAMES_TRIED, LIVE_MEMORY_NEED_MB,

@@ -427,12 +427,16 @@ Lot camera's **live video** is saved **on the Pi**, in
 `/opt/nhrc-camera/timelapse/` as `2026-10-08_0800.jpg` and so on. Ring
 snapshots are only 640x360, which is why it uses the live video.
 
-**Resolution: 1280x720 in daylight.** Ring's live view starts at a low
+**Resolution: 848x480 to 1280x720 in daylight.** Ring's live view starts at a low
 resolution and steps up as it runs. On the Pi in October 2026, by day:
 848x480 after 5 seconds, 1280x720 by 18 seconds; at night 1920x1080 within 8
-seconds. So it records 20 seconds (`TIMELAPSE_RECORD_SECONDS`, at most 20)
-and keeps a frame from the end. A longer live view might reach 1920x1080 by
-day, at the cost of more of the battery camera's charge; 1280x720 was chosen.
+seconds. But it does not only go up: one 20-second recording by day ended at
+1280x720, the next at 848x480. So it records 20 seconds
+(`TIMELAPSE_RECORD_SECONDS`, at most 20) and keeps the sharpest clean
+keyframe, and the journal says how the resolution went (`resolution 640x360
+from 0.0 s, 848x480 from 4.1 s, ...`). A longer live view might reach
+1920x1080 by day, at the cost of more of the battery camera's charge; 20
+seconds was chosen.
 
 Nothing here is uploaded or shown on the website, and the frames must never be
 committed to this repository. Unlike the website's single photo, they **are
@@ -750,7 +754,7 @@ club's Pi only for making the construction timelapse, deleted once it is made.*
 node camera/test_snapshot_service.js
 ```
 
-141 tests covering config validation, the timezone-aware windows, the capture
+143 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including
 both daylight-saving days and day-long outages), camera selection, atomic token
 persistence and file permissions, upload auth and retry behaviour, the Worker
@@ -762,7 +766,8 @@ stubbed, so no credentials are needed.
 The timelapse tests use real ffmpeg (skipped where it is not installed): a
 1920x1080 H.264 stream sent over RTP through a relay that can lose packets,
 recorded with the arguments ring-client-api builds. They cover damaged
-keyframes, a stream whose description (SPS/PPS) never arrives or comes only
+keyframes, a resolution that drops mid-recording (the sharper keyframe is
+kept), a stream whose description (SPS/PPS) never arrives or comes only
 when a keyframe is asked for, Ring ending the live view early (and what the
 journal then says), a live view that never answers or starts too late, memory
 running short while recording and while decoding (stand-ins for

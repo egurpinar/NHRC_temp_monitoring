@@ -1454,6 +1454,19 @@ test('the README\'s Pi steps match the code, and its printf lines write exactly 
   }
 });
 
+test('the sharpest keyframe is tried first, then the latest; the resolution timeline reads plainly', () => {
+  // As on the Pi: Ring stepped up to 1280x720, then dropped back to 848x480.
+  const frames = [{ t: 0.1, width: 640, height: 360 }, { t: 2.2, width: 848, height: 480 }, { t: 10.2, width: 1280, height: 720 },
+    { t: 12.3, width: 1280, height: 720 }, { t: 16.4, width: 848, height: 480 }, { t: 18.3, width: 848, height: 480 }];
+  assert.deepStrictEqual(S.keyframeOrder(frames).map(f => f.t), [12.3, 10.2, 18.3, 16.4], 'at most four: 720p latest first, then 480p');
+  assert.deepStrictEqual(S.keyframeOrder(frames, 2).map(f => f.t), [12.3, 10.2]);
+  assert.strictEqual(S.resolutionTimeline(frames), '640x360 from 0.1 s, 848x480 from 2.2 s, 1280x720 from 10.2 s, 848x480 from 16.4 s');
+  const same = [{ t: 2, width: 1920, height: 1080 }, { t: 4, width: 1920, height: 1080 }];
+  assert.deepStrictEqual(S.keyframeOrder(same).map(f => f.t), [4, 2], 'one resolution: the latest first, as before');
+  assert.strictEqual(S.resolutionTimeline(same), '1920x1080 from 2.0 s');
+  assert.deepStrictEqual(S.keyframeOrder([]), []);
+});
+
 // ── Memory for Pi-hole, and no restart loops ──
 
 test('the memory available is read from /proc/meminfo', () => {
@@ -1664,12 +1677,34 @@ if (HAVE_FFMPEG) {
     assert.strictEqual(probe.stdout.trim(), '1920,1080');
     assert.strictEqual(r.missing, 0);
     assert.ok(r.received > 100, String(r.received));
-    assert.ok(/clean$/.test(r.checked[0]), r.checked.join(', '));
+    assert.ok(/^[\d.]+ s 1920x1080 clean$/.test(r.checked[0]), r.checked.join(', '));
+    assert.ok(/^1920x1080 from [\d.]+ s$/.test(r.resolutions), r.resolutions);
     await new Promise(res => setTimeout(res, 300));
     const a = cam.calls[0].args.join(' ');
     assert.ok(/-f sdp -buffer_size 8388608 -i pipe: -an -vcodec copy -t 8 -f matroska -y \S+clip\.mkv$/.test(a), a);
     assert.strictEqual(process.env.FFREPORT, undefined, 'the ffmpeg report setting is put back');
     assert.strictEqual(ffmpegChildren(), 0, 'no ffmpeg left running');
+    fs.rmSync(work, { recursive: true, force: true });
+  });
+
+  test('the resolution drops during the recording: the sharper keyframe is kept, and the log says how it went', async () => {
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-work-'));
+    const { spawnSync } = require('child_process');
+    // Two seconds at 1280x720, then two at 848x480, each keyframe with its own SPS/PPS - as Ring does.
+    const seg = (size, out) => spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `testsrc2=size=${size}:rate=15`, '-t', '2',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-g', '15', '-bf', '0', '-f', 'h264', '-y', out]);
+    seg('1280x720', path.join(work, 'a.h264'));
+    seg('848x480', path.join(work, 'b.h264'));
+    fs.writeFileSync(path.join(work, 'c.h264'), Buffer.concat([fs.readFileSync(path.join(work, 'a.h264')), fs.readFileSync(path.join(work, 'b.h264'))]));
+    const clip = path.join(work, 'clip.mkv');
+    assert.strictEqual(spawnSync('ffmpeg', ['-v', 'error', '-f', 'h264', '-framerate', '15', '-i', path.join(work, 'c.h264'),
+      '-c', 'copy', '-f', 'matroska', '-y', clip]).status, 0);
+    const r = await S.pickKeyframe('/usr/bin/ffmpeg', '/usr/bin/ffprobe', clip, path.join(work, 'frame.jpg'));
+    assert.ok(r.frame, r.checked.join(', '));
+    const probe = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', r.frame], { encoding: 'utf8' });
+    assert.strictEqual(probe.stdout.trim(), '1280,720', 'the 1280x720 keyframe, not the later 848x480 ones');
+    assert.ok(/^1280x720 from [\d.]+ s, 848x480 from [\d.]+ s$/.test(r.resolutions), r.resolutions);
+    assert.ok(/^[\d.]+ s 1280x720 clean$/.test(r.checked[0]), r.checked.join(', '));
     fs.rmSync(work, { recursive: true, force: true });
   });
 
@@ -1962,7 +1997,7 @@ if (HAVE_FFMPEG) {
     const box = timelapseSandbox();
     const now = box.nowLabel();
     const r = await box.run([], { TIMELAPSE_TIMES: now.label, TIMELAPSE_RECORD_SECONDS: '4' }, { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)|Timelapse.*: no camera/.test(o) });
-    assert.ok(/Timelapse: "Downstream Lot" at \d\d:\d\d -> \S+timelapse \(a frame from the end of 4 s of live video; the snapshot if that fails; keeps 40 MB of memory for Pi-hole and 500 MB of disk free\)\. Test it now with: sudo kill -USR2 \d+/.test(r.out), r.out);
+    assert.ok(/Timelapse: "Downstream Lot" at \d\d:\d\d -> \S+timelapse \(the sharpest frame of 4 s of live video; the snapshot if that fails; keeps 40 MB of memory for Pi-hole and 500 MB of disk free\)\. Test it now with: sudo kill -USR2 \d+/.test(r.out), r.out);
     assert.ok(/saved \d{4}-\d\d-\d\d_\d{4}\.jpg - 1920x1080, \d+ KB, from live video/.test(r.out), r.out);
     assert.ok(/; the Pi had at least \d+ MB available throughout\./.test(r.out), 'the real /proc/meminfo was watched');
     const files = fs.readdirSync(box.tlOut).filter(f => f.endsWith('.jpg'));
@@ -2050,7 +2085,7 @@ if (HAVE_FFMPEG) {
     const box = timelapseSandbox();
     let r = await box.run(['--check'], { TIMELAPSE_TIMES: '8:00,12:00,15:00' });
     assert.strictEqual(r.code, 0, r.out);
-    assert.ok(/timelapse {4}: "Downstream Lot" at 08:00, 12:00, 15:00 -> \S+ \(a frame from the end of 20 s of live video; the snapshot if that fails; keeps 40 MB of memory for Pi-hole and 500 MB of disk free\); ffmpeg found/.test(r.out), r.out);
+    assert.ok(/timelapse {4}: "Downstream Lot" at 08:00, 12:00, 15:00 -> \S+ \(the sharpest frame of 20 s of live video; the snapshot if that fails; keeps 40 MB of memory for Pi-hole and 500 MB of disk free\); ffmpeg found/.test(r.out), r.out);
     r = await box.run(['--check'], {});
     assert.ok(/timelapse {4}: off/.test(r.out), r.out);
     r = await box.run([], { TIMELAPSE_TIMES: '8:00,noon' });
