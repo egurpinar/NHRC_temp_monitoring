@@ -9,26 +9,87 @@
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png"/>
 <link rel="shortcut icon" href="favicon.ico"/>
 <link rel="icon" type="image/svg+xml" href="NHRC_logo.svg"/>
+<meta name="color-scheme" content="dark light"/>
+<meta name="theme-color" content="#0d1f3c"/>
+<script id="theme-init">
+// Light or dark, decided before anything is drawn - no flash of the wrong one:
+// the visitor's own choice from the button if they made one, otherwise their
+// device's setting. A separate script on purpose: the daily email reuses the
+// main script below and must not run this.
+(function () {
+  var t = null;
+  try { t = localStorage.getItem('nhrc-theme'); } catch (e) { /* storage blocked */ }
+  if (t !== 'light' && t !== 'dark') {
+    t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js"></script>
 <style>
+/* COLOURS. Two themes, one set of names. The names come from the original
+   dark design, which is the dark theme (a few colours brightened for
+   readability, noted below): --navy is the page, --navy2 the cards, --navy3
+   the tiles inside them, --white the main text and --gold the accent. The light theme gives the same names light-page values, each
+   checked for contrast (WCAG AA: 4.5:1 for text, 3:1 for lines and icons) -
+   see scripts/test_site_theme.js. */
 :root{
   --navy:#0d1f3c;--navy2:#162d52;--navy3:#1e3d6e;
   --gold:#f0b429;--gold2:#ffd166;
   --green:#2e7d4f;--blue:#1a6fb5;
-  --white:#f4f7fb;--muted:#7a93b4;
+  /* --muted was #7a93b4 and --bad #f07070 until October 2026: 3.4:1 and 3.5:1
+     on the cards' inner tiles, short of the 4.5:1 that small text needs. */
+  --white:#f4f7fb;--muted:#9baec7;
   --border:rgba(240,180,41,0.2);
   --danger:#e03e3e;--warn:#e07b20;
+  /* Status text, and the dots that go with it */
+  --ok:#5cc98a;--caution:#ffd166;--bad:#f49494;--warn-text:#f0a450;
+  --ok-dot:#5cc98a;--caution-dot:#ffd166;--bad-dot:#f07070;--warn-dot:#f0a450;
+  /* Faint lines and fills between things: rgba(var(--ink), alpha) */
+  --ink:255,255,255;
+  /* The email box's edge was rgba(255,255,255,.15): 1.6:1, too faint to see the box by. */
+  --rb-border:rgba(122,147,180,.3);--input-border:rgba(255,255,255,.4);--code-bg:rgba(0,0,0,.3);
+  --glow-blue:rgba(26,111,181,.15);--glow-green:rgba(46,125,79,.1);
+  --focus:#ffd166;
+  /* Charts (read by the script) */
+  --chart-line:#f0b429;--chart-fill:240,180,41;--chart-tick:#b0c4de;--chart-grid:rgba(255,255,255,0.04);
+  --chart-observed-fill:rgba(240,180,41,0.08);--chart-forecast:#5ba4e0;--chart-forecast-fill:rgba(91,164,224,0.04);
+  --chart-point-border:#162d52;--chart-tip-bg:#162d52;--chart-tip-border:rgba(91,164,224,0.4);
+  --chart-tip-title:#5ba4e0;--chart-tip-body:#f4f7fb;
+  /* The 10-12 ft lines were 2.5:1 to 1.7:1 against the card (3:1 needed). */
+  --flood-8:rgba(240,180,41,0.6);--flood-9:rgba(240,140,20,0.7);--flood-10:#f0782a;
+  --flood-11:#ff8080;--flood-12:#ff4d4d;
+  color-scheme:dark;
   --fserif:'Helvetica Neue',Helvetica,Arial,sans-serif;
   --fsans:'Helvetica Neue',Helvetica,Arial,sans-serif;
+}
+:root[data-theme="light"]{
+  --navy:#f2f5f9;--navy2:#ffffff;--navy3:#edf1f6;
+  --gold:#8a5c00;--gold2:#7a5200;
+  --white:#0d1f3c;--muted:#4a5d78;
+  --border:rgba(138,92,0,.28);
+  --danger:#b42318;--warn:#93460a;
+  --ok:#1a6539;--caution:#7a5200;--bad:#b42318;--warn-text:#93460a;
+  --ok-dot:#1e7a46;--caution-dot:#a87400;--bad-dot:#c42b2b;--warn-dot:#c05a00;
+  --ink:13,31,60;
+  --rb-border:rgba(74,93,120,.45);--input-border:#76869c;--code-bg:rgba(13,31,60,.07);
+  --glow-blue:rgba(26,111,181,.07);--glow-green:rgba(46,125,79,.05);
+  --focus:#1a5c96;
+  --chart-line:#a87400;--chart-fill:240,180,41;--chart-tick:#4a5d78;--chart-grid:rgba(13,31,60,0.08);
+  --chart-observed-fill:rgba(240,180,41,0.14);--chart-forecast:#1a6fb5;--chart-forecast-fill:rgba(26,111,181,0.06);
+  --chart-point-border:#ffffff;--chart-tip-bg:#ffffff;--chart-tip-border:rgba(26,111,181,0.45);
+  --chart-tip-title:#1a5c96;--chart-tip-body:#0d1f3c;
+  --flood-8:#a87400;--flood-9:#c05a00;--flood-10:#b8430b;--flood-11:#c42b2b;--flood-12:#8b1010;
+  color-scheme:light;
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--navy);color:var(--white);font-family:var(--fsans);min-height:100vh;font-size:16px;}
 body::before{content:'';position:fixed;inset:0;z-index:0;
-  background:radial-gradient(ellipse 70% 50% at 50% 0%,rgba(26,111,181,.15),transparent 60%),
-             radial-gradient(ellipse 50% 40% at 90% 100%,rgba(46,125,79,.1),transparent 60%);
+  background:radial-gradient(ellipse 70% 50% at 50% 0%,var(--glow-blue),transparent 60%),
+             radial-gradient(ellipse 50% 40% at 90% 100%,var(--glow-green),transparent 60%);
   pointer-events:none;}
 #app{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:28px 16px 60px;}
 
@@ -41,6 +102,26 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .header-text .location{font-size:0.73rem;color:var(--muted);margin-top:2px;font-style:italic;}
 .header-motto{margin-left:auto;text-align:right;font-family:var(--fserif);font-style:italic;font-size:.75rem;color:var(--muted);line-height:1.5;display:none;}
 @media(min-width:600px){.header-motto{display:block;}}
+/* LIGHT / DARK SWITCH - top right of the header: the sun in dark mode (to
+   switch to light), the moon in light mode. 44px: an easy target for a thumb.
+   On a phone the club's name always sits below the logo, so the switch has the
+   logo's row to itself and the name keeps the full width; on wider screens the
+   header keeps clear of it. */
+.header{position:relative;}
+@media(min-width:600px){.header{padding-right:56px;}}
+@media(max-width:599px){.header-text{flex-basis:100%;}}
+.theme-toggle{position:absolute;top:0;right:0;width:44px;height:44px;border-radius:50%;padding:0;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  background:var(--navy2);color:var(--gold);border:1px solid var(--border);transition:border-color .15s;}
+.theme-toggle:hover{border-color:var(--gold);}
+.theme-toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px;}
+.theme-toggle svg{width:22px;height:22px;display:block;}
+.theme-toggle .icon-moon{display:none;}
+:root[data-theme="light"] .theme-toggle .icon-sun{display:none;}
+:root[data-theme="light"] .theme-toggle .icon-moon{display:block;}
+@media (prefers-reduced-motion: reduce){.theme-toggle{transition:none;}}
+/* The email box's hint text: the browser's own grey was 2.3:1 on the dark box. */
+#bd-email::placeholder{color:var(--muted);opacity:1;}
 
 /* LOADING / ERROR */
 #loading{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:260px;gap:16px;}
@@ -49,7 +130,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 #error-view{display:none;background:rgba(224,62,62,.08);border:1px solid rgba(224,62,62,.3);border-radius:14px;padding:28px;text-align:center;}
 #error-view h2{font-family:var(--fserif);color:var(--danger);margin-bottom:10px;}
 #error-view p{font-size:.85rem;color:var(--muted);line-height:1.7;}
-#error-view code{background:rgba(0,0,0,.3);color:var(--gold);padding:2px 6px;border-radius:4px;font-size:.8em;}
+#error-view code{background:var(--code-bg);color:var(--gold);padding:2px 6px;border-radius:4px;font-size:.8em;}
 
 /* DASHBOARD */
 #dashboard{display:none;animation:fadeUp .4s ease both;}
@@ -57,8 +138,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
 /* WARN BANNERS */
 .warn-banner{display:flex;align-items:flex-start;gap:10px;border-radius:12px;padding:12px 14px;margin-bottom:14px;font-size:.82rem;line-height:1.5;}
-.warn-banner.level-warn{background:rgba(224,123,32,.12);border:1px solid rgba(224,123,32,.35);color:#f0a450;}
-.warn-banner.level-danger{background:rgba(224,62,62,.1);border:1px solid rgba(224,62,62,.35);color:#f07070;}
+.warn-banner.level-warn{background:rgba(224,123,32,.12);border:1px solid rgba(224,123,32,.35);color:var(--warn-text);}
+.warn-banner.level-danger{background:rgba(224,62,62,.1);border:1px solid rgba(224,62,62,.35);color:var(--bad);}
 .warn-banner strong{display:block;margin-bottom:2px;}
 
 /* DASH TOP */
@@ -66,8 +147,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .dash-top h2{font-family:var(--fserif);font-size:1rem;color:var(--white);font-weight:400;}
 .dash-top .dash-sub{font-size:.72rem;color:var(--muted);margin-top:2px;}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;font-size:.72rem;font-weight:600;}
-.pill-ok{background:rgba(46,125,79,.18);color:#5cc98a;border:1px solid rgba(46,125,79,.3);}
-.pill-warn{background:rgba(224,123,32,.18);color:#f0a450;border:1px solid rgba(224,123,32,.3);}
+.pill-ok{background:rgba(46,125,79,.18);color:var(--ok);border:1px solid rgba(46,125,79,.3);}
+.pill-warn{background:rgba(224,123,32,.18);color:var(--warn-text);border:1px solid rgba(224,123,32,.3);}
 .pill-dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 2s infinite;}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .dash-top-btns{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
@@ -93,8 +174,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .summary-big .wicon{font-size:1.15rem;margin-right:5px;}
 .summary-line{font-size:.74rem;color:var(--muted);margin-top:4px;line-height:1.45;}
 .summary-alert{font-size:.72rem;font-weight:600;margin-top:6px;line-height:1.4;}
-.summary-alert.warn{color:#ffd166;}
-.summary-alert.danger{color:#f07070;}
+.summary-alert.warn{color:var(--caution);}
+.summary-alert.danger{color:var(--bad);}
 .summary-fog{margin-top:8px;font-size:.72rem;color:var(--muted);display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
 .summary-fog:empty{display:none;}
 .summary-river-status{margin-top:8px;}
@@ -114,50 +195,50 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .rowing-status-card{background:var(--navy2);border:1px solid var(--border);border-radius:16px;padding:22px 20px;margin-bottom:16px;}
 .section-label{font-family:var(--fsans);font-size:.63rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);margin-bottom:10px;}
 .rule-banner{display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;margin-bottom:18px;font-family:var(--fsans);font-size:.84rem;font-weight:600;}
-.rule-banner.green{background:rgba(46,125,79,.15);color:#5cc98a;border:1px solid rgba(46,125,79,.3);}
-.rule-banner.yellow{background:rgba(255,209,102,.15);color:#ffd166;border:1px solid rgba(255,209,102,.5);}
-.rule-banner.red{background:rgba(224,62,62,.12);color:#f07070;border:1px solid rgba(224,62,62,.3);}
-.rule-banner.neutral{background:rgba(255,255,255,.04);color:var(--muted);border:1px solid rgba(255,255,255,.1);}
-.allowed-note{margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,.06);color:var(--white);}
+.rule-banner.green{background:rgba(46,125,79,.15);color:var(--ok);border:1px solid rgba(46,125,79,.3);}
+.rule-banner.yellow{background:rgba(255,209,102,.15);color:var(--caution);border:1px solid rgba(255,209,102,.5);}
+.rule-banner.red{background:rgba(224,62,62,.12);color:var(--bad);border:1px solid rgba(224,62,62,.3);}
+.rule-banner.neutral{background:rgba(var(--ink),.04);color:var(--muted);border:1px solid rgba(var(--ink),.1);}
+.allowed-note{margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid rgba(var(--ink),.06);color:var(--white);}
 .fog-outlook:empty{display:none;}
-.fog-outlook{margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.06);}
+.fog-outlook{margin-top:14px;padding-top:12px;border-top:1px solid rgba(var(--ink),.06);}
 .fog-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:5px;}
 .fog-pill{display:inline-block;font-size:.64rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;padding:3px 9px;border-radius:10px;white-space:nowrap;}
-.fog-pill.likely{background:rgba(224,123,32,.18);color:#f0a450;border:1px solid rgba(224,123,32,.45);}
-.fog-pill.possible{background:rgba(255,209,102,.15);color:#ffd166;border:1px solid rgba(255,209,102,.45);}
-.fog-pill.low,.fog-pill.unknown{background:rgba(255,255,255,.05);color:var(--muted);border:1px solid rgba(255,255,255,.14);}
+.fog-pill.likely{background:rgba(224,123,32,.18);color:var(--warn-text);border:1px solid rgba(224,123,32,.45);}
+.fog-pill.possible{background:rgba(255,209,102,.15);color:var(--caution);border:1px solid rgba(255,209,102,.45);}
+.fog-pill.low,.fog-pill.unknown{background:rgba(var(--ink),.05);color:var(--muted);border:1px solid rgba(var(--ink),.14);}
 .fog-title{font-size:.82rem;font-weight:600;color:var(--white);}
 .fog-detail{font-size:.75rem;color:var(--muted);line-height:1.55;}
 .fog-rule{font-size:.75rem;color:var(--white);font-weight:600;margin-top:6px;}
 .tiers-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
 @media(max-width:560px){.tiers-grid{grid-template-columns:1fr;}}
-.tier-card{background:var(--navy3);border-radius:10px;padding:12px 14px;border:1px solid rgba(255,255,255,.06);}
+.tier-card{background:var(--navy3);border-radius:10px;padding:12px 14px;border:1px solid rgba(var(--ink),.06);}
 .tier-card h4{font-family:var(--fsans);font-size:.65rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--gold);margin-bottom:9px;}
-.boat-row{display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.05);font-family:var(--fsans);font-size:.76rem;}
+.boat-row{display:flex;align-items:center;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(var(--ink),.05);font-family:var(--fsans);font-size:.76rem;}
 .boat-row:last-child{border-bottom:none;}
 .boat-status{font-size:.66rem;font-weight:700;padding:2px 7px;border-radius:999px;}
-.bs-go{background:rgba(46,125,79,.2);color:#5cc98a;}
-.bs-caution{background:rgba(240,180,41,.15);color:#ffd166;border:1px solid rgba(240,180,41,.3);}
+.bs-go{background:rgba(46,125,79,.2);color:var(--ok);}
+.bs-caution{background:rgba(240,180,41,.15);color:var(--caution);border:1px solid rgba(240,180,41,.3);}
 .river-card{background:var(--navy2);border:1px solid var(--border);border-radius:14px;padding:18px 16px;margin-bottom:16px;}
 .river-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:14px;}
 .river-level-val{font-family:var(--fserif);font-size:2rem;font-weight:700;color:var(--white);line-height:1;}
 .river-level-unit{font-family:var(--fsans);font-size:.8rem;color:var(--muted);margin-left:3px;}
 .river-status-pill{font-size:.75rem;font-weight:700;padding:5px 12px;border-radius:999px;}
-.rp-normal{background:rgba(46,125,79,.18);color:#5cc98a;border:1px solid rgba(46,125,79,.3);}
-.rp-caution{background:rgba(240,180,41,.15);color:#ffd166;border:1px solid rgba(240,180,41,.3);}
-.rp-danger{background:rgba(224,62,62,.15);color:#f07070;border:1px solid rgba(224,62,62,.3);}
+.rp-normal{background:rgba(46,125,79,.18);color:var(--ok);border:1px solid rgba(46,125,79,.3);}
+.rp-caution{background:rgba(240,180,41,.15);color:var(--caution);border:1px solid rgba(240,180,41,.3);}
+.rp-danger{background:rgba(224,62,62,.15);color:var(--bad);border:1px solid rgba(224,62,62,.3);}
 .river-chart-wrap{height:180px;position:relative;}
 @media(min-width:600px){.river-chart-wrap{height:220px;}}
-.flood-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.06);}
+.flood-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(var(--ink),.06);}
 .flood-cell{background:var(--navy3);border-radius:8px;padding:8px 4px;text-align:center;}
 .flood-cell .fc-name{font-size:.7rem;color:var(--muted);margin-bottom:5px;font-weight:600;}
 .flood-cell .fc-dot{width:14px;height:14px;border-radius:50%;margin:0 auto;}
-.fc-go{background:#5cc98a;}
-.fc-caution{background:#ffd166;}
-.fc-no{background:#f07070;}
+.fc-go{background:var(--ok-dot);}
+.fc-caution{background:var(--caution-dot);}
+.fc-no{background:var(--bad-dot);}
 .river-unavailable{font-size:.82rem;color:var(--muted);padding:20px 0;text-align:center;}
-.bs-no{background:rgba(224,62,62,.15);color:#f07070;}
-.note-text{font-family:var(--fsans);font-size:.72rem;color:var(--muted);margin-top:12px;line-height:1.6;padding-top:10px;border-top:1px solid rgba(255,255,255,.06);}
+.bs-no{background:rgba(224,62,62,.15);color:var(--bad);}
+.note-text{font-family:var(--fsans);font-size:.72rem;color:var(--muted);margin-top:12px;line-height:1.6;padding-top:10px;border-top:1px solid rgba(var(--ink),.06);}
 
 /* MINI CARDS */
 .cards-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
@@ -171,27 +252,27 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .chart-card-header{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px;}
 .chart-card-header h3{font-family:var(--fserif);font-size:.9rem;font-weight:700;color:var(--white);}
 .range-btns{display:flex;gap:5px;flex-wrap:wrap;}
-.rb{padding:5px 10px;border-radius:7px;border:1px solid rgba(122,147,180,.3);background:transparent;font-family:var(--fsans);font-size:.72rem;cursor:pointer;color:var(--muted);transition:all .15s;white-space:nowrap;}
+.rb{padding:5px 10px;border-radius:7px;border:1px solid var(--rb-border);background:transparent;font-family:var(--fsans);font-size:.72rem;cursor:pointer;color:var(--muted);transition:all .15s;white-space:nowrap;}
 .rb:hover{border-color:var(--gold);color:var(--gold);}
 .rb.active{background:rgba(240,180,41,.15);color:var(--gold);border-color:rgba(240,180,41,.4);}
-.rb-csv{background:rgba(46,125,79,.15)!important;color:#5cc98a!important;border-color:rgba(46,125,79,.4)!important;}
+.rb-csv{background:rgba(46,125,79,.15)!important;color:var(--ok)!important;border-color:rgba(46,125,79,.4)!important;}
 .rb-csv:hover{background:rgba(46,125,79,.25)!important;}
 
 /* INFO BAR */
-.data-info-bar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;padding:8px 12px;background:rgba(255,255,255,.04);border-radius:8px;margin-bottom:10px;font-family:var(--fsans);font-size:.7rem;color:var(--muted);}
-.dot-live{width:6px;height:6px;border-radius:50%;background:#5cc98a;display:inline-block;animation:pulse 2s infinite;}
-.dot-warn{width:6px;height:6px;border-radius:50%;background:#f0a450;display:inline-block;}
+.data-info-bar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px;padding:8px 12px;background:rgba(var(--ink),.04);border-radius:8px;margin-bottom:10px;font-family:var(--fsans);font-size:.7rem;color:var(--muted);}
+.dot-live{width:6px;height:6px;border-radius:50%;background:var(--ok-dot);display:inline-block;animation:pulse 2s infinite;}
+.dot-warn{width:6px;height:6px;border-radius:50%;background:var(--warn-dot);display:inline-block;}
 
 .weather-card{background:var(--navy2);border:1px solid var(--border);border-radius:14px;padding:18px 16px;margin-bottom:16px;}
-.weather-main-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid rgba(255,255,255,0.07);}
+.weather-main-row{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid rgba(var(--ink),0.07);}
 .weather-icon-block{display:flex;align-items:center;gap:14px;}
 .weather-icon{font-size:38px;line-height:1;}
 .air-temp-val{font-family:var(--fserif);font-size:2.2rem;font-weight:700;color:var(--white);line-height:1;}
 .weather-cond{font-size:.78rem;color:var(--muted);margin-top:3px;}
 .weather-feels{font-size:.72rem;color:var(--muted);margin-top:2px;}
 .weather-alert{border-radius:8px;padding:8px 12px;font-size:.75rem;line-height:1.4;}
-.weather-alert.warn{background:rgba(224,123,32,.1);border:1px solid rgba(224,123,32,.35);color:#f0a450;}
-.weather-alert.danger{background:rgba(224,62,62,.1);border:1px solid rgba(224,62,62,.35);color:#f07070;}
+.weather-alert.warn{background:rgba(224,123,32,.1);border:1px solid rgba(224,123,32,.35);color:var(--warn-text);}
+.weather-alert.danger{background:rgba(224,62,62,.1);border:1px solid rgba(224,62,62,.35);color:var(--bad);}
 .weather-stats-row{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
 .wstat{background:var(--navy3);border-radius:8px;padding:10px 12px;}
 .wstat .wk{font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:4px;}
@@ -232,6 +313,11 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       Pulsus Remorum Fit Spiritus Fortis<br/>
       <span style="font-size:.68rem;color:var(--muted);">The Stroke of the Oar Strengthens the Spirit</span>
     </div>
+    <!-- Light / dark. Its name says what it does next; the script keeps it so. -->
+    <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to light mode" title="Switch to light mode">
+      <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77M2 12h2.5M19.5 12H22M4.93 19.07l1.77-1.77M17.3 6.7l1.77-1.77"/></svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
   </div>
 
   <div id="loading">
@@ -260,20 +346,20 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     <!-- Fog: shown only when fog is likely at dawn or an NWS fog advisory is in
          effect. Awareness only - fog never changes which boats are allowed. -->
     <div id="warn-fog" class="warn-banner level-warn" style="display:none;">
-      <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <span style="width:10px;height:10px;border-radius:50%;background:var(--warn-dot);flex-shrink:0;margin-top:3px;display:inline-block;"></span>
       <div><strong id="warn-fog-title">Fog likely at dawn</strong><span id="warn-fog-text"></span></div>
     </div>
 
     <div id="warn-gap" class="warn-banner level-danger" style="display:none;">
-      <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <span style="width:10px;height:10px;border-radius:50%;background:var(--bad-dot);flex-shrink:0;margin-top:3px;display:inline-block;"></span>
       <div><strong>Sensor data gap detected</strong><span id="warn-gap-text"></span></div>
     </div>
     <div id="warn-stale" class="warn-banner level-warn" style="display:none;">
-      <span style="width:10px;height:10px;border-radius:50%;background:#f0a450;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <span style="width:10px;height:10px;border-radius:50%;background:var(--warn-dot);flex-shrink:0;margin-top:3px;display:inline-block;"></span>
       <div><strong>Data may be slightly delayed</strong><span id="warn-stale-text"></span></div>
     </div>
     <div id="warn-offline" class="warn-banner level-danger" style="display:none;">
-      <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <span style="width:10px;height:10px;border-radius:50%;background:var(--bad-dot);flex-shrink:0;margin-top:3px;display:inline-block;"></span>
       <div><strong>Sensor may be offline</strong> No new readings received in over 3 hours. The temperature shown is the last known reading. Check the sensor battery and hub connection at the boathouse.</div>
     </div>
 
@@ -332,7 +418,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       <!-- Text is set from the constants in the script below, so the stated
            schedule cannot drift out of step with the camera again. -->
       <div class="section-label" id="camera-title">Boathouse Camera</div>
-      <div style="position:relative;border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);line-height:0;background:var(--navy3);">
+      <div style="position:relative;border-radius:10px;overflow:hidden;border:1px solid rgba(var(--ink),.08);line-height:0;background:var(--navy3);">
         <img id="camera-img" alt="Latest view of the river from the boathouse"
              style="width:100%;height:auto;display:block;"/>
         <!-- On the photo itself, so nobody mistakes the backup camera's view
@@ -385,9 +471,9 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       <div style="position:relative;">
         <div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>
         <div id="scrubber-line" style="display:none;position:absolute;top:0;bottom:0;width:1px;background:rgba(240,180,41,0.6);pointer-events:none;"></div>
-        <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:#162d52;border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
-          <div id="scrubber-temp" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:1rem;color:#f0b429;font-weight:700;"></div>
-          <div id="scrubber-time" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:0.7rem;color:#7a93b4;margin-top:2px;"></div>
+        <div id="scrubber-tip" style="display:none;position:absolute;top:8px;background:var(--navy2);border:1px solid rgba(240,180,41,0.4);border-radius:8px;padding:6px 10px;pointer-events:none;white-space:nowrap;z-index:10;">
+          <div id="scrubber-temp" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:1rem;color:var(--gold);font-weight:700;"></div>
+          <div id="scrubber-time" style="font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;font-size:0.7rem;color:var(--muted);margin-top:2px;"></div>
         </div>
       </div>
     </div>
@@ -412,7 +498,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
     <!-- RIVER NAVIGATION & SAFETY MAP -->
     <div class="river-card">
       <div class="section-label">River Navigation &amp; Safety Map</div>
-      <div style="border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,.08);line-height:0;">
+      <div style="border-radius:10px;overflow:hidden;border:1px solid rgba(var(--ink),.08);line-height:0;">
         <iframe src="https://www.google.com/maps/d/u/0/embed?mid=1dNR4qbbp2I8oIZK2ZMMKCNkksLDCXIk&amp;ehbc=2E312F&amp;noprof=1" style="width:100%;height:480px;border:0;display:block;" loading="lazy" allowfullscreen title="NHRC River Navigation and Safety Map"></iframe>
       </div>
       <div class="note-text">Custom map of navigation hazards, launch points, and safety markers on Lake Housatonic. <a href="https://www.google.com/maps/d/u/0/viewer?mid=1dNR4qbbp2I8oIZK2ZMMKCNkksLDCXIk" target="_blank" style="color:var(--muted);text-decoration:underline;">Open full map in Google Maps</a></div>
@@ -436,10 +522,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         <label for="bd-email" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;">Email address</label>
         <input type="email" name="email" id="bd-email" required
                placeholder="you@example.com"
-               style="flex:1 1 220px;min-width:0;padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:var(--navy3);color:var(--white);font-size:.85rem;font-family:inherit;"/>
+               style="flex:1 1 220px;min-width:0;padding:10px 12px;border-radius:8px;border:1px solid var(--input-border);background:var(--navy3);color:var(--white);font-size:.85rem;font-family:inherit;"/>
         <input type="hidden" name="tag" value="daily-conditions"/>
         <input type="submit" value="Subscribe"
-               style="background:var(--gold);color:var(--navy);font-weight:700;font-size:.8rem;padding:10px 18px;border-radius:8px;border:0;cursor:pointer;font-family:inherit;"/>
+               style="background:#f0b429;color:#0d1f3c;font-weight:700;font-size:.8rem;padding:10px 18px;border-radius:8px;border:0;cursor:pointer;font-family:inherit;"/>
       </form>
       <div class="note-text">
         One email each morning, March 15 – November 15. Unsubscribe anytime from any email.
@@ -463,7 +549,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   </div>
 
   <!-- Outside #dashboard, so it shows even when the data could not load. -->
-  <div id="site-disclaimer" style="font-size:.74rem;color:var(--muted);line-height:1.6;padding:12px 16px;border:1px solid rgba(255,255,255,.08);border-radius:12px;margin-bottom:16px;">
+  <div id="site-disclaimer" style="font-size:.74rem;color:var(--muted);line-height:1.6;padding:12px 16px;border:1px solid rgba(var(--ink),.08);border-radius:12px;margin-bottom:16px;">
     <strong style="color:var(--white);">Disclaimer:</strong> The information on this page is provided for guidance only
     and may be inaccurate or out of date. Please verify the water temperature against the thermometer on the side of
     the dock at the boathouse, and judge conditions yourself, before making rowing decisions.
@@ -477,10 +563,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       </a>
       <div style="font-size:0.65rem;color:var(--muted);">NHRC Water Temperature Monitor &nbsp;·&nbsp; v1.7.0 &nbsp;·&nbsp; Beta</div>
     </div>
-    <div style="border-top:1px solid rgba(255,255,255,0.06);padding-top:14px;">
+    <div style="border-top:1px solid rgba(var(--ink),0.06);padding-top:14px;">
       <details style="font-size:0.68rem;color:var(--muted);line-height:1.7;">
         <summary style="cursor:pointer;letter-spacing:0.04em;text-transform:uppercase;font-size:0.63rem;color:var(--muted);margin-bottom:4px;">MIT License &nbsp;·&nbsp; Copyright &copy; 2026 New Haven Rowing Club</summary>
-        <div style="margin-top:10px;padding:12px 14px;background:rgba(255,255,255,0.03);border-radius:8px;border:1px solid rgba(255,255,255,0.06);white-space:pre-wrap;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+        <div style="margin-top:10px;padding:12px 14px;background:rgba(var(--ink),0.03);border-radius:8px;border:1px solid rgba(var(--ink),0.06);white-space:pre-wrap;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
@@ -747,7 +833,110 @@ const state = {
 };
 let chart = null;
 
+// ─────────────────────────────────────────────────────────────────────────
+// LIGHT / DARK
+// ─────────────────────────────────────────────────────────────────────────
+// The theme is set before the page is drawn, by the small script in <head>.
+// The colours themselves live in the CSS (:root, :root[data-theme="light"]);
+// the charts read theirs from there as well.
+const THEME_KEY = 'nhrc-theme';
+
+function currentTheme() {
+  const root = document.documentElement;
+  return root && root.getAttribute && root.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+
+/** A CSS custom property of the current theme; the fallback is the dark theme's. */
+function cssVar(name, fallback) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  } catch (e) { return fallback; }
+}
+
+/** The charts' colours in the current theme. */
+function chartColors() {
+  return {
+    line: cssVar('--chart-line', '#f0b429'),
+    fill: cssVar('--chart-fill', '240,180,41'),
+    tick: cssVar('--chart-tick', '#b0c4de'),
+    grid: cssVar('--chart-grid', 'rgba(255,255,255,0.04)'),
+    observedFill: cssVar('--chart-observed-fill', 'rgba(240,180,41,0.08)'),
+    forecast: cssVar('--chart-forecast', '#5ba4e0'),
+    forecastFill: cssVar('--chart-forecast-fill', 'rgba(91,164,224,0.04)'),
+    pointBorder: cssVar('--chart-point-border', '#162d52'),
+    tipBg: cssVar('--chart-tip-bg', '#162d52'),
+    tipBorder: cssVar('--chart-tip-border', 'rgba(91,164,224,0.4)'),
+    tipTitle: cssVar('--chart-tip-title', '#5ba4e0'),
+    tipBody: cssVar('--chart-tip-body', '#f4f7fb'),
+    flood8: cssVar('--flood-8', 'rgba(240,180,41,0.6)'),
+    flood9: cssVar('--flood-9', 'rgba(240,140,20,0.7)'),
+    flood10: cssVar('--flood-10', '#f0782a'),
+    flood11: cssVar('--flood-11', '#ff8080'),
+    flood12: cssVar('--flood-12', '#ff4d4d'),
+  };
+}
+
+/** Recolours both charts after a switch; the river chart is simply redrawn. */
+function restyleCharts() {
+  if (chart) {
+    try {
+      const c = chartColors(), ds = chart.data.datasets[0];
+      ds.borderColor = ds.pointBackgroundColor = ds.pointBorderColor = c.line;
+      ds.backgroundColor = tempChartFill(document.getElementById('temp-chart').getContext('2d'), c);
+      for (const axis of ['x', 'y']) {
+        chart.options.scales[axis].ticks.color = c.tick;
+        chart.options.scales[axis].grid.color = c.grid;
+      }
+      chart.update('none');
+    } catch (e) { console.warn('temperature chart restyle failed:', e); }
+  }
+  if (riverChart) initRiverChart(state.riverObserved, state.riverForecast, state.riverLevel);
+}
+
+/** The switch's name says what it does next: "Switch to light mode". */
+function updateThemeToggle() {
+  const btn = document.getElementById('theme-toggle');
+  if (btn) {
+    const label = `Switch to ${currentTheme() === 'dark' ? 'light' : 'dark'} mode`;
+    btn.setAttribute('aria-label', label);
+    btn.setAttribute('title', label);
+  }
+  // The colour of the browser's own bar on phones.
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', cssVar('--navy', '#0d1f3c'));
+}
+
+function applyTheme(theme, remember) {
+  if (document.documentElement) document.documentElement.setAttribute('data-theme', theme);
+  if (remember) {
+    try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* storage blocked: this visit only */ }
+  }
+  updateThemeToggle();
+  restyleCharts();
+}
+
+function initThemeToggle() {
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.addEventListener('click', () => applyTheme(currentTheme() === 'dark' ? 'light' : 'dark', true));
+  updateThemeToggle();
+  // Until the visitor chooses, the page follows the device - also when the
+  // device switches while the page is open (a phone that changes at sunset).
+  try {
+    const mq = window.matchMedia('(prefers-color-scheme: light)');
+    const follow = (e) => {
+      let chosen = null;
+      try { chosen = localStorage.getItem(THEME_KEY); } catch (err) { /* storage blocked */ }
+      if (chosen !== 'light' && chosen !== 'dark') applyTheme(e.matches ? 'light' : 'dark', false);
+    };
+    if (mq.addEventListener) mq.addEventListener('change', follow);
+    else if (mq.addListener) mq.addListener(follow);
+  } catch (e) { /* no matchMedia: the theme stays as it was set */ }
+}
+
 window.addEventListener('DOMContentLoaded', () => {
+  // A problem with the switch must never keep the readings from loading.
+  try { initThemeToggle(); } catch (e) { console.warn('light/dark switch unavailable:', e); }
   refreshAll();
   setInterval(loadData, 60_000);
   setInterval(loadWeather, 600_000);
@@ -1000,7 +1189,7 @@ function renderDashboard(tempC, raw) {
   const heroEl = document.getElementById('current-f');
   if (heroEl) {
     const ageHrs = (Date.now() - fetchedAt.getTime()) / 3600000;
-    heroEl.style.color = (ageHrs > 3) ? '#f07070' : 'var(--white)';
+    heroEl.style.color = (ageHrs > 3) ? 'var(--bad)' : 'var(--white)';
   }
   // The heading now covers water, weather and river, which update on their own
   // clocks - so say which reading this time belongs to.
@@ -1141,33 +1330,40 @@ function getSubset() {
   return hist.filter(h => h.ts >= cutoff);
 }
 
+/** The fill under the temperature line: the theme's colour fading to nothing. */
+function tempChartFill(ctx, c) {
+  const grad = ctx.createLinearGradient(0,0,0,230);
+  grad.addColorStop(0,`rgba(${c.fill},0.2)`);
+  grad.addColorStop(1,`rgba(${c.fill},0.0)`);
+  return grad;
+}
+
 function initChart() {
   const ctx  = document.getElementById('temp-chart').getContext('2d');
-  const grad = ctx.createLinearGradient(0,0,0,230);
-  grad.addColorStop(0,'rgba(240,180,41,0.2)');
-  grad.addColorStop(1,'rgba(240,180,41,0.0)');
+  const c    = chartColors();
+  const grad = tempChartFill(ctx, c);
   chart = new Chart(ctx, {
     type:'line',
     data:{ datasets:[{
-      data:[], borderColor:'#f0b429', backgroundColor:grad,
+      data:[], borderColor:c.line, backgroundColor:grad,
       borderWidth:1.5, fill:true, tension:0.3,
       // Explicit, though it is also the Chart.js default: a null reading must
       // leave a blank, never a line bridging data we do not have.
       spanGaps:false,
       pointRadius: 1.5,        // small, consistent marker on every data point
       pointHoverRadius: 3,     // slightly larger on hover
-      pointBackgroundColor:'#f0b429',
-      pointBorderColor:'#f0b429',
+      pointBackgroundColor:c.line,
+      pointBorderColor:c.line,
       pointBorderWidth: 0,
     }]},
     options:{
       responsive:true, maintainAspectRatio:false, animation:false,
       scales:{
         x:{ type:'time', time:{displayFormats:{hour:'ha',day:'MMM D',week:'MMM D',month:'MMM YY'}},
-            ticks:{color:'#b0c4de',maxTicksLimit:7,font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
-            grid:{color:'rgba(255,255,255,0.04)'}},
-        y:{ ticks:{color:'#b0c4de',callback:v=>Number.isInteger(v)?v+'°F':v.toFixed(1)+'°F',font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
-            grid:{color:'rgba(255,255,255,0.04)'}}
+            ticks:{color:c.tick,maxTicksLimit:7,font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
+            grid:{color:c.grid}},
+        y:{ ticks:{color:c.tick,callback:v=>Number.isInteger(v)?v+'°F':v.toFixed(1)+'°F',font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
+            grid:{color:c.grid}}
       },
       plugins:{
         legend:{display:false},
@@ -1611,13 +1807,13 @@ function renderRowingStatus(tempF) {
       return `Winter Rowing restrictions remain in effect. <strong>Fewer than 3 mornings (5–11 AM ET) have readings</strong> in the recent period due to data gaps. Cannot confirm the 3-morning streak. Check the thermometer at the dock.`;
     }
     const daysList = (eff.confirmedDays && eff.confirmedDays.length)
-      ? `<div style="margin-top:10px;border-top:1px solid rgba(255,255,255,0.08);padding-top:10px;">
+      ? `<div style="margin-top:10px;border-top:1px solid rgba(var(--ink),0.08);padding-top:10px;">
            <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.07em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Qualifying mornings — 5–11 AM ET, peak reading rounded to 0.5°F</div>
            ${eff.confirmedDays.map(d =>
-             `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.05);font-size:0.78rem;">
+             `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(var(--ink),0.05);font-size:0.78rem;">
                <span style="color:var(--white);">${d.date}</span>
                <span style="color:var(--muted);">${d.time} ${d.tz}</span>
-               <span style="color:#5cc98a;font-weight:700;">${d.tempF.toFixed(1)}°F</span>
+               <span style="color:var(--ok);font-weight:700;">${d.tempF.toFixed(1)}°F</span>
              </div>`
            ).join('')}
          </div>`
@@ -1708,13 +1904,13 @@ function renderRowingStatus(tempF) {
     const near = { normal: '60°F', coldWater: '50°F', fourOar: '40°F', winter: '40°F' }[ZONE_OVERRIDE];
     notes += `<div style="margin-top:10px;padding:10px 14px;background:rgba(240,180,41,0.08);
       border:1px solid rgba(240,180,41,0.3);border-radius:8px;font-size:.78rem;line-height:1.6;">
-      <strong style="color:#ffd166;">&#9888; Safety Committee Notice</strong><br>
+      <strong style="color:var(--caution);">&#9888; Safety Committee Notice</strong><br>
       The Safety Committee has set <strong>${zoneName}</strong> manually, to account for sensor
       sensitivity: the water temperature has been lingering near the ${near} threshold, and this
       reflects real-world conditions at the boathouse. River-level restrictions still apply.
     </div>`;
   } else if (typeof ZONE_OVERRIDE !== 'undefined' && ZONE_OVERRIDE !== null) {
-    notes += `<div style="margin-top:10px;font-size:.72rem;color:#f07070;">Manual zone setting
+    notes += `<div style="margin-top:10px;font-size:.72rem;color:var(--bad);">Manual zone setting
       &ldquo;${String(ZONE_OVERRIDE).replace(/[<>&"]/g, '')}&rdquo; is not recognised, so the automatic
       rules are shown. Valid settings: normal, coldWater, fourOar, winter.</div>`;
   }
@@ -1722,7 +1918,7 @@ function renderRowingStatus(tempF) {
 
   // Append river level context note if data available
   const lvlNote = state.riverLevel !== null
-    ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:.72rem;color:var(--muted);">
+    ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(var(--ink),0.06);font-size:.72rem;color:var(--muted);">
          River level: <strong style="color:var(--white);">${state.riverLevel.toFixed(1)} ft</strong>${state.riverLevelIsEstimate
            ? ' (forecast estimate)' : state.riverObservedStale ? ' (last gauge reading, not current)' : ''}
          &nbsp;·&nbsp; Flood restrictions applied above where more restrictive than temperature rules.
@@ -1851,7 +2047,7 @@ async function loadWeatherNow() {
   } catch(e) {
     renderSummaryWeather(null);
     document.getElementById('weather-content').innerHTML =
-      '<div style="font-size:.78rem;color:#f07070;padding:8px 0;">Could not load weather data.</div>';
+      '<div style="font-size:.78rem;color:var(--bad);padding:8px 0;">Could not load weather data.</div>';
   }
 }
 
@@ -1896,9 +2092,9 @@ function renderSummaryRiver() {
     const obs = state.riverObserved || [];
     const lastObsTs = obs.length ? obs[obs.length - 1].ts : null;
     const source = state.riverLevelIsEstimate
-      ? '<div class="summary-line" style="color:#ffd166;">Forecast estimate &mdash; gauge not reporting</div>'
+      ? '<div class="summary-line" style="color:var(--caution);">Forecast estimate &mdash; gauge not reporting</div>'
       : (state.riverObservedStale && lastObsTs !== null)
-        ? `<div class="summary-line" style="color:#ffd166;">Gauge reading from ${new Date(lastObsTs).toLocaleString('en-US',
+        ? `<div class="summary-line" style="color:var(--caution);">Gauge reading from ${new Date(lastObsTs).toLocaleString('en-US',
             { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })} &mdash; not current</div>`
         : '<div class="summary-line">Stevenson Dam gauge</div>';
     setSummary('sum-river', `
@@ -2468,9 +2664,9 @@ function renderRiverCard() {
   }
 
   const staleBanner = state.riverObservedStale ? `<div class="warn-banner level-danger" style="margin-bottom:14px;">
-      <span style="width:10px;height:10px;border-radius:50%;background:#f07070;flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <span style="width:10px;height:10px;border-radius:50%;background:var(--bad-dot);flex-shrink:0;margin-top:3px;display:inline-block;"></span>
       <div><strong>River gauge data is stale</strong> ${riverStaleNote(state.riverObservedAgeMs,
-        obs.length ? obs[obs.length - 1].ts : null, state.riverLevelIsEstimate)} Verify at <a href="https://water.noaa.gov/gauges/stvc3" target="_blank" style="color:#f07070;text-decoration:underline;">water.noaa.gov/gauges/stvc3</a> before relying on it.</div>
+        obs.length ? obs[obs.length - 1].ts : null, state.riverLevelIsEstimate)} Verify at <a href="https://water.noaa.gov/gauges/stvc3" target="_blank" style="color:var(--bad);text-decoration:underline;">water.noaa.gov/gauges/stvc3</a> before relying on it.</div>
     </div>` : '';
 
   el.innerHTML = `
@@ -2478,7 +2674,7 @@ function renderRiverCard() {
     <div class="river-header">
       <div>
         <div style="font-size:.7rem;color:var(--muted);margin-bottom:4px;">Current stage (Stevenson Dam)</div>
-        <span class="river-level-val">${levelStr}</span><span class="river-level-unit">ft</span>${state.riverLevelIsEstimate ? '<span style="font-size:.65rem;color:#ffd166;margin-left:8px;font-weight:600;">(forecast est.)</span>' : ''}
+        <span class="river-level-val">${levelStr}</span><span class="river-level-unit">ft</span>${state.riverLevelIsEstimate ? '<span style="font-size:.65rem;color:var(--caution);margin-left:8px;font-weight:600;">(forecast est.)</span>' : ''}
         <div style="font-size:.7rem;color:var(--muted);margin-top:3px;">${updatedLabel}: ${updatedAt} ${updatedTz}</div>
       </div>
       ${summary ? `<span class="river-status-pill ${summary.cls}">${summary.text}</span>` : ''}
@@ -2537,12 +2733,13 @@ function drawRiverChart(obs, fc, currentLevel) {
   if (riverChart) { riverChart.destroy(); riverChart = null; }
 
   // Threshold lines at 8, 9, 10, 11, 12 ft
+  const c = chartColors();
   const THRESHOLDS = [
-    { ft: 8,  color: 'rgba(240,180,41,0.6)',  label: '8 ft' },
-    { ft: 9,  color: 'rgba(240,140,20,0.7)',  label: '9 ft' },
-    { ft: 10, color: 'rgba(224,100,20,0.7)',  label: '10 ft' },
-    { ft: 11, color: 'rgba(224,62,62,0.7)',   label: '11 ft' },
-    { ft: 12, color: 'rgba(180,20,20,0.85)',  label: '12 ft' },
+    { ft: 8,  color: c.flood8,  label: '8 ft' },
+    { ft: 9,  color: c.flood9,  label: '9 ft' },
+    { ft: 10, color: c.flood10, label: '10 ft' },
+    { ft: 11, color: c.flood11, label: '11 ft' },
+    { ft: 12, color: c.flood12, label: '12 ft' },
   ];
 
   // Zoom window driven by the range buttons (24h / 3 days / 7 days / 30 days),
@@ -2587,8 +2784,8 @@ function drawRiverChart(obs, fc, currentLevel) {
         {
           label: 'Observed',
           data: obsData,
-          borderColor: '#f0b429',
-          backgroundColor: 'rgba(240,180,41,0.08)',
+          borderColor: c.line,
+          backgroundColor: c.observedFill,
           borderWidth: 2,
           pointRadius: 0,
           fill: true,
@@ -2598,8 +2795,8 @@ function drawRiverChart(obs, fc, currentLevel) {
         {
           label: 'Forecast (NOAA)',
           data: fcData,
-          borderColor: '#5ba4e0',
-          backgroundColor: 'rgba(91,164,224,0.04)',
+          borderColor: c.forecast,
+          backgroundColor: c.forecastFill,
           borderWidth: 2,
           borderDash: [6, 4],
           // Visible markers on each individual forecast point (unlike Observed,
@@ -2607,8 +2804,8 @@ function drawRiverChart(obs, fc, currentLevel) {
           // one-by-one against NOAA's own gauge page.
           pointRadius: 3,
           pointHoverRadius: 5,
-          pointBackgroundColor: '#5ba4e0',
-          pointBorderColor: '#162d52',
+          pointBackgroundColor: c.forecast,
+          pointBorderColor: c.pointBorder,
           pointBorderWidth: 1,
           fill: true,
           tension: 0.3,
@@ -2635,14 +2832,14 @@ function drawRiverChart(obs, fc, currentLevel) {
                   displayFormats: { hour: 'ha MMM D', day: 'MMM D', week: 'MMM D' } },
           min: xMin,
           max: xMax,
-          ticks: { color: '#b0c4de', maxTicksLimit: 6,
+          ticks: { color: c.tick, maxTicksLimit: 6,
                    font: { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 12 } },
-          grid: { color: 'rgba(255,255,255,0.04)' },
+          grid: { color: c.grid },
         },
         y: {
-          ticks: { color: '#b0c4de', callback: v => v.toFixed(1) + ' ft',
+          ticks: { color: c.tick, callback: v => v.toFixed(1) + ' ft',
                    font: { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 12 } },
-          grid: { color: 'rgba(255,255,255,0.04)' },
+          grid: { color: c.grid },
           title: { display: false },
         }
       },
@@ -2650,7 +2847,7 @@ function drawRiverChart(obs, fc, currentLevel) {
         legend: {
           display: true,
           labels: {
-            color: '#b0c4de',
+            color: c.tick,
             font: { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 12 },
             filter: item => !item.text.includes('ft'), // hide threshold line legend entries
             usePointStyle: true,
@@ -2658,11 +2855,11 @@ function drawRiverChart(obs, fc, currentLevel) {
           }
         },
         tooltip: {
-          backgroundColor: '#162d52',
-          borderColor: 'rgba(91,164,224,0.4)',
+          backgroundColor: c.tipBg,
+          borderColor: c.tipBorder,
           borderWidth: 1,
-          titleColor: '#5ba4e0',
-          bodyColor: '#f4f7fb',
+          titleColor: c.tipTitle,
+          bodyColor: c.tipBody,
           titleFont: { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 13 },
           bodyFont:  { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 13 },
           callbacks: {

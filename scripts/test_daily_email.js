@@ -2377,7 +2377,7 @@ test('summary water tile: shows the reading, and still turns red when the sensor
   ({ site, els } = loadSite(now));
   site.state.allHistory = historyAtTemp(66);
   site.renderDashboard(tempC, makeRaw(66.3, new Date(now - 4 * 3600000)));
-  assert.strictEqual(els['current-f'].style.color, '#f07070', 'stale water reading must still be flagged red');
+  assert.strictEqual(els['current-f'].style.color, 'var(--bad)', 'stale water reading must still be flagged red (the theme\'s red)');
 });
 
 test('summary weather tile: filled by the real weather loader - temp, condition, wind', async () => {
@@ -2605,7 +2605,7 @@ test('a failed refresh keeps the last reading on screen - it used to replace the
   await site.loadData();
   assert.strictEqual(els['warn-offline'].style.display, 'flex', 'offline banner after 3 h, even with no connection');
   assert.strictEqual(els['status-text'].textContent, 'Sensor offline');
-  assert.strictEqual(els['current-f'].style.color, '#f07070');
+  assert.strictEqual(els['current-f'].style.color, 'var(--bad)');
   // Back online with a fresh reading: everything recovers.
   up = true; reading = t - 5 * 60000;
   await site.loadData();

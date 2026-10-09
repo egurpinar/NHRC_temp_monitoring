@@ -20,6 +20,7 @@ status using the site's own functions and compares against the email output.
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
 | `test_daily_email.js` | Test suite (222 tests): the email, and the website's script run against a fake network and clock |
+| `test_site_theme.js` | The website's light and dark themes (20 tests): contrast of every colour where it is used (WCAG AA), dark kept as the original design, the switch, the device default, the charts |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
 | `refresh_checkout.sh` | After the wait, pulls the readings made while the job slept |
@@ -136,6 +137,7 @@ node scripts/daily_email.js --json    # print computed values
 node scripts/daily_email.js --send    # send (respects the season gate)
 node scripts/daily_email.js --send --force   # send even if off-season
 node scripts/test_daily_email.js      # run the tests
+node scripts/test_site_theme.js       # the website's light/dark themes
 ```
 
 ## Setup steps (must be done by a human)
