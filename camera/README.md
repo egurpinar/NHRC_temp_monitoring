@@ -421,31 +421,60 @@ a working service. The startup line in the journal states the timetable.
 
 ## Timelapse (optional)
 
-For the construction timelapse a member asked for: at set times (8:00, 12:00
-and 15:00), right after that slot's dock photo, one frame from the Downstream
-Lot camera's **live video** is saved **on the Pi**, in
-`/opt/nhrc-camera/timelapse/` as `2026-10-08_0800.jpg` and so on. Ring
-snapshots are only 640x360, which is why it uses the live video.
+For the construction timelapse a member asked for: frames from the Downstream
+Lot camera's **live video**, saved **on the Pi**. Ring snapshots are only
+640x360, which is why it uses the live video. Two timetables:
 
-**Resolution: 848x480 to 1280x720 in daylight.** Ring's live view starts at a low
-resolution and steps up as it runs. On the Pi in October 2026, by day:
-848x480 after 5 seconds, 1280x720 by 18 seconds; at night 1920x1080 within 8
-seconds. But it does not only go up: one 20-second recording by day ended at
-1280x720, the next at 848x480. So it records 20 seconds
-(`TIMELAPSE_RECORD_SECONDS`, at most 20) and keeps the sharpest clean
-keyframe, and the journal says how the resolution went (`resolution 640x360
-from 0.0 s, 848x480 from 4.1 s, ...`). A longer live view might reach
-1920x1080 by day, at the cost of more of the battery camera's charge; 20
-seconds was chosen.
+- **Every 5 minutes from sunrise to sunset** (`TIMELAPSE_EVERY_MINUTES=5`):
+  about 110 frames a day in December, 180 in June. Sunrise and sunset are
+  worked out on the Pi for the boathouse, each day (the US Naval
+  Observatory's times, to the minute). One folder a day:
+  `/opt/nhrc-camera/timelapse/2026-10-14/2026-10-14_0705.jpg` and so on.
+- **Or a few set times** (`TIMELAPSE_TIMES=8:00,12:00,15:00`, the first
+  version, October 2026), each right after that slot's dock photo, saved as
+  `/opt/nhrc-camera/timelapse/2026-10-08_0800.jpg`.
+
+**Resolution: 1920x1080 when Ring sends it - not guaranteed by day.** Ring's
+live view starts at a low resolution and steps up as it runs, and sometimes
+back down. On the Pi in October 2026: by day 848x480 after 5 seconds and
+1280x720 by 18 seconds, but never more within 20 seconds; at night 1920x1080
+within 8 seconds. So each frame records up to 45 seconds of live video
+(`TIMELAPSE_RECORD_SECONDS`) and **stops as soon as a 1920x1080 keyframe has
+arrived whole** (`TIMELAPSE_TARGET_HEIGHT`, 1080) - often within seconds at
+night - then keeps the sharpest clean keyframe. Ring decides the resolution
+(the light, and the camera's Wi-Fi); nothing on the Pi can raise it. Every
+frame's journal line says how the resolution went and whether 1080 was
+reached, and after sunset one line sums up the day by size.
 
 Nothing here is uploaded or shown on the website, and the frames must never be
 committed to this repository. Unlike the website's single photo, they **are
 kept**: copy them off, and delete them from the Pi once the timelapse is made.
-Each frame is a live view of about 45 seconds from a battery camera, three
-times a day: agree that with the camera's owner.
 
-Off unless `TIMELAPSE_TIMES` is set: without it, the service does exactly what
-it did before.
+Off unless `TIMELAPSE_EVERY_MINUTES` or `TIMELAPSE_TIMES` is set: without
+them, the service does exactly what it did before.
+
+### What every 5 minutes costs
+
+Agree these with the camera's owner before turning it on:
+
+- **The battery camera's charge.** Each frame is a live view of 10-50 seconds:
+  up to about 2 hours of streaming a day. The solar panel may not keep up on
+  grey days. The timelapse **pauses below 40% battery and resumes at 55%**
+  (`TIMELAPSE_MIN_BATTERY`), so the camera always keeps charge for the
+  website's backup; every frame's line in the journal gives the level, to
+  watch the trend (see "Battery" below).
+- **The camera's owner sees it.** Each live view may show in the Ring app's
+  event history (with a Ring Protect plan), the camera's light may come on
+  during it, and a motion recording that coincides with one may be cut short.
+- **Data.** Roughly 1-4 MB per frame (an estimate: the 7 October test's
+  32-second live view brought about 2 MB), so 0.2-0.6 GB a day, both down
+  (the house's connection) and up (the boathouse camera's). Check neither
+  connection is metered.
+- **The SD card.** 100-500 KB a frame: 15-75 MB a day, 0.5-2 GB a month.
+  Copy the frames off weekly (below); nothing is saved once the card is down to
+  500 MB free (`TIMELAPSE_MIN_DISK_MB`).
+- **The Pi's processor** is fully busy for each live view: roughly a sixth of
+  the daylight hours. Pi-hole goes first (`Nice=10` below).
 
 ### Pi-hole comes first
 
@@ -456,27 +485,42 @@ as the live view lasted, and ffmpeg used up to 86 MB. So:
 - **Memory is kept for Pi-hole.** The live video starts only with at least
   80 MB available (`TIMELAPSE_MIN_MEMORY_MB`, 40, plus 40 MB of headroom), and
   the memory is checked twice a second throughout. Below 40 MB the live view
-  and ffmpeg are stopped at once and the snapshot is saved instead. With the
-  service running the Pi had about 170 MB available (August 2026), so this
-  should only act when something else is short of memory.
+  and ffmpeg are stopped at once. With the service running the Pi had about
+  240 MB available (October 2026), so this should only act when something
+  else is short of memory.
+- **Recordings are made in memory**, not on the SD card
+  (`TIMELAPSE_WORK_DIR=/run/nhrc-camera`, which systemd makes for the
+  service): 150 a day would otherwise wear the card Pi-hole lives on. Each
+  recording is capped at 32 MB and always leaves 16 MB free there, and is
+  deleted as soon as its frame is saved.
 - **Pi-hole gets the processor first** (`Nice=10`, `CPUWeight=20` below), and
   if memory ever ran out the kernel would stop this service, never Pi-hole
   (`OOMScoreAdjust=500`). The service's `MemoryMax` stays as it was.
 - **Light work while the video arrives.** The video is recorded as it comes,
-  without decoding, then the latest keyframes are decoded one at a time,
+  without decoding, then the sharpest keyframes are decoded one at a time,
   single-threaded. (In the first test, decoding as the video arrived, the
   picture came out smeared.)
 - **Every step has a deadline.** ffmpeg is killed at its deadline, the live
-  view is always ended, temporary files are always removed, and a whole
-  capture, the fallback included, is given up after 6 minutes.
-- **No damaged pictures.** A keyframe with any decoding error is refused. If
-  no clean one arrives, the 640x360 snapshot is saved instead
-  (`..._snapshot.jpg`), so the day is not missed.
-- **Never a restart loop.** Each time is tried once a day, and noted on disk
-  (`timelapse/.tried`) before it starts: if a capture ever brought the service
-  down, the restarted service does not try it again.
-- **The disk keeps 500 MB free** (`TIMELAPSE_MIN_DISK_MB`). A frame is
-  100-500 KB, so about 1.5 MB a day.
+  view is always ended, temporary files are always removed, and an ffmpeg
+  still running after a capture is stopped.
+- **No damaged pictures.** A keyframe with any decoding error is refused. With
+  set times, if no clean one arrives the 640x360 snapshot is saved instead
+  (`..._snapshot.jpg`); every 5 minutes, that frame is simply skipped.
+- **The dock photos come first.** At :00, :15, :30 and :45 the frame waits for
+  the dock photo. While the website uses the Downstream Lot as its backup
+  (the dock camera down), the timelapse pauses.
+- **It backs off.** After six failed live views in a row (camera offline,
+  Ring trouble) it rests for an hour.
+- **Never a restart loop.** Each capture is noted on disk before it starts
+  (`timelapse/.interval-log`, or `.tried` for set times). A capture that
+  brought the service down is not tried again; after two in a day the
+  timelapse stops until the next day.
+- **No slow leak.** Every 5 minutes it checks its own memory (at most
+  `TIMELAPSE_MAX_RSS_MB`, 160; it uses about 77) and open files and
+  connections (at most 400): over either twice in a row, it restarts itself
+  and systemd starts it again a minute later - at most twice a day.
+- **A mistake in the timelapse settings never stops the dock photos.** The
+  service runs without the timelapse and says why; `--check` fails.
 
 ### Setting it up
 
@@ -494,32 +538,57 @@ printf 'net.core.rmem_max=8388608\nnet.core.rmem_default=8388608\n' | sudo tee /
 sudo sysctl -p /etc/sysctl.d/90-nhrc-camera.conf
 ```
 
-Pi-hole first, and a netlink socket, which the live video needs to list the
-Pi's network addresses (the service is otherwise as locked down as before):
+Pi-hole first, a netlink socket (which the live video needs to list the Pi's
+network addresses), and a folder in memory for the recordings - the service is
+otherwise as locked down as before:
 
 ```bash
 sudo mkdir -p /etc/systemd/system/nhrc-camera.service.d
-printf '[Service]\nNice=10\nCPUWeight=20\nOOMScoreAdjust=500\nRestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK\n' | sudo tee /etc/systemd/system/nhrc-camera.service.d/timelapse.conf
+printf '[Service]\nNice=10\nCPUWeight=20\nOOMScoreAdjust=500\nRestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK\nRuntimeDirectory=nhrc-camera\nRuntimeDirectoryMode=0700\n' | sudo tee /etc/systemd/system/nhrc-camera.service.d/timelapse.conf
+sudo systemctl daemon-reload
 ```
 
-The times:
+The timetable - every 5 minutes, sunrise to sunset - and the folder in memory.
+Any `TIMELAPSE_TIMES` or `TIMELAPSE_RECORD_SECONDS` line from the first
+version goes:
 
 ```bash
-sudo grep -q '^TIMELAPSE_TIMES=' /opt/nhrc-camera/env || echo 'TIMELAPSE_TIMES=8:00,12:00,15:00' | sudo tee -a /opt/nhrc-camera/env
+sudo sed -i '/^TIMELAPSE_TIMES=/d; /^TIMELAPSE_RECORD_SECONDS=/d; /^TIMELAPSE_EVERY_MINUTES=/d; /^TIMELAPSE_WORK_DIR=/d' /opt/nhrc-camera/env
+echo 'TIMELAPSE_EVERY_MINUTES=5' | sudo tee -a /opt/nhrc-camera/env
+echo 'TIMELAPSE_WORK_DIR=/run/nhrc-camera' | sudo tee -a /opt/nhrc-camera/env
 ```
 
-Then `sudo systemctl daemon-reload`, so systemd reads the new settings, and
-update `snapshot_service.js` as in the section above. Its restart starts the
-timelapse, and the journal says so: `Timelapse: "Downstream Lot" at 08:00,
-12:00, 15:00 ...`.
+Update `snapshot_service.js` as in the section above, but check the settings
+before the restart - this prints no secrets, and must end with
+`ffmpeg found` and no problems:
+
+```bash
+sudo -u nhrccam bash -c 'set -a; . /opt/nhrc-camera/env; /usr/local/bin/node /opt/nhrc-camera/snapshot_service.js --check'
+```
+
+It says `recordings : /run/nhrc-camera - not there yet` until the restart.
+Then restart, and the journal says what it will do:
+
+```bash
+sudo systemctl restart nhrc-camera
+journalctl -u nhrc-camera -n 20 --no-pager
+```
+
+```
+Timelapse: "Downstream Lot" every 5 min from sunrise to sunset (today 07:03-18:12, 134 frames)
+-> /opt/nhrc-camera/timelapse/YYYY-MM-DD/ (...); recorded in /run/nhrc-camera (in memory).
+```
 
 Check that the protections are in place - `Nice=10`, `CPUWeight=20`,
-`OOMScoreAdjust=500`, `AF_NETLINK` in the list, and `500` from the last line:
+`OOMScoreAdjust=500`, `AF_NETLINK` in the list, `nhrc-camera` as the runtime
+directory, and `500` from the last line:
 
 ```bash
-systemctl show nhrc-camera -p Nice -p CPUWeight -p OOMScoreAdjust -p RestrictAddressFamilies -p MemoryMax
+systemctl show nhrc-camera -p Nice -p CPUWeight -p OOMScoreAdjust -p RestrictAddressFamilies -p RuntimeDirectory -p MemoryMax
 cat /proc/$(systemctl show -p MainPID --value nhrc-camera)/oom_score_adj
 ```
+
+To go back to the three set times, or turn it off: see "Turning it off" below.
 
 ### Test it
 
@@ -548,62 +617,102 @@ Timelapse test: saved 2026-10-07_140901.jpg - 1280x720, 179 KB, from live video 
 program 77 MB; the Pi had at least 242 MB available throughout.
 ```
 
-(The Pi on 7 October 2026, in daylight.)
+(The Pi on 7 October 2026, in daylight. A frame that stopped early also says
+`stopped once 1920x1080 had arrived`; one that did not, `1080 lines not
+reached (1280x720 at most)`.)
+
+To see the DNS is unaffected, while a capture runs (Pi-hole answers in a few
+milliseconds; the first query of a name may take longer):
+
+```bash
+for i in 1 2 3 4 5; do dig +stats @127.0.0.1 example.com | grep 'Query time'; sleep 2; done
+```
 
 What else the journal can say:
 
 | Journal | Meaning |
 |---|---|
-| `live video failed (...); saved the snapshot instead` | The day has a 640x360 frame. The reason is in the brackets |
+| `Timelapse 2026-10-14: 128 frames saved (40 at 1920x1080, 88 at 1280x720); 3 failed; ...` | The day, after sunset: frames by size, failures, pauses, the battery and Wi-Fi signal, memory |
+| `Timelapse paused: "Downstream Lot" battery at 39% ...` | Below 40%: no live views until 55% (`Timelapse resumed at ...`) |
+| `Timelapse paused: the website is using "Downstream Lot" as its backup camera ...` | The dock camera is down; the timelapse waits until it answers again |
+| `6 live views in a row failed; resting until ...` | Camera offline or Ring trouble: an hour off. The reasons are in the lines before |
+| `live video failed (...); no frame this time` | Every 5 minutes: that frame is skipped. The reason is in the brackets |
+| `live video failed (...); saved the snapshot instead` | Set times: the day has a 640x360 frame |
+| `the capture at 09:05 never finished (the service stopped during it)` | Said at start: that capture brought the service down. It is not tried again |
+| `Timelapse paused: stopped for today: 2 captures today never finished ...` | Two of those in a day: no more timelapse until tomorrow. Look at what the journal said before each |
+| `this program uses N MB of memory ... restarting the service` | Over `TIMELAPSE_MAX_RSS_MB` twice in a row: it restarted itself (at most twice a day) |
+| `ffmpeg still running after the capture; stopped` | An ffmpeg did not end with its live view; it was stopped |
+| `the battery level of "Downstream Lot" could not be read (...)` | Ring did not give it: the battery is not guarded until it does - watch it in the Ring app |
 | `not started: only N MB of memory available` | The Pi was short of memory; the camera was not even woken for the live video |
 | `stopped: the memory available fell to N MB` | Stopped mid-capture to keep memory for Pi-hole |
 | `no clean keyframe (...)` | Too many packets lost on the way (usually Wi-Fi at either end) |
 | `nothing was recorded (...)` | Video arrived, but ffmpeg never started the file: the video's description (SPS/PPS) did not arrive whole, or the live view ended first. The brackets say how it went - when Ring answered, when video came and stopped, what Ring and ffmpeg said |
-| `the snapshot failed too, 2 tries (...)` | No frame for that time today. If it says the camera was streaming, raise `TIMELAPSE_SNAPSHOT_PAUSE_SECONDS` |
-| `already tried before the service restarted` | The service restarted inside that time's window; that time is skipped today |
+| `TIMELAPSE_WORK_DIR /run/nhrc-camera cannot be used (...)` | The drop-in's `RuntimeDirectory=` line is missing: recording on the SD card instead |
+| `Timelapse settings problems - the timelapse is OFF` | A mistake in the settings, listed under it; the dock photos go on |
 | `only N MB free on the SD card` | Nothing saved: copy the frames off and delete them |
 
 ### The frames
 
-On your Mac, copy them off (with the Pi's address if its name does not
-resolve):
+Copy them off weekly. On your Mac (with the Pi's address if its name does not
+resolve), the folders not yet copied:
 
 ```bash
 mkdir -p ~/Desktop/timelapse
-scp 'emre@pihole2:/opt/nhrc-camera/timelapse/*.jpg' ~/Desktop/timelapse/
+rsync -av --exclude 'tests' --exclude '.*' emre@pihole2:/opt/nhrc-camera/timelapse/ ~/Desktop/timelapse/
 ```
 
-Then, with ffmpeg on the Mac (`brew install ffmpeg`), one video from all of
-them, or from one time of day for even light (`'*_1200*.jpg'`):
+Then, with ffmpeg on the Mac (`brew install ffmpeg`), one video from them all -
+every frame at 1920x1080, whatever size Ring sent:
 
 ```bash
 cd ~/Desktop/timelapse
-ffmpeg -framerate 12 -pattern_type glob -i '*.jpg' -vf scale=1920:-2 -c:v libx264 -pix_fmt yuv420p timelapse.mp4
+ffmpeg -framerate 30 -pattern_type glob -i '20*/*.jpg' -vf 'scale=1920:1080,setsar=1' -c:v libx264 -pix_fmt yuv420p timelapse.mp4
 ```
 
-Once they are safely on the Mac, they can be deleted from the Pi (the service
-owns them, hence `sudo`):
+(For the set-time frames, `-i '*.jpg'`; for even light, one time of day:
+`-i '20*/*_1200.jpg'`.)
+
+Once they are safely on the Mac, delete them from the Pi (the service owns
+them, hence `sudo`), a finished day's folder at a time:
 
 ```bash
-sudo rm /opt/nhrc-camera/timelapse/*.jpg
+sudo rm -r /opt/nhrc-camera/timelapse/2026-10-14
 ```
 
-To turn it off, delete the `TIMELAPSE_TIMES` line and restart:
+### Turning it off
+
+Delete the timelapse lines and restart; the service is then exactly as it was
+before the timelapse:
 
 ```bash
-sudo sed -i '/^TIMELAPSE_TIMES=/d' /opt/nhrc-camera/env
+sudo sed -i '/^TIMELAPSE_/d' /opt/nhrc-camera/env
+sudo systemctl restart nhrc-camera
+```
+
+Or back to three set times a day:
+
+```bash
+sudo sed -i '/^TIMELAPSE_EVERY_MINUTES=/d' /opt/nhrc-camera/env
+echo 'TIMELAPSE_TIMES=8:00,12:00,15:00' | sudo tee -a /opt/nhrc-camera/env
 sudo systemctl restart nhrc-camera
 ```
 
 | Variable | Default | Notes |
 |---|---|---|
-| `TIMELAPSE_TIMES` | (off) | Local times, e.g. `8:00,12:00,15:00`. Each is due for 15 minutes (one dock slot) |
+| `TIMELAPSE_EVERY_MINUTES` | (off) | 5, 6, 10, 12, 15, 20, 30 or 60: a frame every so many minutes, on the clock's marks (7:05, 7:10 ...) |
+| `TIMELAPSE_FROM` / `TIMELAPSE_UNTIL` | `sunrise` / `sunset` | Or a local time like `7:30`. Frames from the first mark after `FROM` to the last before `UNTIL` |
+| `TIMELAPSE_LATITUDE` / `TIMELAPSE_LONGITUDE` | 41.437 / -73.119 | Where sunrise and sunset are worked out for: the boathouse |
+| `TIMELAPSE_TIMES` | (off) | Instead: local times, e.g. `8:00,12:00,15:00`. Each is due for 15 minutes (one dock slot) |
 | `TIMELAPSE_CAMERA_NAME` | `RING_BACKUP_CAMERA_NAME` | The camera to film |
 | `TIMELAPSE_DIR` | `/opt/nhrc-camera/timelapse` | Must be inside `ReadWritePaths` |
-| `TIMELAPSE_RECORD_SECONDS` | 20 | Seconds of video recorded, 4-20. The resolution rises as the live view runs (see above) |
+| `TIMELAPSE_WORK_DIR` | the temp folder | Where each recording is made: `/run/nhrc-camera`, in memory (needs the drop-in's `RuntimeDirectory=`) |
+| `TIMELAPSE_RECORD_SECONDS` | 45 | Seconds of live video at most, 4-60. The resolution rises as the live view runs (see above) |
+| `TIMELAPSE_TARGET_HEIGHT` | 1080 | Stop as soon as a keyframe this tall has arrived; 0 = always the whole time |
+| `TIMELAPSE_MIN_BATTERY` | 40 | Every 5 minutes: no live views below this charge (%), until 15 points above it. 0 = no check |
+| `TIMELAPSE_MAX_RSS_MB` | 160 | Every 5 minutes: the service restarts itself if it grows past this (twice in a row) |
 | `TIMELAPSE_MIN_MEMORY_MB` | 40 | Memory always kept for Pi-hole; at least 20 |
 | `TIMELAPSE_MIN_DISK_MB` | 500 | Disk always kept free; at least 100 |
-| `TIMELAPSE_SNAPSHOT_PAUSE_SECONDS` | 20 | After a failed live video, the wait before the fallback snapshot (tried twice, 30 s apart): a battery camera cannot take one while it is still streaming |
+| `TIMELAPSE_SNAPSHOT_PAUSE_SECONDS` | 20 | Set times: after a failed live video, the wait before the fallback snapshot (tried twice, 30 s apart): a battery camera cannot take one while it is still streaming |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | `ffprobe` must be next to it |
 
 ## Battery
@@ -612,6 +721,17 @@ Only the backup camera runs on battery (with solar), and only while the dock
 camera is down. Each capture wakes it, so if its charge trends down during a
 long dock outage, raise `BACKUP_INTERVAL_MINUTES` or narrow the backup window
 before assuming a hardware fault.
+
+The timelapse, when it is on, uses the same camera far more: a live view every
+5 minutes in daylight. It pauses below 40% and resumes at 55%, so the backup
+always has charge, and the journal gives the level with every frame:
+
+```bash
+journalctl -u nhrc-camera --since today --no-pager | grep -o 'Battery [0-9]*%' | uniq -c
+```
+
+If it spends much of the day paused, film less often (`TIMELAPSE_EVERY_MINUTES=10`)
+or for fewer hours (`TIMELAPSE_FROM=8:00`, `TIMELAPSE_UNTIL=17:00`).
 
 ## When something is wrong
 
@@ -741,10 +861,11 @@ archived, nothing enters git, and Cloudflare access logs are not enabled by
 default. If the committee wants a formal retention answer: *the current frame
 only, replaced at each capture (every 15 minutes), never stored historically.*
 
-The one exception is the timelapse, when it is on: three frames a day from the
-Downstream Lot camera are kept on the Pi's SD card - never uploaded, never in
-git - until they are copied off and deleted. Its retention answer: *kept on the
-club's Pi only for making the construction timelapse, deleted once it is made.*
+The one exception is the timelapse, when it is on: a frame every 5 minutes in
+daylight (about 110-180 a day) from the Downstream Lot camera, kept on the Pi's
+SD card - never uploaded, never in git - until they are copied off and deleted.
+Its retention answer: *kept on the club's Pi only for making the construction
+timelapse, deleted once it is made.*
 
 ---
 
@@ -754,7 +875,15 @@ club's Pi only for making the construction timelapse, deleted once it is made.*
 node camera/test_snapshot_service.js
 ```
 
-143 tests covering config validation, the timezone-aware windows, the capture
+About 4 minutes. To run it in parts (each takes the quick tests and a third
+of the slow ones), or only the tests whose names match:
+
+```bash
+TEST_SHARD=1/3 node camera/test_snapshot_service.js
+TEST_ONLY='battery' node camera/test_snapshot_service.js
+```
+
+192 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including
 both daylight-saving days and day-long outages), camera selection, atomic token
 persistence and file permissions, upload auth and retry behaviour, the Worker
@@ -773,3 +902,17 @@ journal then says), a live view that never answers or starts too late, memory
 running short while recording and while decoding (stand-ins for
 `/proc/meminfo`), four captures in a row with nothing left behind, and the
 service killed in the middle of a capture and restarted.
+
+For every 5 minutes: sunrise and sunset against the US Naval Observatory's
+almanac and every day of a year (daylight-saving days included); the
+picture size read from real x264 SPS of every profile, and from SPS written
+bit by bit (scaling matrices, emulation-prevention bytes), and 20,000 damaged
+ones; stopping early once 1080 lines have arrived - on a stream that steps up
+from 640x360 as Ring's does, with packets lost just after the 1080 keyframe,
+and with an ffmpeg that keeps waiting after its stop signal (as one does once
+the live view has ended); a whole day on a fake clock (134 frames on 13
+October); the battery pause and resume; the pause while the website uses the
+backup; the hour's rest after six failures; captures that brought the service
+down, and two in a day; systemd stopping it mid-capture; the restart when memory
+or open files grow; the dock photo first; and the real service process end to
+end - stopped (SIGTERM) and killed (SIGKILL) during a capture.
