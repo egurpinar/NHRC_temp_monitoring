@@ -3170,6 +3170,290 @@ if (HAVE_FFMPEG) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+section('6g. Copying the frames to iCloud: the Pi\'s read-only export, the Mac\'s evening copy');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Every evening the Mac fetches each finished day it does not have yet, with
+// a key the Pi lets list and fetch frames - nothing else. The Mac side runs
+// here with a stand-in for ssh that does what the Pi's forced command does.
+
+const EXPORT_SH = path.join(__dirname, 'timelapse_export.sh');
+const ICLOUD_SH = path.join(__dirname, 'timelapse_to_icloud.sh');
+const POSIX_SH = fs.existsSync('/usr/bin/dash') ? '/usr/bin/dash' : '/bin/sh';   // the Pi's /bin/sh is dash
+const { spawnSync: run2 } = require('child_process');
+
+/** The Pi's timelapse folder: three days in folders, and what else lies there. */
+function piFolder() {
+  const dir = tlDir();
+  const day = (d, n) => {
+    fs.mkdirSync(path.join(dir, d), { recursive: true });
+    for (let i = 0; i < n; i++) {
+      fs.writeFileSync(path.join(dir, d, `${d}_${String(705 + i * 5).padStart(4, '0')}.jpg`), fakeJpeg(1920, 1080 + i));
+    }
+  };
+  day('2026-10-12', 3); day('2026-10-13', 2); day('2026-10-14', 4);
+  fs.writeFileSync(path.join(dir, '2026-10-14', '.2026-10-14_0725.jpg.tmp'), 'half written');
+  fs.writeFileSync(path.join(dir, '2026-10-13', 'notes.txt'), 'not a frame');
+  fs.writeFileSync(path.join(dir, '2026-10-07_1500.jpg'), fakeJpeg(1280, 720));   // the set times, before
+  fs.mkdirSync(path.join(dir, 'tests'));
+  fs.writeFileSync(path.join(dir, 'tests', '2026-10-13_210102.jpg'), fakeJpeg(1920, 1080));
+  fs.writeFileSync(path.join(dir, '.interval-log'), '2026-10-14 07:05 start\n');
+  return { dir, day };
+}
+
+/** The Pi's forced command, asked `request` (SSH_ORIGINAL_COMMAND). */
+const exportAsk = (dir, request) => run2(POSIX_SH, [EXPORT_SH], { env: { PATH: process.env.PATH,
+  NHRC_TIMELAPSE_DIR: dir, SSH_ORIGINAL_COMMAND: request } });
+
+/** A Mac (its own HOME) and a stand-in ssh that refuses unless it could never ask for a password. */
+function macRig() {
+  const pi = piFolder();
+  const home = tlDir();
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-bin-'));
+  const fakeSsh = path.join(bin, 'ssh');
+  fs.writeFileSync(fakeSsh, [
+    '#!/bin/bash',
+    'batch=no; for a in "$@"; do [ "$a" = BatchMode=yes ] && batch=yes; done',
+    '[ "$batch" = yes ] || { echo "ssh would have asked for a password" >&2; exit 99; }',
+    '[ -n "${FAKE_SSH_DOWN:-}" ] && { echo "ssh: connect to host pihole2 port 22: Operation timed out" >&2; exit 255; }',
+    // Like ssh, it reads what it is given unless told not to (-n): in a loop that would swallow the rest of the list.
+    'nostdin=no; for a in "$@"; do [ "$a" = -n ] && nostdin=yes; done',
+    '[ "$nostdin" = yes ] || cat > /dev/null',
+    'req="${@: -1}"',
+    'if [ -n "${FAKE_SSH_CUT:-}" ] && [ "${req#get }" != "$req" ]; then',
+    '  SSH_ORIGINAL_COMMAND="$req" NHRC_TIMELAPSE_DIR="$FAKE_PI_DIR" "$FAKE_SH" "$FAKE_EXPORT" | head -c 2000; exit 0',
+    'fi',
+    'SSH_ORIGINAL_COMMAND="$req" NHRC_TIMELAPSE_DIR="$FAKE_PI_DIR" exec "$FAKE_SH" "$FAKE_EXPORT"',
+  ].join('\n'), { mode: 0o755 });
+  const dest = path.join(home, 'iCloud', 'NHRC Timelapse');
+  const support = path.join(home, 'Library', 'Application Support', 'NHRC Timelapse');
+  const logFile = path.join(home, 'Library', 'Logs', 'nhrc-timelapse.log');
+  const exec = (args, env = {}) => run2('bash', [ICLOUD_SH, ...args], { encoding: 'utf8', env: Object.assign({
+    PATH: process.env.PATH, HOME: home, NHRC_TIMELAPSE_SSH: fakeSsh, NHRC_TIMELAPSE_DEST: dest,
+    FAKE_PI_DIR: pi.dir, FAKE_EXPORT: EXPORT_SH, FAKE_SH: POSIX_SH }, env) });
+  const copy = (today, hour, env = {}) => exec(['run', 'emre@pihole2'],
+    Object.assign({ NHRC_TIMELAPSE_TODAY: today, NHRC_TIMELAPSE_HOUR: hour }, env));
+  const lastLog = () => fs.readFileSync(logFile, 'utf8').trim().split('\n').pop();
+  const state = () => fs.readFileSync(path.join(support, 'days-copied'), 'utf8');
+  return { pi, home, dest, support, exec, copy, lastLog, state };
+}
+
+test('the Pi\'s export: lists the days and sends one whole - and nothing else, whatever it is asked', () => {
+  const { dir } = piFolder();
+  let r = exportAsk(dir, 'list');
+  assert.strictEqual(r.status, 0, r.stderr.toString());
+  assert.strictEqual(r.stdout.toString(), '2026-10-12 3\n2026-10-13 2\n2026-10-14 4\n', 'day folders only; frames only - not a half-written one, nor anything else');
+  r = exportAsk(dir, 'get 2026-10-14');
+  assert.strictEqual(r.status, 0, r.stderr.toString());
+  const tarFile = path.join(tlDir(), 'day.tar');
+  fs.writeFileSync(tarFile, r.stdout);
+  const listed = run2('tar', ['-tf', tarFile], { encoding: 'utf8' }).stdout.trim().split('\n').sort();
+  assert.deepStrictEqual(listed, ['2026-10-14/', '2026-10-14/2026-10-14_0705.jpg', '2026-10-14/2026-10-14_0710.jpg',
+    '2026-10-14/2026-10-14_0715.jpg', '2026-10-14/2026-10-14_0720.jpg'], 'the frames, not the half-written one');
+  for (const bad of ['', 'ls', 'get', ' list', 'list ', 'list; cat /etc/passwd', 'get 2026-10-1', 'get 2026-10-14 ',
+    'get 2026-10-14; id', 'get 2026-10-14 && id', 'get 2026-10-14|id', 'get $(id)', 'get `id`', 'get ../2026-10-14',
+    'get 2026-10-1?', 'get 2026-10-1*', 'get 2026-10-14/../../etc', 'get /etc', 'tar -cf - /', 'rsync --server --sender . /']) {
+    r = exportAsk(dir, bad);
+    assert.strictEqual(r.status, 1, JSON.stringify(bad));
+    assert.strictEqual(r.stdout.length, 0, JSON.stringify(bad));
+    assert.ok(/not allowed: this key can only list and fetch timelapse days/.test(r.stderr.toString()), JSON.stringify(bad));
+  }
+  r = exportAsk(dir, 'get 2026-10-09');
+  assert.strictEqual(r.status, 1);
+  assert.ok(/no such day: 2026-10-09/.test(r.stderr.toString()));
+});
+
+test('the Mac copies each finished day once, whole - never a day still being filmed - and catches up on days it missed', () => {
+  const m = macRig();
+  let r = m.copy('2026-10-14', '21');
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(fs.readdirSync(m.dest).sort(), ['2026-10-12', '2026-10-13', '2026-10-14'],
+    'the days only: no half-written frame, no hidden folder, nothing from the set times or tests');
+  assert.deepStrictEqual(fs.readdirSync(path.join(m.dest, '2026-10-14')).sort(),
+    ['2026-10-14_0705.jpg', '2026-10-14_0710.jpg', '2026-10-14_0715.jpg', '2026-10-14_0720.jpg']);
+  assert.ok(fs.readFileSync(path.join(m.dest, '2026-10-12', '2026-10-12_0715.jpg')).equals(fs.readFileSync(path.join(m.pi.dir, '2026-10-12', '2026-10-12_0715.jpg'))));
+  assert.strictEqual(m.state(), '2026-10-12\n2026-10-13\n2026-10-14\n');
+  assert.ok(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d copied 3 days, 9 frames, to iCloud Drive\/NHRC Timelapse$/.test(m.lastLog()), m.lastLog());
+  // Again: nothing to do.
+  m.copy('2026-10-14', '22');
+  assert.ok(/ nothing new to copy$/.test(m.lastLog()), m.lastLog());
+  // The next morning a day is under way: left alone until the evening.
+  m.pi.day('2026-10-15', 2);
+  m.copy('2026-10-15', '08');
+  assert.ok(!fs.existsSync(path.join(m.dest, '2026-10-15')));
+  m.copy('2026-10-15', '21');
+  assert.ok(/ copied 1 day, 2 frames, to iCloud Drive\/NHRC Timelapse$/.test(m.lastLog()), m.lastLog());
+  // The Mac was away for two evenings: the next copy brings both, but not the day in progress.
+  m.pi.day('2026-10-16', 2); m.pi.day('2026-10-17', 1); m.pi.day('2026-10-18', 1);
+  m.copy('2026-10-18', '07');
+  assert.ok(/ copied 2 days, 3 frames/.test(m.lastLog()), m.lastLog());
+  assert.ok(!fs.existsSync(path.join(m.dest, '2026-10-18')));
+  assert.deepStrictEqual(fs.readdirSync(m.dest).filter(f => f.startsWith('.')), [], 'nothing hidden left behind');
+  assert.deepStrictEqual(fs.readdirSync(m.support).filter(f => f.startsWith('incoming')), [], 'nor anything on the way');
+  assert.deepStrictEqual(fs.readdirSync(path.join(m.dest, '2026-10-13')).sort(), ['2026-10-13_0705.jpg', '2026-10-13_0710.jpg'], 'frames only');
+  // A Mac whose clock is a day behind the Pi's: a day it thinks is still to come is left alone.
+  const behind = macRig();
+  behind.copy('2026-10-13', '21');
+  assert.deepStrictEqual(fs.readdirSync(behind.dest).sort(), ['2026-10-12', '2026-10-13']);
+});
+
+test('the Mac\'s copy when things go wrong: Pi unreachable, a transfer cut short, iCloud not writable - said plainly, tried again next time', () => {
+  let m = macRig();
+  let r = m.copy('2026-10-14', '21', { FAKE_SSH_DOWN: '1' });
+  assert.strictEqual(r.status, 0);
+  assert.ok(/ could not reach the Pi \(ssh: connect to host pihole2 port 22: Operation timed out\); trying again tomorrow at 21:30, or when this Mac wakes$/.test(m.lastLog()), m.lastLog());
+  assert.strictEqual(m.state(), '');
+  // Cut short: that day is not counted as copied, nothing half-copied is left in iCloud.
+  m.copy('2026-10-14', '21', { FAKE_SSH_CUT: '1' });
+  const lines = fs.readFileSync(path.join(m.home, 'Library', 'Logs', 'nhrc-timelapse.log'), 'utf8');
+  assert.ok(/could not copy 2026-10-12: \d of its 3 frames arrived \(.*\); trying again next time/.test(lines), lines);
+  assert.ok(!fs.existsSync(path.join(m.dest, '2026-10-12')) || fs.readdirSync(path.join(m.dest, '2026-10-12')).length === 0);
+  assert.deepStrictEqual(fs.readdirSync(m.dest).filter(f => f.startsWith('.')), []);
+  assert.deepStrictEqual(fs.readdirSync(m.support).filter(f => f.startsWith('incoming')), [], 'the part that arrived is not left lying');
+  assert.strictEqual(m.state(), '');
+  m.copy('2026-10-14', '21');
+  assert.ok(/ copied 3 days, 9 frames/.test(m.lastLog()), m.lastLog());
+  // A frame already there is never overwritten; an empty day is passed over.
+  m = macRig();
+  fs.mkdirSync(path.join(m.dest, '2026-10-13'), { recursive: true });
+  fs.writeFileSync(path.join(m.dest, '2026-10-13', '2026-10-13_0705.jpg'), 'mine');
+  fs.mkdirSync(path.join(m.pi.dir, '2026-10-11'));
+  m.copy('2026-10-14', '21');
+  assert.strictEqual(fs.readFileSync(path.join(m.dest, '2026-10-13', '2026-10-13_0705.jpg'), 'utf8'), 'mine');
+  assert.strictEqual(fs.readdirSync(path.join(m.dest, '2026-10-13')).length, 2);
+  assert.ok(!fs.existsSync(path.join(m.dest, '2026-10-11')));
+  assert.strictEqual(m.state(), '2026-10-11\n2026-10-12\n2026-10-13\n2026-10-14\n');
+  // iCloud Drive not writable (macOS has not allowed it): said, with what to do.
+  m = macRig();
+  fs.mkdirSync(path.dirname(m.dest), { recursive: true });
+  fs.chmodSync(path.dirname(m.dest), 0o555);
+  m.copy('2026-10-14', '21');
+  fs.chmodSync(path.dirname(m.dest), 0o755);
+  assert.ok(/ could not write to iCloud Drive \(.*(Permission denied|not permitted).*\) - allow "NHRC Timelapse" in System Settings > Privacy & Security > Files & Folders$/.test(m.lastLog()), m.lastLog());
+  // iCloud Drive off: the folder would never be uploaded - said, nothing copied.
+  m = macRig();
+  run2('bash', [ICLOUD_SH, 'run', 'emre@pihole2'], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: m.home,
+    NHRC_TIMELAPSE_SSH: '/bin/false', NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' } });
+  assert.ok(/ iCloud Drive cannot be found: is it on \(System Settings > Apple Account > iCloud\), and may "NHRC Timelapse" use it/.test(m.lastLog()), m.lastLog());
+});
+
+test('the Mac\'s copy: one at a time; a lock left by a copy that died is taken over', () => {
+  const m = macRig();
+  const lock = path.join(m.support, '.running');
+  fs.mkdirSync(lock, { recursive: true });
+  m.copy('2026-10-14', '21');
+  assert.ok(/ another copy is running; this one stops$/.test(m.lastLog()), m.lastLog());
+  assert.ok(!fs.existsSync(m.dest) || fs.readdirSync(m.dest).length === 0);
+  const old = new Date(Date.now() - 3 * 3600 * 1000);
+  fs.utimesSync(lock, old, old);
+  m.copy('2026-10-14', '21');
+  assert.ok(/ copied 3 days/.test(m.lastLog()), m.lastLog());
+  assert.ok(!fs.existsSync(lock), 'the lock is let go');
+});
+
+if (fs.existsSync('/usr/sbin/sshd') && fs.existsSync('/usr/bin/ssh-keygen')) {
+  test('end to end, with a real ssh server: the Mac\'s key copies the days, and can do nothing else - no command, no shell, no scp, no sftp', async () => {
+    const m = macRig();
+    const t = tlDir();
+    const user = require('os').userInfo().username;
+    const key = path.join(m.home, '.ssh', 'nhrc_timelapse');
+    fs.mkdirSync(path.dirname(key), { recursive: true });
+    run2('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', path.join(t, 'hostkey')]);
+    run2('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'nhrc-timelapse (read-only frames)', '-f', key]);
+    // The line the Mac's install puts on the Pi - here with the export's test folder.
+    fs.writeFileSync(path.join(t, 'authorized_keys'),
+      `restrict,command="NHRC_TIMELAPSE_DIR=${m.pi.dir} ${POSIX_SH} ${EXPORT_SH}" ${fs.readFileSync(key + '.pub', 'utf8')}`, { mode: 0o600 });
+    const port = 30000 + Math.floor(Math.random() * 20000);
+    fs.writeFileSync(path.join(t, 'sshd_config'), [`Port ${port}`, 'ListenAddress 127.0.0.1', `HostKey ${t}/hostkey`, `PidFile ${t}/sshd.pid`,
+      `AuthorizedKeysFile ${t}/authorized_keys`, 'StrictModes no', 'UsePAM no', 'PasswordAuthentication no',
+      'KbdInteractiveAuthentication no', 'PubkeyAuthentication yes'].join('\n') + '\n');
+    const sshd = require('child_process').spawn('/usr/sbin/sshd', ['-D', '-e', '-f', path.join(t, 'sshd_config')], { stdio: 'ignore' });
+    try {
+      fs.writeFileSync(path.join(t, 'ssh_config'), `Host pi\n  HostName 127.0.0.1\n  Port ${port}\n  User ${user}\n`
+        + `  UserKnownHostsFile ${t}/known_hosts\n  StrictHostKeyChecking no\n  LogLevel ERROR\n`);
+      const wrapper = path.join(t, 'ssh');
+      fs.writeFileSync(wrapper, `#!/bin/bash\nexec ssh -F ${t}/ssh_config "$@"\n`, { mode: 0o755 });
+      await new Promise(r => setTimeout(r, 700));
+      const r = run2('bash', [ICLOUD_SH, 'run', 'pi'], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: m.home,
+        NHRC_TIMELAPSE_SSH: wrapper, NHRC_TIMELAPSE_DEST: m.dest, NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' } });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.ok(/ copied 3 days, 9 frames, to iCloud Drive\/NHRC Timelapse$/.test(m.lastLog()), m.lastLog());
+      assert.deepStrictEqual(fs.readdirSync(m.dest).sort(), ['2026-10-12', '2026-10-13', '2026-10-14']);
+      const as = (args, opts = {}) => run2(args[0], args.slice(1), Object.assign({ encoding: 'utf8', timeout: 10000 }, opts));
+      const base = ['-F', `${t}/ssh_config`, '-i', key, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes'];
+      let x = as(['ssh', ...base, 'pi', 'id']);
+      assert.ok(x.status === 1 && /not allowed/.test(x.stderr) && !/uid=/.test(x.stdout), 'no other command');
+      x = as(['ssh', ...base, '-tt', 'pi']);
+      assert.ok(x.status !== 0 && !/\$ |# /.test(x.stdout), 'no shell');
+      x = as(['scp', ...base, 'pi:/etc/passwd', path.join(t, 'stolen')]);
+      assert.ok(x.status !== 0 && !fs.existsSync(path.join(t, 'stolen')), 'no scp');
+      x = as(['sftp', ...base, 'pi'], { input: 'ls /\n' });
+      assert.ok(x.status !== 0 && !/etc|usr/.test(x.stdout), 'no sftp');
+    } finally {
+      sshd.kill('SIGTERM');
+    }
+  }, 60000);
+}
+
+test('the Mac\'s script: refuses what it cannot do, schedules 21:30 through its own app, and keeps to the Mac\'s bash 3.2', () => {
+  const m = macRig();
+  let r = m.exec([]);
+  assert.strictEqual(r.status, 1);
+  assert.ok(/Usage: bash \S+ install\|run user@pi-address, or: bash \S+ uninstall/.test(r.stderr), r.stderr);
+  r = m.exec(['install', 'pihole2']);
+  assert.ok(r.status !== 0 && /Give the Pi as user@address/.test(r.stderr), r.stderr);
+  r = m.exec(['install', 'emre@pihole2']);
+  assert.ok(r.status !== 0 && /This part runs on your Mac\./.test(r.stderr), r.stderr);
+  const src = fs.readFileSync(ICLOUD_SH, 'utf8');
+  // The schedule, as launchd will read it.
+  const plist = /cat > "\$PLIST" <<PLIST\n([\s\S]*?)\nPLIST\n/.exec(src)[1]
+    .replace(/\$LABEL/g, 'com.nhrc.timelapse-to-icloud').replace(/\$APP/g, '/Users/emre/Library/Application Support/NHRC Timelapse/NHRC Timelapse.app')
+    .replace(/\$RUN_HOUR/g, '21').replace(/\$RUN_MINUTE/g, '30').replace(/\$LOG/g, '/Users/emre/Library/Logs/nhrc-timelapse.log');
+  assert.ok(!/\$/.test(plist), 'every value filled in');
+  const py = run2('python3', ['-c', 'import plistlib,sys,json; print(json.dumps(plistlib.loads(sys.stdin.buffer.read())))'], { input: plist, encoding: 'utf8' });
+  if (py.status === 0) {
+    assert.deepStrictEqual(JSON.parse(py.stdout), {
+      Label: 'com.nhrc.timelapse-to-icloud',
+      ProgramArguments: ['/usr/bin/open', '-W', '-g', '/Users/emre/Library/Application Support/NHRC Timelapse/NHRC Timelapse.app'],
+      StartCalendarInterval: { Hour: 21, Minute: 30 },
+      StandardOutPath: '/Users/emre/Library/Logs/nhrc-timelapse.log', StandardErrorPath: '/Users/emre/Library/Logs/nhrc-timelapse.log' });
+  }
+  // The app runs the copy, and never shows an error dialog in the evening (the log says what happened).
+  assert.ok(/-e 'try'[\s\S]*do shell script \\"\/bin\/bash \\" & quoted form of \\"\$SCRIPT\\" & \\" run \\" & quoted form of \\"\$PI\\"[\s\S]*-e 'end try'/.test(src));
+  // The key goes on the Pi tied to the export: list and fetch, nothing else.
+  assert.ok(/printf 'restrict,command="%s" %s\\n' "\$HELPER"/.test(src) && /HELPER="\/usr\/local\/bin\/nhrc-timelapse-export"/.test(src));
+  // bash 3.2, as on every Mac: none of bash 4's additions.
+  for (const [what, re] of [['associative arrays', /declare -A|local -A/], ['mapfile', /\bmapfile\b|\breadarray\b/], ['case changes', /\$\{\w+(,,|\^\^)\}/],
+    ['&>>', /&>>/], ['|&', /\|&/], ['coproc', /\bcoproc\b/], ['namerefs', /(local|declare) -n\b/]]) {
+    assert.ok(!re.test(src), `no ${what}`);
+  }
+  // Every run is fenced from asking for a password, from waiting for ever, and from reading the list it loops over.
+  assert.ok(/"\$SSH" -n -i "\$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20/.test(src));
+});
+
+test('the README\'s iCloud steps match the scripts: where the export goes, the commands, what the log can say', () => {
+  const md = fs.readFileSync(path.join(__dirname, 'README.md'), 'utf8');
+  const sec = md.slice(md.indexOf('### Copying the frames to iCloud, every evening'), md.indexOf('### Turning it off'));
+  assert.ok(sec.length > 1000, 'the section is there');
+  const src = fs.readFileSync(ICLOUD_SH, 'utf8');
+  const helper = /HELPER="([^"]+)"/.exec(src)[1];
+  assert.ok(sec.includes(`sudo curl -fsSL -o ${helper} https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/timelapse_export.sh`),
+    'installed where the key\'s forced command points');
+  assert.ok(sec.includes(`sudo chmod 755 ${helper}`) && sec.includes('SSH_ORIGINAL_COMMAND=list nhrc-timelapse-export'));
+  assert.ok(sec.includes('bash camera/timelapse_to_icloud.sh install emre@pihole2') && sec.includes('bash camera/timelapse_to_icloud.sh uninstall'));
+  assert.ok(sec.includes('~/Library/Application\\ Support/NHRC\\ Timelapse/timelapse_to_icloud.sh run emre@pihole2'), 'the copy the install leaves behind');
+  for (const said of ['copied 1 day, 134 frames, to iCloud Drive/NHRC Timelapse', 'nothing new to copy', 'could not reach the Pi (',
+    'could not write to iCloud Drive (', 'iCloud Drive cannot be found']) {
+    assert.ok(sec.includes(said), `the README explains "${said}"`);
+  }
+  for (const said of ['nothing new to copy', 'could not reach the Pi (', 'could not write to iCloud Drive (', 'iCloud Drive cannot be found',
+    'could not copy $day: $got of its $count frames arrived']) {
+    assert.ok(src.includes(said), `the script says "${said}"`);
+  }
+  assert.ok(/RUN_HOUR=21\nRUN_MINUTE=30/.test(src) && sec.includes('At\n21:30'), 'the time the README gives');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 section('7. Security guards');
 // ═══════════════════════════════════════════════════════════════════════════
 

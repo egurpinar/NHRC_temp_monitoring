@@ -653,8 +653,9 @@ What else the journal can say:
 
 ### The frames
 
-Copy them off weekly. On your Mac (with the Pi's address if its name does not
-resolve), the folders not yet copied:
+Copy them off weekly - or let your Mac do it every evening, into iCloud Drive
+(next section). By hand, on your Mac (with the Pi's address if its name does
+not resolve), the folders not yet copied:
 
 ```bash
 mkdir -p ~/Desktop/timelapse
@@ -678,6 +679,71 @@ them, hence `sudo`), a finished day's folder at a time:
 ```bash
 sudo rm -r /opt/nhrc-camera/timelapse/2026-10-14
 ```
+
+### Copying the frames to iCloud, every evening
+
+Your Mac can fetch the timelapse every evening and keep it in iCloud Drive. At
+21:30 - after sunset, when the Pi has stopped filming - it copies each
+finished day it does not have yet into **iCloud Drive > NHRC Timelapse**, one
+folder a day, and macOS uploads them. If the Mac is asleep at 21:30 it does it
+when it wakes, and days it missed are caught up. A day being filmed is never
+copied half-done.
+
+The Mac uses a key of its own, which the Pi lets do two things - list the days,
+and send one - and nothing else: no shell, no other file, nothing written
+(`camera/timelapse_export.sh`, as the only command that key may run). No Apple
+password goes on the Pi.
+
+On the Pi, the command the key will be allowed:
+
+```bash
+sudo curl -fsSL -o /usr/local/bin/nhrc-timelapse-export https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/timelapse_export.sh
+sudo chmod 755 /usr/local/bin/nhrc-timelapse-export
+SSH_ORIGINAL_COMMAND=list nhrc-timelapse-export
+```
+
+The last line lists the days so far, as `2026-10-14 134`.
+
+On the Mac, in this repository's folder:
+
+```bash
+bash camera/timelapse_to_icloud.sh install emre@pihole2
+```
+
+It makes the key and adds it to the Pi, read-only (asking once for your Pi
+password), sets up the 21:30 schedule, and copies what is there now. If macOS
+asks whether "NHRC Timelapse" may access iCloud Drive or find devices on your
+local network, click Allow; if it says a background item was added, leave it
+allowed (System Settings > General > Login Items).
+
+What it did:
+
+```bash
+tail ~/Library/Logs/nhrc-timelapse.log
+```
+
+| Log | Meaning |
+|---|---|
+| `copied 1 day, 134 frames, to iCloud Drive/NHRC Timelapse` | That evening's day is in iCloud |
+| `nothing new to copy` | Every finished day is there already |
+| `could not reach the Pi (...)` | The Mac was away from home, or the Pi was off: tried again the next evening |
+| `could not copy 2026-10-14: 80 of its 134 frames arrived (...)` | The connection broke: that day is tried again next time, whole |
+| `could not write to iCloud Drive (...)` | macOS has not let "NHRC Timelapse" use it: System Settings > Privacy & Security > Files & Folders |
+| `iCloud Drive cannot be found` | iCloud Drive is off on this Mac |
+
+To copy now rather than wait for 21:30, or to stop it (the frames stay, in
+iCloud and on the Pi):
+
+```bash
+bash ~/Library/Application\ Support/NHRC\ Timelapse/timelapse_to_icloud.sh run emre@pihole2
+bash camera/timelapse_to_icloud.sh uninstall
+```
+
+The frames stay on the Pi too: once a day is in iCloud, delete it there as
+above. In iCloud they take 0.5-2 GB a month. The set-time frames from before
+(loose in the timelapse folder, not in day folders) are not copied: copy them
+once by hand. To have a day copied again, delete its line from
+`~/Library/Application Support/NHRC Timelapse/days-copied`.
 
 ### Turning it off
 
@@ -883,7 +949,7 @@ TEST_SHARD=1/3 node camera/test_snapshot_service.js
 TEST_ONLY='battery' node camera/test_snapshot_service.js
 ```
 
-192 tests covering config validation, the timezone-aware windows, the capture
+199 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including
 both daylight-saving days and day-long outages), camera selection, atomic token
 persistence and file permissions, upload auth and retry behaviour, the Worker
@@ -916,3 +982,11 @@ backup; the hour's rest after six failures; captures that brought the service
 down, and two in a day; systemd stopping it mid-capture; the restart when memory
 or open files grow; the dock photo first; and the real service process end to
 end - stopped (SIGTERM) and killed (SIGKILL) during a capture.
+
+For the copy to iCloud: the Pi's export asked 20 things it must refuse; the
+Mac's copy against a stand-in Pi (finished days only, catching up, a transfer
+cut short, iCloud not writable, two copies at once); and against a real ssh
+server, the Mac's key copying the days and being refused a command, a shell,
+scp and sftp. The macOS parts - the app, the schedule, the permission prompts -
+can only run on a Mac: its install ends with a first copy, and the log says how
+it went.
