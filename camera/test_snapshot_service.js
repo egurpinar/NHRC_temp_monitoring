@@ -928,47 +928,136 @@ test('the timetables read the way they are written', () => {
 section('6c2. End to end: the real service process, a stand-in Ring library and network');
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// main() itself - argument handling, camera selection, the scheduler wiring
-// and the upload headers - run as a separate process. A fake ring-client-api
-// sits where npm would put the real one, and a preload replaces fetch, so
-// nothing leaves the machine.
+// main() itself - argument handling, camera selection, the scheduler wiring,
+// the upload headers and the check-ins - run as a separate process. A fake
+// ring-client-api sits where npm would put the real one (and notes every call
+// made to it), and a preload sends the service's requests to the REAL Worker
+// code, served from this process over HTTP with an in-memory R2. Nothing
+// leaves the machine.
 
-function e2eSandbox(cameras) {
+const WORKER_HOST = 'nhrc-camera.club-acct.workers.dev';
+const openHosts = [];
+
+/**
+ * The real Worker over HTTP. `intercept(entry)` may answer a request itself (an
+ * old or broken Worker); `workerSource`, other Worker code (the one deployed before).
+ */
+async function workerHost(opts = {}) {
+  const w = opts.workerSource ? await workerFrom(opts.workerSource) : await worker();
+  const env = { UPLOAD_SECRET: SECRET, BUCKET: memoryR2() };
+  const requests = [];
+  const http = require('http');
+  const server = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const body = Buffer.concat(chunks);
+    const entry = { method: req.method, path: req.url, role: req.headers['x-camera-role'] || null,
+      name: req.headers['x-camera-name'] || null, pi: req.headers['x-camera-pi'] || null, bytes: body.length, json: null };
+    if (/json/.test(req.headers['content-type'] || '')) { try { entry.json = JSON.parse(body.toString('utf8')); } catch (e) { /* kept as null */ } }
+    requests.push(entry);
+    const canned = opts.intercept && opts.intercept(entry);
+    if (canned) { res.writeHead(canned.status, { 'Content-Type': 'text/plain' }); res.end(canned.body || ''); return; }
+    const headers = {};
+    for (const k of ['authorization', 'content-type', 'x-camera-role', 'x-camera-name', 'x-camera-pi']) {
+      if (req.headers[k]) headers[k] = req.headers[k];
+    }
+    const r = await w.fetch(new Request(`https://${WORKER_HOST}${req.url}`, { method: req.method, headers,
+      body: req.method === 'GET' || req.method === 'HEAD' ? undefined : body }), env);
+    const out = Buffer.from(await r.arrayBuffer());
+    res.writeHead(r.status, Object.fromEntries(r.headers));
+    res.end(out);
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const host = {
+    env, requests, port: server.address().port,
+    uploads: () => requests.filter(r => r.method === 'PUT'),
+    checkIns: (pi) => requests.filter(r => r.path === '/heartbeat' && (!pi || (r.json && r.json.pi === pi))),
+    status: async () => (await w.fetch(new Request(`https://${WORKER_HOST}/status`), env)).json(),
+    // As the website asks for the photo.
+    get: (p = '/latest.jpg', method = 'GET') => w.fetch(new Request(`https://${WORKER_HOST}${p}`, { method }), env),
+    close: () => new Promise(r => { server.closeAllConnections && server.closeAllConnections(); server.close(() => r()); }),
+  };
+  openHosts.push(host);
+  return host;
+}
+
+// A Ring token as ring-client-api writes it: base64 JSON holding the refresh
+// token and the device id ("hid") it signs in as.
+const ringToken = (hid) => Buffer.from(JSON.stringify({ rt: 'refresh-' + hid, hid })).toString('base64');
+
+async function e2eSandbox(cameras, hostOpts, opts = {}) {
+  const host = await workerHost(hostOpts);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-cam-e2e-'));
-  fs.copyFileSync(path.join(__dirname, 'snapshot_service.js'), path.join(dir, 'snapshot_service.js'));
+  // opts.serviceSource: other service code (the one the main Pi runs now, say).
+  if (opts.serviceSource) fs.writeFileSync(path.join(dir, 'snapshot_service.js'), opts.serviceSource);
+  else fs.copyFileSync(path.join(__dirname, 'snapshot_service.js'), path.join(dir, 'snapshot_service.js'));
   const pkg = path.join(dir, 'node_modules', 'ring-client-api');
   fs.mkdirSync(pkg, { recursive: true });
   fs.writeFileSync(path.join(pkg, 'package.json'),
     JSON.stringify({ name: 'ring-client-api', type: 'module', exports: './index.js' }));
+  const ringLog = path.join(dir, 'ring.log');
   fs.writeFileSync(path.join(pkg, 'index.js'), `
+    import fs from 'fs';
     const cams = ${JSON.stringify(cameras)};
     const JPEG = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0, 16, 0xFF, 0xD9]);
+    const note = (o) => fs.appendFileSync(${JSON.stringify(ringLog)}, JSON.stringify(o) + String.fromCharCode(10));
+    const failAuth = process.env.TEST_RING_FAIL_AUTH === '1';
     export class RingApi {
-      constructor(opts) { this.opts = opts; this.onRefreshTokenUpdated = { subscribe() {} }; }
+      constructor(opts) {
+        this.opts = opts; this.onRefreshTokenUpdated = { subscribe() {} };
+        note({ ev: 'construct', displayName: opts.controlCenterDisplayName });
+      }
       async getCameras() {
+        note({ ev: 'getCameras' });
+        if (failAuth) throw new Error('Refresh token is not valid.');
         return cams.map(c => ({ name: c.name, async getSnapshot() {
+          note({ ev: 'snapshot', camera: c.name });
           if (c.down) throw new Error(c.name + ' is offline'); return JPEG; } }));
       }
+      async fetchRingDevices() {
+        note({ ev: 'devices' });
+        if (failAuth) throw new Error('Refresh token is not valid.');
+        return { allCameras: cams.map(c => ({ description: c.name, alerts: { connection: c.down ? 'offline' : 'online' } })) };
+      }
+      disconnect() { note({ ev: 'disconnect' }); }
     }`);
   fs.writeFileSync(path.join(dir, 'token'), 'stand-in-refresh-token');
-  const uploads = path.join(dir, 'uploads.log');
   fs.writeFileSync(path.join(dir, 'fakefetch.js'), `
-    const fs = require('fs');
+    const realFetch = globalThis.fetch;
     globalThis.fetch = async (url, opts) => {
-      fs.appendFileSync(${JSON.stringify(uploads)}, JSON.stringify({ url, method: opts.method,
-        role: opts.headers['X-Camera-Role'] || null, name: opts.headers['X-Camera-Name'] || null,
-        bytes: opts.body.length }) + String.fromCharCode(10));
-      return { ok: true, status: 200, text: async () => 'OK' };
+      const u = new URL(String(url));
+      if (u.host !== ${JSON.stringify(WORKER_HOST)}) throw new Error('test: no network access to ' + u.host);
+      return realFetch('http://127.0.0.1:${host.port}' + u.pathname + u.search, opts);
     };`);
-  const read = () => (fs.existsSync(uploads) ? fs.readFileSync(uploads, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse) : []);
-  // Runs the service; for the long-running mode, stops it once `stopAfter`
-  // uploads have arrived (or after a few seconds).
-  const run = (args, env, stopAfter = 0, settleMs = 0) => new Promise((resolve) => {
+  // TEST_CLOCK_SPEED runs the service's clock - and its timers - that many
+  // times faster, so a test can watch it across several 5-minute slots.
+  fs.writeFileSync(path.join(dir, 'clock.js'), `
+    const speed = Number(process.env.TEST_CLOCK_SPEED || 1);
+    if (speed !== 1) {
+      const RealDate = Date, realNow = RealDate.now.bind(RealDate), t0 = realNow();
+      const start = Number(process.env.TEST_CLOCK_START || t0);
+      const now = () => start + (realNow() - t0) * speed;
+      globalThis.Date = class extends RealDate {
+        constructor(...a) { if (a.length) super(...a); else super(now()); }
+        static now() { return now(); }
+      };
+      const st = globalThis.setTimeout, si = globalThis.setInterval;
+      globalThis.setTimeout = (fn, ms, ...rest) => st(fn, Math.max(0, Number(ms) || 0) / speed, ...rest);
+      globalThis.setInterval = (fn, ms, ...rest) => si(fn, Math.max(1, (Number(ms) || 0) / speed), ...rest);
+    }`);
+  const ringEvents = () => (fs.existsSync(ringLog)
+    ? fs.readFileSync(ringLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : []);
+  const uploads = () => host.uploads().map(u => ({ method: u.method, role: u.role, name: u.name, pi: u.pi, bytes: u.bytes }));
+  // Runs the service. The long-running mode is stopped once `stopAfter`
+  // uploads have arrived or `until()` holds (then `settleMs` more), or after maxMs.
+  const run = (args, env = {}, opts = {}) => new Promise((resolve) => {
+    const { stopAfter = 0, settleMs = 0, until = null, maxMs = 8000 } = opts;
     const { spawn } = require('child_process');
-    const child = spawn(process.execPath, ['-r', path.join(dir, 'fakefetch.js'), path.join(dir, 'snapshot_service.js'), ...args], {
+    const child = spawn(process.execPath, ['-r', path.join(dir, 'fakefetch.js'), '-r', path.join(dir, 'clock.js'),
+      path.join(dir, 'snapshot_service.js'), ...args], {
       cwd: dir,
       env: Object.assign({ PATH: process.env.PATH, HOME: dir, RING_TOKEN_FILE: path.join(dir, 'token'),
-        CAMERA_UPLOAD_URL: 'https://nhrc-camera.club-acct.workers.dev/latest.jpg', CAMERA_UPLOAD_SECRET: baseCfg.uploadSecret,
+        CAMERA_UPLOAD_URL: `https://${WORKER_HOST}/latest.jpg`, CAMERA_UPLOAD_SECRET: baseCfg.uploadSecret,
         RING_CAMERA_NAME: 'Dock Wired', RING_BACKUP_CAMERA_NAME: 'Downstream Lot',
         CAMERA_RETRIES: '1', CAMERA_RETRY_DELAY_SECONDS: '0' }, env),
     });
@@ -978,17 +1067,19 @@ function e2eSandbox(cameras) {
     const started = Date.now();
     let seenAt = null;
     const poll = setInterval(() => {
-      if (stopAfter && read().length >= stopAfter && seenAt === null) seenAt = Date.now();
-      if ((seenAt !== null && Date.now() - seenAt >= settleMs) || Date.now() - started > 8000) child.kill();
-    }, 50);
-    child.on('exit', (code, signal) => { clearInterval(poll); resolve({ code, signal, out, uploads: read() }); });
+      const done = (stopAfter && host.uploads().length >= stopAfter) || (until && until(out));
+      if (done && seenAt === null) seenAt = Date.now();
+      if ((seenAt !== null && Date.now() - seenAt >= settleMs) || Date.now() - started > maxMs) child.kill();
+    }, 25);
+    child.on('exit', (code, signal) => { clearInterval(poll); resolve({ code, signal, out, uploads: uploads() }); });
   });
-  const reset = () => { if (fs.existsSync(uploads)) fs.unlinkSync(uploads); };
-  return { dir, run, reset };
+  const reset = () => { host.requests.length = 0; if (fs.existsSync(ringLog)) fs.unlinkSync(ringLog); };
+  const setToken = (t) => fs.writeFileSync(path.join(dir, 'token'), t);
+  return { dir, host, run, reset, ringEvents, uploads, setToken };
 }
 
 test('end to end: --once and --once-backup upload from the right camera, with its role', async () => {
-  const box = e2eSandbox([{ name: 'Front Door' }, { name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  const box = await e2eSandbox([{ name: 'Front Door' }, { name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
   let r = await box.run(['--once'], {});
   assert.strictEqual(r.code, 0, r.out);
   assert.deepStrictEqual(r.uploads.map(u => [u.method, u.role, u.name]), [['PUT', 'primary', 'Dock Wired']]);
@@ -997,38 +1088,41 @@ test('end to end: --once and --once-backup upload from the right camera, with it
   r = await box.run(['--once-backup'], {});
   assert.strictEqual(r.code, 0, r.out);
   assert.deepStrictEqual(r.uploads.map(u => [u.role, u.name]), [['backup', 'Downstream Lot']]);
+  assert.strictEqual((await box.host.status()).camera, 'Downstream Lot', 'and the real Worker stored it');
 });
 
 test('end to end: the running service uploads the dock camera, and leaves the battery camera alone', async () => {
-  const box = e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
-  const r = await box.run([], {}, 1, 1500);
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  const r = await box.run([], {}, { stopAfter: 1, settleMs: 1500 });
   assert.deepStrictEqual(r.uploads.map(u => u.role), ['primary'], r.out);
   assert.ok(/Primary camera: "Dock Wired" — every 15 min, around the clock/.test(r.out), r.out);
   assert.ok(/Backup camera: "Downstream Lot" — only after 2 missed primary captures in a row/.test(r.out));
+  assert.deepStrictEqual(box.ringEvents().filter(e => e.ev === 'snapshot').map(e => e.camera), ['Dock Wired'],
+    'the battery camera was never asked for a snapshot');
 });
 
 test('end to end: with the dock camera down, the running service switches to the backup', async () => {
-  const box = e2eSandbox([{ name: 'Dock Wired', down: true }, { name: 'Downstream Lot' }]);
+  const box = await e2eSandbox([{ name: 'Dock Wired', down: true }, { name: 'Downstream Lot' }]);
   // One miss is enough here, and the backup window is opened all day, so the
   // test does not depend on the time it runs.
   const r = await box.run([], { BACKUP_AFTER_MISSES: '1', BACKUP_ACTIVE_START_HOUR: '0', BACKUP_ACTIVE_END_HOUR: '0',
-                                BACKUP_SLOW_AFTER_HOUR: '0' }, 1, 300);
+                                BACKUP_SLOW_AFTER_HOUR: '0' }, { stopAfter: 1, settleMs: 300 });
   assert.deepStrictEqual(r.uploads.map(u => [u.role, u.name]), [['backup', 'Downstream Lot']], r.out);
   assert.ok(/primary cycle failed: CAPTURE stage \(primary "Dock Wired"\)/.test(r.out), r.out);
   assert.ok(/using the backup on its own timetable/.test(r.out));
 });
 
 test('end to end: a missing backup only disables the fallback; missing cameras stop it with a list', async () => {
-  let box = e2eSandbox([{ name: 'Dock Wired' }, { name: 'Garage' }]);
-  let r = await box.run([], {}, 1, 300);
+  let box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Garage' }]);
+  let r = await box.run([], {}, { stopAfter: 1, settleMs: 300 });
   assert.deepStrictEqual(r.uploads.map(u => u.role), ['primary']);
   assert.ok(/No camera matching RING_BACKUP_CAMERA_NAME "Downstream Lot".*Running without a backup/.test(r.out), r.out);
-  box = e2eSandbox([{ name: 'Front Door' }, { name: 'Garage' }]);
+  box = await e2eSandbox([{ name: 'Front Door' }, { name: 'Garage' }]);
   r = await box.run([], {});
   assert.strictEqual(r.code, 1);
   assert.ok(/No camera matching "Dock Wired" or "Downstream Lot"\. Available: "Front Door", "Garage"/.test(r.out), r.out);
   assert.strictEqual(r.uploads.length, 0);
-  box = e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
   r = await box.run(['--once'], { RING_CAMERA_NAME: '', RING_BACKUP_CAMERA_NAME: '' });
   assert.strictEqual(r.code, 1);
   assert.ok(/RING_CAMERA_NAME is unset/.test(r.out), 'two cameras and no name: refuse to guess');
@@ -1046,24 +1140,57 @@ section('6d. The Worker, run for real (in-memory R2)');
 let workerModule = null;
 async function worker() {
   if (workerModule) return workerModule;
-  const src = fs.readFileSync(path.join(__dirname, 'cloudflare_worker.js'), 'utf8');
-  const tmp = path.join(os.tmpdir(), `nhrc-worker-${process.pid}.mjs`);
-  fs.writeFileSync(tmp, src);
-  workerModule = (await import(require('url').pathToFileURL(tmp).href)).default;
-  fs.unlinkSync(tmp);
+  workerModule = await workerFrom(fs.readFileSync(path.join(__dirname, 'cloudflare_worker.js'), 'utf8'));
   return workerModule;
 }
+/** A Worker's fetch handler from its source text. */
+async function workerFrom(src) {
+  const tmp = path.join(os.tmpdir(), `nhrc-worker-${process.pid}-${Math.random().toString(36).slice(2)}.mjs`);
+  fs.writeFileSync(tmp, src);
+  try {
+    return (await import(require('url').pathToFileURL(tmp).href)).default;
+  } finally {
+    fs.unlinkSync(tmp);
+  }
+}
+/**
+ * A file as git has it at a commit - the code running at the boathouse before
+ * this release - or null where git or that commit is not to hand.
+ */
+function atCommit(commit, file) {
+  const r = require('child_process').spawnSync('git', ['show', `${commit}:camera/${file}`],
+    { cwd: __dirname, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  return r.status === 0 && r.stdout ? r.stdout : null;
+}
+// What ran at the boathouse on 14 October 2026, before the standby release.
+const DEPLOYED_SERVICE = 'a1b441df', DEPLOYED_WORKER = '4f5201fb';
+// An R2 bucket stand-in: the photo plus one small record per Pi. get() gives
+// what R2 gives - body, text(), json() - and failNext lets a test make the
+// next read fail, as R2 occasionally does.
 function memoryR2() {
-  let stored = null;
-  return {
-    async put(key, body, opts) {
-      stored = { key, bytes: new Uint8Array(body), customMetadata: Object.assign({}, opts.customMetadata),
-                 uploaded: new Date(), size: body.byteLength };
+  const objects = new Map();
+  let failReads = 0;
+  const bucket = {
+    async put(key, body, opts = {}) {
+      const bytes = typeof body === 'string' ? new TextEncoder().encode(body) : new Uint8Array(body);
+      objects.set(key, { key, bytes, customMetadata: Object.assign({}, opts.customMetadata),
+                         httpMetadata: opts.httpMetadata, uploaded: new Date(), size: bytes.byteLength });
     },
-    async get(key) { return stored && stored.key === key ? Object.assign({}, stored, { body: stored.bytes }) : null; },
-    async head(key) { return stored && stored.key === key ? stored : null; },
-    stored: () => stored,
+    async get(key) {
+      if (failReads > 0) { failReads--; throw new Error('R2: internal error'); }
+      const o = objects.get(key);
+      if (!o) return null;
+      const text = () => new TextDecoder().decode(o.bytes);
+      return Object.assign({}, o, { body: o.bytes, text: async () => text(), json: async () => JSON.parse(text()) });
+    },
+    async head(key) { return objects.get(key) || null; },
+    stored: (key = 'latest.jpg') => objects.get(key) || null,
+    record: (pi) => { const o = objects.get(`pi/${pi}.json`); return o ? JSON.parse(new TextDecoder().decode(o.bytes)) : null; },
+    setRecord: (pi, rec) => bucket.put(`pi/${pi}.json`, JSON.stringify(rec)),
+    failNext: (n = 1) => { failReads = n; },
+    keys: () => [...objects.keys()],
   };
+  return bucket;
 }
 const W_URL = 'https://nhrc-camera.example.workers.dev/latest.jpg';
 const SECRET = baseCfg.uploadSecret;
@@ -1137,8 +1264,1029 @@ test('Worker: uploads still need the secret and real JPEG bytes', async () => {
   assert.strictEqual(head.status, 404);
 });
 
+// ── The Worker's side of the two-Pi setup ────────────────────────────────────
+
+const HB_URL = 'https://nhrc-camera.example.workers.dev/heartbeat';
+const ST_URL = 'https://nhrc-camera.example.workers.dev/status';
+const beat = async (e, body, secret = SECRET) => (await worker()).fetch(new Request(HB_URL, { method: 'POST',
+  headers: { Authorization: `Bearer ${secret}`, 'Content-Type': 'application/json' },
+  body: typeof body === 'string' ? body : JSON.stringify(body) }), e);
+const status = async (e) => (await (await get(e, ST_URL)).json());
+const ago = (e, pi, minutes) => { const r = e.BUCKET.record(pi); r.at = Date.now() - minutes * 60000; return e.BUCKET.setRecord(pi, r); };
+const HEX_A = '0123456789abcdef', HEX_B = 'fedcba9876543210';
+
+test('Worker: check-ins need the secret, JSON, and a known Pi', async () => {
+  const e = env();
+  assert.strictEqual((await beat(e, { pi: 'main' }, 'wrong')).status, 401);
+  assert.strictEqual((await beat({ BUCKET: memoryR2() }, { pi: 'main' })).status, 401, 'no secret configured: nobody gets in');
+  assert.strictEqual((await beat(e, 'not json')).status, 400);
+  assert.strictEqual((await beat(e, 'null')).status, 400);
+  assert.strictEqual((await beat(e, { pi: 'backup' })).status, 400);
+  assert.strictEqual((await beat(e, { pi: 'main', pad: 'x'.repeat(3000) })).status, 413);
+  assert.deepStrictEqual(e.BUCKET.keys(), [], 'none of them stored anything');
+  const r = await (await worker()).fetch(new Request(HB_URL, { method: 'GET' }), e);
+  assert.strictEqual(r.status, 404, 'a GET is not a check-in (it asks for the photo, and there is none)');
+  assert.strictEqual((await (await worker()).fetch(new Request('https://nhrc-camera.example.workers.dev/other', { method: 'POST' }), e)).status, 405);
+  assert.deepStrictEqual(e.BUCKET.keys(), []);
+});
+
+test('Worker: a check-in is timed by the Worker\'s own clock, and the answer describes both Pis', async () => {
+  const e = env();
+  // A Pi just back from a power cut has no real-time clock: it may think it is
+  // 1970 until NTP catches up. Nothing it sends is used as a time.
+  let r = await beat(e, { pi: 'main', state: 'capturing', ring: 'ok', ringId: HEX_A, instance: HEX_B, at: 0 });
+  assert.strictEqual(r.status, 200);
+  let a = await r.json();
+  assert.strictEqual(a.ok, true);
+  assert.strictEqual(a.main.lastSeenSecondsAgo, 0);
+  assert.deepStrictEqual([a.main.state, a.main.ring, a.main.ringId, a.main.conflict], ['capturing', 'ok', HEX_A, false]);
+  assert.strictEqual(a.standby, null, 'never heard from');
+  assert.strictEqual(a.photo, null);
+  const rec = e.BUCKET.record('main');
+  assert.ok(Math.abs(rec.at - Date.now()) < 5000, 'stored with the Worker\'s time');
+  await ago(e, 'main', 20);
+  a = await (await beat(e, { pi: 'standby', state: 'standing-by', ring: 'ok', ringId: HEX_B })).json();
+  assert.ok(a.main.lastSeenSecondsAgo >= 1195 && a.main.lastSeenSecondsAgo <= 1205, String(a.main.lastSeenSecondsAgo));
+  assert.strictEqual(a.standby.lastSeenSecondsAgo, 0);
+  assert.strictEqual(a.standby.ringId, HEX_B);
+  r = await beat(e, { pi: ' MAIN ' });
+  assert.strictEqual(r.status, 200, 'the name is read leniently');
+});
+
+test('Worker: states and ids are reduced to safe values before storing', async () => {
+  const e = env();
+  await beat(e, { pi: 'standby', state: '<script>', ring: 'pwned', ringId: 'NOT-HEX!', instance: 'a'.repeat(64) });
+  const rec = e.BUCKET.record('standby');
+  assert.deepStrictEqual([rec.state, rec.ring, rec.ringId, rec.instance], ['unknown', 'unknown', '', '']);
+  for (const s of ['starting', 'capturing', 'standing-by', 'blocked', 'ring-failed']) {
+    await beat(e, { pi: 'standby', state: s, ring: 'failed' });
+    assert.deepStrictEqual([e.BUCKET.record('standby').state, e.BUCKET.record('standby').ring], [s, 'failed']);
+  }
+});
+
+test('Worker: a photo counts as hearing from the Pi that sent it - an unlabelled one from the main Pi', async () => {
+  // From the standby: says nothing about the main Pi.
+  let e = env();
+  await put(e, { 'X-Camera-Role': 'primary', 'X-Camera-Name': 'Dock Wired', 'X-Camera-Pi': 'standby' });
+  let a = await (await beat(e, { pi: 'standby', state: 'capturing' })).json();
+  assert.strictEqual(a.main, null, 'a standby photo is not a sign of life from the main Pi');
+  assert.strictEqual(a.photo.pi, 'standby');
+  // From the main Pi: counts, and a newer photo beats an older check-in.
+  e = env();
+  await beat(e, { pi: 'main', state: 'capturing' });
+  await ago(e, 'main', 30);
+  await put(e, { 'X-Camera-Role': 'primary', 'X-Camera-Pi': 'main' });
+  ageBy(e, 2);
+  a = await (await beat(e, { pi: 'standby' })).json();
+  assert.ok(a.main.lastSeenSecondsAgo >= 115 && a.main.lastSeenSecondsAgo <= 125, String(a.main.lastSeenSecondsAgo));
+  // From software older than the standby (no X-Camera-Pi): there was only the main Pi.
+  e = env();
+  await put(e, { 'X-Camera-Role': 'primary' });
+  ageBy(e, 3);
+  a = await (await beat(e, { pi: 'standby' })).json();
+  assert.ok(a.main && a.main.lastSeenSecondsAgo >= 175 && a.main.lastSeenSecondsAgo <= 185, JSON.stringify(a.main));
+  assert.strictEqual(a.main.state, null, 'known only from its photo');
+  assert.strictEqual(a.photo.pi, null);
+});
+
+test('Worker: a probe (--status) is answered but recorded nowhere', async () => {
+  const e = env();
+  const a = await (await beat(e, { pi: 'standby', probe: true, ringId: HEX_A })).json();
+  assert.strictEqual(a.ok, true);
+  assert.strictEqual(a.standby, null);
+  assert.deepStrictEqual(e.BUCKET.keys(), []);
+});
+
+test('Worker: two Pis checking in under one name are flagged, for an hour', async () => {
+  const e = env();
+  await beat(e, { pi: 'main', instance: HEX_A });
+  let a = await (await beat(e, { pi: 'main', instance: HEX_A })).json();
+  assert.strictEqual(a.conflict, false, 'the same Pi again');
+  a = await (await beat(e, { pi: 'main', instance: HEX_B })).json();
+  assert.strictEqual(a.conflict, true, 'a different Pi within 15 minutes');
+  assert.strictEqual((await status(e)).pis.main.conflict, true, '/status says so too');
+  const rec = e.BUCKET.record('main');
+  rec.conflictAt = Date.now() - 61 * 60000;
+  await e.BUCKET.setRecord('main', rec);
+  a = await (await beat(e, { pi: 'main', instance: HEX_B })).json();
+  assert.strictEqual(a.conflict, false, 'cleared an hour after it last happened');
+  // A Pi replaced after a long silence is not a conflict.
+  await ago(e, 'main', 20);
+  a = await (await beat(e, { pi: 'main', instance: HEX_A })).json();
+  assert.strictEqual(a.conflict, false);
+});
+
+test('Worker: storage trouble is never reported as "the main Pi is quiet"', async () => {
+  const e = env();
+  await beat(e, { pi: 'main' });
+  e.BUCKET.failNext(1);
+  const r = await beat(e, { pi: 'standby' });
+  assert.strictEqual(r.status, 503, 'an error, which the standby treats as no news');
+  // A damaged record reads as none - and the Pi's next check-in rewrites it.
+  await e.BUCKET.put('pi/main.json', '{ not json');
+  let a = await (await beat(e, { pi: 'standby' })).json();
+  assert.strictEqual(a.main, null);
+  await beat(e, { pi: 'main' });
+  a = await (await beat(e, { pi: 'standby' })).json();
+  assert.strictEqual(a.main.lastSeenSecondsAgo, 0);
+  // /status stays up, saying the Pis cannot be read.
+  await put(e, { 'X-Camera-Role': 'primary' });
+  e.BUCKET.failNext(1);
+  const st = await status(e);
+  assert.strictEqual(st.pis, 'unavailable');
+  assert.strictEqual(st.role, 'primary', 'the photo part still answers');
+});
+
+test('Worker: /status shows both Pis - without their Ring ids - and which Pi sent the photo', async () => {
+  const e = env();
+  let st = await status(e);
+  assert.deepStrictEqual(st.pis, { main: null, standby: null }, 'shown even before the first photo');
+  await beat(e, { pi: 'main', state: 'capturing', ring: 'ok', ringId: HEX_A, instance: HEX_B });
+  await beat(e, { pi: 'standby', state: 'standing-by', ring: 'ok', ringId: HEX_B, instance: HEX_A });
+  await put(e, { 'X-Camera-Role': 'primary', 'X-Camera-Name': 'Dock Wired', 'X-Camera-Pi': 'main' });
+  st = await status(e);
+  assert.strictEqual(st.pi, 'main');
+  assert.deepStrictEqual(Object.keys(st.pis.main).sort(), ['conflict', 'lastSeenSecondsAgo', 'ring', 'state']);
+  assert.deepStrictEqual([st.pis.standby.state, st.pis.standby.ring], ['standing-by', 'ok']);
+  assert.ok(!JSON.stringify(st).includes(HEX_A) && !JSON.stringify(st).includes(HEX_B), 'no device ids in public');
+  // The website's view of the photo is unchanged by any of this.
+  const img = await get(e);
+  assert.strictEqual(img.status, 200);
+  assert.strictEqual(img.headers.get('X-Camera-Role'), 'primary');
+});
+
+test('Worker: an upload records the Pi that sent it; anything else is dropped', async () => {
+  const e = env();
+  await put(e, { 'X-Camera-Pi': 'Standby' });
+  assert.strictEqual(e.BUCKET.stored().customMetadata.pi, 'standby');
+  await put(e, { 'X-Camera-Pi': 'laptop' });
+  assert.strictEqual(e.BUCKET.stored().customMetadata.pi, '');
+  await put(e, {});
+  assert.strictEqual(e.BUCKET.stored().customMetadata.pi, '');
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
-section('6e. Timelapse: full-resolution frames at set times, gentle on the Pi');
+section('6e. Two Pis: check-ins, the standby\'s decision, whole days on a fake clock');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The standby must take over when - and only when - the main Pi has gone
+// quiet, hand back the moment it returns, and never wake a camera on a
+// guess. Everything here runs the real functions on a fake clock.
+
+const mainCfg = Object.assign({}, dualCfg, { pi: 'main', takeoverMinutes: 15 });
+const standbyCfg = Object.assign({}, dualCfg, { pi: 'standby', takeoverMinutes: 15 });
+const ID_STANDBY = { ringId: '1111111111111111', instance: '2222222222222222' };
+const ID_MAIN_RING = '3333333333333333';
+
+/** Runs fn with console output captured; returns the lines. */
+async function captureLogs(fn) {
+  const lines = [];
+  const ol = console.log, oe = console.error;
+  console.log = (...a) => lines.push(a.join(' '));
+  console.error = (...a) => lines.push(a.join(' '));
+  try { await fn(); } finally { console.log = ol; console.error = oe; }
+  return lines;
+}
+const flush = () => new Promise(r => setImmediate(r));
+
+test('the defaults: this Pi is the main one, and a standby takes over after 15 quiet minutes', () => {
+  assert.strictEqual(S.CONFIG.pi, 'main');
+  assert.strictEqual(S.CONFIG.takeoverMinutes, 15);
+  assert.strictEqual(S.CHECK_IN_SECONDS, 300, 'both Pis check in every 5 minutes');
+  assert.strictEqual(S.STANDBY_WAKE_OFFSET_MS, 30000, 'the standby looks 30 s into each slot');
+  assert.deepStrictEqual(S.validateConfig(standbyCfg), []);
+  assert.deepStrictEqual(S.validateConfig(mainCfg), []);
+});
+
+test('CAMERA_PI and STANDBY_TAKEOVER_MINUTES are validated', () => {
+  const v = (over) => S.validateConfig(Object.assign({}, dualCfg, over));
+  assert.ok(v({ pi: 'backup' }).some(p => /CAMERA_PI must be "main" or "standby"/.test(p)));
+  assert.ok(v({ pi: '' }).some(p => /CAMERA_PI/.test(p)));
+  for (const m of [9, 1441, 12.5, NaN, 0, -15]) {
+    assert.ok(v({ pi: 'standby', takeoverMinutes: m }).some(p => /STANDBY_TAKEOVER_MINUTES/.test(p)), String(m));
+  }
+  for (const m of [10, 15, 60, 1440]) assert.deepStrictEqual(v({ pi: 'standby', takeoverMinutes: m }), [], String(m));
+  assert.deepStrictEqual(S.validateConfig(baseCfg), [], 'a config from before the standby existed is still valid');
+  for (const m of [5, NaN, 0]) {
+    assert.deepStrictEqual(v({ pi: 'main', takeoverMinutes: m }), [], `the main Pi has no use for it: ${m} never stops its photos`);
+  }
+});
+
+test('the standby decision: 15 quiet minutes, or a main Pi never heard from - and nothing else', () => {
+  const d = (main) => S.standbyDecision({ ok: true, main }, standbyCfg);
+  const checkedIn = (seconds) => ({ lastSeenSecondsAgo: seconds, state: 'capturing' });
+  assert.deepStrictEqual(d(null), { capture: true, seen: null, reason: 'never' });
+  assert.deepStrictEqual(d({ lastSeenSecondsAgo: null }), { capture: true, seen: null, reason: 'never' });
+  assert.strictEqual(d(checkedIn(0)).capture, false);
+  assert.strictEqual(d(checkedIn(899)).capture, false, '14:59 is not yet');
+  assert.strictEqual(d(checkedIn(900)).capture, true, '15:00 is');
+  assert.strictEqual(d(checkedIn(86400)).capture, true);
+  for (const odd of [{}, { lastSeenSecondsAgo: '900' }, { lastSeenSecondsAgo: -5 }, { lastSeenSecondsAgo: NaN }, 'main', 42]) {
+    assert.strictEqual(d(odd).capture, false, `unreadable is not a yes: ${JSON.stringify(odd)}`);
+  }
+  assert.strictEqual(S.standbyDecision({ ok: true }, standbyCfg).capture, false, 'an answer without "main" (an old Worker)');
+  assert.strictEqual(S.standbyDecision(null, standbyCfg).capture, false);
+  assert.strictEqual(S.standbyDecision({ ok: true, main: checkedIn(1000) },
+    Object.assign({}, standbyCfg, { takeoverMinutes: 20 })).capture, false, 'follows STANDBY_TAKEOVER_MINUTES');
+  // A main Pi known only by its photos runs software from before check-ins:
+  // it uploads every 15 minutes, sometimes later - a late photo is not a dead Pi.
+  for (const seen of [600, 900, 3600, 86400]) {
+    assert.deepStrictEqual(d({ lastSeenSecondsAgo: seen, state: null }), { capture: false, seen, reason: 'no-check-ins' }, String(seen));
+  }
+});
+
+test('Ring device ids: a one-way hash of the id inside the token, the same however the token rotates', () => {
+  const a = S.ringIdentity(ringToken('hid-pi-one'));
+  const rotated = Buffer.from(JSON.stringify({ rt: 'a-much-newer-refresh-token', hid: 'hid-pi-one', pnc: { x: 1 } })).toString('base64');
+  assert.ok(/^[0-9a-f]{16}$/.test(a), a);
+  assert.strictEqual(S.ringIdentity(rotated), a, 'the refresh token changes hourly; the device does not');
+  assert.notStrictEqual(S.ringIdentity(ringToken('hid-pi-two')), a);
+  assert.strictEqual(S.ringIdentity('stand-in-refresh-token'), '', 'a raw token carries no device id');
+  assert.strictEqual(S.ringIdentity(Buffer.from('{"rt":"x"}').toString('base64')), '', 'no hid');
+  assert.strictEqual(S.ringIdentity(''), '');
+  assert.strictEqual(S.ringIdentity(null), '');
+  assert.ok(!ringToken('hid-pi-one').includes(a) && !a.includes('hid'), 'nothing of the token in the id');
+});
+
+test('machine ids are a stable one-way hash', () => {
+  const m = S.machineIdentity();
+  assert.ok(/^[0-9a-f]{16}$/.test(m), m);
+  assert.strictEqual(S.machineIdentity(), m);
+  assert.ok(!m.includes(os.hostname()));
+});
+
+test('durations read naturally in the log', () => {
+  const cases = [[0, '0 s'], [42, '42 s'], [89, '89 s'], [90, '2 min'], [900, '15 min'], [5340, '89 min'],
+                 [5400, '1 h 30 min'], [7170, '2 h 00 min'], [86399, '24 h 00 min'], [172800, '2 days'], [-5, '0 s'], ['x', '0 s']];
+  for (const [s, want] of cases) assert.strictEqual(S.fmtAgo(s), want, String(s));
+});
+
+test('a check-in POSTs to /heartbeat beside the upload URL, with the secret, and returns the answer', async () => {
+  let seen;
+  const reply = { ok: true, conflict: false, main: null, standby: null, photo: null };
+  const f = async (url, opts) => { seen = { url, opts }; return { ok: true, status: 200, json: async () => reply }; };
+  assert.deepStrictEqual(await S.checkIn({ pi: 'standby', state: 'starting' }, baseCfg, f), reply);
+  assert.strictEqual(seen.url, 'https://cam.roworno.com/heartbeat');
+  assert.strictEqual(seen.opts.method, 'POST');
+  assert.strictEqual(seen.opts.headers.Authorization, `Bearer ${baseCfg.uploadSecret}`);
+  assert.strictEqual(seen.opts.headers['Content-Type'], 'application/json');
+  assert.deepStrictEqual(JSON.parse(seen.opts.body), { pi: 'standby', state: 'starting' });
+  assert.ok(seen.opts.signal, 'bounded by a deadline');
+});
+
+test('a failed check-in says why - and an old Worker is named as the cause', async () => {
+  const answer = (status, body) => async () => ({ ok: status < 300, status, text: async () => body,
+    json: async () => JSON.parse(body) });
+  await assert.rejects(S.checkIn({ pi: 'main' }, baseCfg, answer(405, 'Method not allowed')), /HTTP 405.*update it/);
+  await assert.rejects(S.checkIn({ pi: 'main' }, baseCfg, answer(401, 'Unauthorized')),
+    (e) => /HTTP 401/.test(e.message) && !/update it/.test(e.message));
+  await assert.rejects(S.checkIn({ pi: 'main' }, baseCfg, answer(200, 'OK')), /something unexpected/, 'not JSON');
+  await assert.rejects(S.checkIn({ pi: 'main' }, baseCfg, answer(200, '{"ok":false}')), /something unexpected/);
+  const down = async () => { throw Object.assign(new Error('fetch failed'), { cause: Object.assign(
+    new Error('getaddrinfo ENOTFOUND cam.roworno.com'), { code: 'ENOTFOUND' }) }); };
+  await assert.rejects(S.checkIn({ pi: 'main' }, baseCfg, down),
+    (e) => /ENOTFOUND/.test(e.message) && /cam\.roworno\.com/.test(e.message) && !e.message.includes(baseCfg.uploadSecret));
+});
+
+test('a check-in that gets no answer gives up at its deadline', async () => {
+  const hang = (url, opts) => new Promise((_, reject) => opts.signal.addEventListener('abort',
+    () => reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }))));
+  const t0 = Date.now();
+  await assert.rejects(S.checkIn({ pi: 'standby' }, baseCfg, hang, 150), /no answer within/);
+  assert.ok(Date.now() - t0 < 2000);
+});
+
+test('the main Pi checks in as "main"; a failing Worker is logged once an hour, not every 5 minutes', async () => {
+  let t = ny(DAY, 9, 0).getTime();
+  const bodies = [];
+  let fail = false;
+  const hb = S.createMainCheckIn(mainCfg, { now: () => new Date(t), identity: { ringId: ID_MAIN_RING, instance: '4444444444444444' },
+    checkIn: async (b) => { bodies.push(b); if (fail) throw new Error('check-in failed: HTTP 503 Storage unavailable'); return { ok: true, conflict: false, main: null, standby: null }; } });
+  const lines = await captureLogs(async () => {
+    await hb();
+    fail = true;
+    for (let i = 0; i < 24; i++) { t += 5 * 60000; await hb(); }   // two hours of failures
+    fail = false;
+    t += 5 * 60000;
+    await hb();
+  });
+  assert.deepStrictEqual(bodies[0], { pi: 'main', state: 'capturing', ring: 'ok', ringId: ID_MAIN_RING, instance: '4444444444444444' });
+  assert.strictEqual(bodies.length, 26);
+  assert.strictEqual(lines.filter(l => /HTTP 503/.test(l)).length, 2, `at the first failure and an hour later: ${lines.join(' | ')}`);
+  assert.ok(lines.some(l => /The cameras carry on/.test(l)));
+  assert.strictEqual(lines.filter(l => /working again/.test(l)).length, 1);
+  await hb();   // a rejected check-in never escapes
+});
+
+test('the main Pi warns when another Pi also checks in as main, or the standby shares its Ring device', async () => {
+  let t = ny(DAY, 9, 0).getTime();
+  const hb = S.createMainCheckIn(mainCfg, { now: () => new Date(t), identity: { ringId: ID_MAIN_RING, instance: '4444444444444444' },
+    checkIn: async () => ({ ok: true, conflict: true, main: {}, standby: { lastSeenSecondsAgo: 5, ringId: ID_MAIN_RING } }) });
+  const lines = await captureLogs(async () => { await hb(); t += 5 * 60000; await hb(); t += 60 * 60000; await hb(); });
+  assert.strictEqual(lines.filter(l => /Two different Pis have checked in as the MAIN Pi/.test(l)).length, 2, 'hourly');
+  assert.strictEqual(lines.filter(l => /standby Pi signs in to Ring as the same device/.test(l)).length, 2);
+});
+
+/** createStandby with a scripted Worker; every check-in and Ring call is recorded. */
+function fakeStandby(opts = {}) {
+  let t = (opts.start || ny(DAY, 9, 0)).getTime();
+  const calls = { checkIns: [], connects: 0, ringChecks: 0, disconnects: 0 };
+  const w = { mainSeen: 60, fail: false, mainRingId: '', conflict: false, odd: false };
+  const sb = S.createStandby(Object.assign({}, standbyCfg, opts.cfg || {}), {
+    now: () => new Date(t),
+    identity: opts.identity || ID_STANDBY,
+    ringWaitMs: opts.ringWaitMs || 50,
+    checkIn: async (b) => {
+      calls.checkIns.push(Object.assign({ at: t }, b));
+      if (w.fail) throw new Error('check-in with nhrc-camera.example.workers.dev failed: ECONNREFUSED');
+      if (w.odd) return { ok: true };
+      return { ok: true, conflict: w.conflict, standby: null,
+        main: w.mainSeen === null ? null : { lastSeenSecondsAgo: w.mainSeen, state: 'capturing', ringId: w.mainRingId || null } };
+    },
+    connect: opts.connect || (async () => { calls.connects++; if (opts.connectFails && opts.connectFails()) throw new Error('Refresh token is not valid.'); }),
+    ringCheck: opts.ringCheck || (async () => { calls.ringChecks++; if (opts.ringCheckFails && opts.ringCheckFails()) throw new Error('ETIMEDOUT'); return '"Dock Wired" online, "Downstream Lot" online'; }),
+    disconnect: () => { calls.disconnects++; },
+  });
+  return { sb, calls, w, advance: (ms) => { t += ms; } };
+}
+
+test('the standby signs in to Ring only after the Worker has answered, then stands by', async () => {
+  const f = fakeStandby();
+  f.w.fail = true;
+  let lines = await captureLogs(async () => { assert.strictEqual(await f.sb.gate(), false); });
+  assert.strictEqual(f.calls.connects, 0, 'no Ring call before the Worker has confirmed who the main Pi is');
+  assert.strictEqual(f.sb.state(), 'starting');
+  assert.ok(lines.some(l => /ECONNREFUSED.*Not capturing until the Worker answers/.test(l)), lines.join(' | '));
+  f.w.fail = false;
+  f.advance(5 * 60000);
+  lines = await captureLogs(async () => { assert.strictEqual(await f.sb.gate(), false); await flush(); });
+  assert.strictEqual(f.calls.connects, 1);
+  assert.deepStrictEqual([f.sb.state(), f.sb.ring()], ['standing-by', 'ok']);
+  assert.ok(lines.some(l => /working again/.test(l)));
+  assert.ok(lines.some(l => /Standing by: the main Pi checked in 60 s ago\. This Pi takes over if it is quiet for 15 min/.test(l)), lines.join(' | '));
+  const last = f.calls.checkIns[f.calls.checkIns.length - 1];
+  assert.deepStrictEqual([last.pi, last.state, last.ring, last.ringId], ['standby', 'standing-by', 'ok', ID_STANDBY.ringId],
+    'the Worker is told about the change straight away');
+  f.advance(5 * 60000);
+  await f.sb.gate();
+  assert.strictEqual(f.calls.connects, 1, 'signed in once, not at every check');
+});
+
+test('the standby takes over at 15 quiet minutes, and hands back the moment the main Pi checks in', async () => {
+  const f = fakeStandby();
+  const lines = await captureLogs(async () => {
+    f.w.mainSeen = 899;
+    assert.strictEqual(await f.sb.gate(), false, '14:59');
+    f.w.mainSeen = 900;
+    assert.strictEqual(await f.sb.gate(), true, '15:00');
+    assert.strictEqual(f.sb.state(), 'capturing');
+    f.w.mainSeen = 1200;
+    assert.strictEqual(await f.sb.gate(), true, 'still quiet');
+    f.w.mainSeen = 30;
+    assert.strictEqual(await f.sb.gate(), false, 'back');
+    assert.strictEqual(f.sb.state(), 'standing-by');
+  });
+  assert.ok(lines.some(l => /has not checked in for 15 min - this Pi is taking over the cameras/.test(l)), lines.join(' | '));
+  assert.ok(lines.some(l => /checking in again \(30 s ago\) - this Pi is back to standing by/.test(l)));
+  assert.strictEqual(lines.filter(l => /taking over/.test(l)).length, 1, 'logged at the change, not every 5 minutes');
+});
+
+test('a main Pi never heard from: the standby runs the cameras', async () => {
+  const f = fakeStandby();
+  f.w.mainSeen = null;
+  const lines = await captureLogs(async () => { assert.strictEqual(await f.sb.gate(), true); });
+  assert.ok(lines.some(l => /never checked in with the Worker - this Pi is running the cameras/.test(l)));
+});
+
+test('no news is not news: a Worker outage never switches the standby on - or off', async () => {
+  const f = fakeStandby();
+  await captureLogs(async () => {
+    await f.sb.gate();                       // standing by
+    f.w.fail = true;
+    f.w.mainSeen = 3600;
+    for (let i = 0; i < 12; i++) { f.advance(5 * 60000); assert.strictEqual(await f.sb.gate(), false, 'standing by stays standing by'); }
+    f.w.fail = false;
+    assert.strictEqual(await f.sb.gate(), true, 'and takes over once the Worker says so');
+    f.w.fail = true;
+    for (let i = 0; i < 12; i++) { f.advance(5 * 60000); assert.strictEqual(await f.sb.gate(), true, 'capturing stays capturing'); }
+  });
+});
+
+test('an answer it cannot read keeps the standby doing what it was doing', async () => {
+  const f = fakeStandby();
+  await captureLogs(async () => {
+    await f.sb.gate();
+    f.w.odd = true;
+    assert.strictEqual(await f.sb.gate(), false);
+    f.w.odd = false; f.w.mainSeen = 3600;
+    assert.strictEqual(await f.sb.gate(), true);
+    f.w.odd = true;
+    assert.strictEqual(await f.sb.gate(), true);
+  });
+});
+
+test('same Ring device as the main Pi: blocked - no Ring call at all, even with the main Pi quiet', async () => {
+  const f = fakeStandby();
+  f.w.mainRingId = ID_STANDBY.ringId;
+  f.w.mainSeen = 3600;
+  const lines = await captureLogs(async () => {
+    for (let i = 0; i < 5; i++) { assert.strictEqual(await f.sb.gate(), false); f.advance(5 * 60000); }
+  });
+  assert.strictEqual(f.calls.connects, 0, 'it never signs in to Ring');
+  assert.strictEqual(f.sb.state(), 'blocked');
+  assert.strictEqual(lines.filter(l => /same device as the main Pi/.test(l)).length, 1, 'said once, clearly');
+  assert.ok(f.calls.checkIns.slice(1).every(c => c.state === 'blocked'), '/status shows why');
+  // A main Pi whose token carries no device id cannot be compared, and is not a match.
+  const g = fakeStandby();
+  g.w.mainRingId = '';
+  await captureLogs(() => g.sb.gate());
+  assert.strictEqual(g.calls.connects, 1);
+});
+
+test('a standby that cannot sign in to Ring reports it, retries hourly, and cannot take over meanwhile', async () => {
+  let failing = true;
+  const f = fakeStandby({ connectFails: () => failing });
+  f.w.mainSeen = 3600;
+  const lines = await captureLogs(async () => {
+    for (let i = 0; i < 12; i++) { assert.strictEqual(await f.sb.gate(), false); f.advance(5 * 60000); }
+    assert.strictEqual(f.sb.state(), 'ring-failed');
+    assert.strictEqual(f.calls.connects, 1, 'one attempt in the first hour');
+    assert.strictEqual(await f.sb.gate(), false, 'the hourly retry, still failing');
+    assert.strictEqual(f.calls.connects, 2);
+    failing = false;
+    for (let i = 0; i < 11; i++) { f.advance(5 * 60000); assert.strictEqual(await f.sb.gate(), false); }
+    f.advance(5 * 60000);
+    assert.strictEqual(await f.sb.gate(), true, 'signed in at the next hourly attempt - and the main Pi is quiet');
+  });
+  assert.strictEqual(f.calls.connects, 3);
+  assert.ok(lines.some(l => /Could not sign in to Ring: Refresh token is not valid\. Trying again in an hour/.test(l)));
+  assert.ok(f.calls.checkIns.some(c => c.state === 'ring-failed' && c.ring === 'failed'), '/status shows it');
+});
+
+test('the Ring sign-in is re-proved every 6 hours while standing by - never while capturing', async () => {
+  let checkFails = false;
+  const f = fakeStandby({ ringCheckFails: () => checkFails });
+  const lines = await captureLogs(async () => {
+    for (let i = 0; i < 288; i++) { await f.sb.gate(); f.advance(5 * 60000); }   // a day standing by
+  });
+  assert.strictEqual(f.calls.ringChecks, 3, 'at 6, 12 and 18 hours');
+  assert.strictEqual(lines.filter(l => /Ring sign-in still works \("Dock Wired" online, "Downstream Lot" online\)/.test(l)).length, 3);
+  f.w.mainSeen = 3600;
+  await captureLogs(async () => { for (let i = 0; i < 288; i++) { await f.sb.gate(); f.advance(5 * 60000); } });
+  assert.strictEqual(f.calls.ringChecks, 3, 'none while capturing: the captures prove it');
+  // Back to standing by, it is checked at the next wake. A failed check is
+  // visible, and looked at again an hour later.
+  f.w.mainSeen = 60;
+  checkFails = true;
+  await captureLogs(async () => { await f.sb.gate(); });
+  assert.strictEqual(f.calls.ringChecks, 3, 'not at the hand-back itself');
+  await captureLogs(async () => { f.advance(5 * 60000); await f.sb.gate(); await flush(); });
+  const before = f.calls.ringChecks;
+  assert.strictEqual(before, 4);
+  assert.strictEqual(f.sb.ring(), 'failed');
+  assert.deepStrictEqual(f.calls.checkIns.slice(-1).map(c => [c.state, c.ring]), [['standing-by', 'failed']],
+    'the Worker hears about it at once');
+  await captureLogs(async () => { for (let i = 0; i < 12; i++) { f.advance(5 * 60000); await f.sb.gate(); } });
+  assert.strictEqual(f.calls.ringChecks, before + 1, 'retried after an hour, not every 5 minutes');
+  checkFails = false;
+  await captureLogs(async () => { for (let i = 0; i < 12; i++) { f.advance(5 * 60000); await f.sb.gate(); } });
+  assert.strictEqual(f.sb.ring(), 'ok');
+});
+
+test('a Ring sign-in that hangs never stops the standby checking in; it is adopted when it finishes', async () => {
+  // ring-client-api retries an unreachable server for ever - a Pi-hole
+  // blocklist covering ring.com would do it. The standby must keep checking in.
+  let finish;
+  const f = fakeStandby({ connect: () => new Promise(r => { finish = r; }) });
+  f.w.mainSeen = 3600;
+  const lines = await captureLogs(async () => {
+    const t0 = Date.now();
+    assert.strictEqual(await f.sb.gate(), false);
+    assert.ok(Date.now() - t0 < 1000, 'waited only ringWaitMs');
+    assert.strictEqual(f.sb.state(), 'starting');
+    for (let i = 0; i < 3; i++) { f.advance(5 * 60000); assert.strictEqual(await f.sb.gate(), false, 'still checking in, still not capturing'); }
+    finish();
+    await flush();
+    f.advance(5 * 60000);
+    assert.strictEqual(await f.sb.gate(), true, 'signed in at last - and the main Pi is quiet');
+  });
+  assert.strictEqual(lines.filter(l => /Signing in to Ring is taking more than a minute/.test(l)).length, 1, lines.join(' | '));
+  assert.strictEqual(f.calls.checkIns.filter(c => c.state === 'starting').length >= 4, true);
+});
+
+test('a Ring check that hangs is waited for briefly, then left to finish in the background', async () => {
+  let checks = 0;
+  const f = fakeStandby({ ringCheck: () => { checks++; return new Promise(() => {}); } });
+  const lines = await captureLogs(async () => {
+    for (let i = 0; i < 12 * 7; i++) { await f.sb.gate(); f.advance(5 * 60000); }   // seven hours
+  });
+  assert.strictEqual(checks, 1, 'one check at 6 hours, not a new one every 5 minutes behind it');
+  assert.strictEqual(lines.filter(l => /Ring check is taking more than a minute/.test(l)).length, 1);
+});
+
+test('blocked after signing in: the standby signs out, and a sign-in still in progress is let go', async () => {
+  const f = fakeStandby();
+  await captureLogs(async () => {
+    await f.sb.gate();                                     // signed in, standing by
+    f.w.mainRingId = ID_STANDBY.ringId;                    // the main Pi now claims this Pi's Ring device
+    f.advance(5 * 60000);
+    assert.strictEqual(await f.sb.gate(), false);
+  });
+  assert.strictEqual(f.sb.state(), 'blocked');
+  assert.strictEqual(f.calls.disconnects, 1, 'signed out at once');
+  // A sign-in that was still under way when the block came is discarded when it lands.
+  let finish;
+  const g = fakeStandby({ connect: () => new Promise(r => { finish = r; }) });
+  await captureLogs(async () => {
+    await g.sb.gate();                                     // signing in (hangs)
+    g.w.mainRingId = ID_STANDBY.ringId;
+    g.advance(5 * 60000);
+    await g.sb.gate();                                     // blocked
+    finish();
+    await flush(); await flush();
+  });
+  assert.strictEqual(g.sb.state(), 'blocked');
+  assert.strictEqual(g.calls.disconnects, 1, 'the late sign-in is signed straight out again');
+  g.w.mainSeen = 3600;
+  await captureLogs(async () => { g.advance(5 * 60000); assert.strictEqual(await g.sb.gate(), false, 'and never captures'); });
+});
+
+test('two Pis checking in as the standby are warned about, hourly', async () => {
+  const f = fakeStandby();
+  f.w.conflict = true;
+  const lines = await captureLogs(async () => { for (let i = 0; i < 13; i++) { await f.sb.gate(); f.advance(5 * 60000); } });
+  assert.strictEqual(lines.filter(l => /checked in as the STANDBY Pi/.test(l)).length, 2);
+});
+
+test('the Ring readiness check names each camera and its connection, waking none', async () => {
+  const api = { fetchRingDevices: async () => ({ allCameras: [
+    { description: 'Dock Wired', alerts: { connection: 'online' } }, { description: 'Downstream Lot', alerts: { connection: 'offline' } },
+    { description: 'Front Door', alerts: {} }] }) };
+  assert.strictEqual(await S.ringReadiness(api, dualCfg), '"Dock Wired" online, "Downstream Lot" offline');
+  assert.strictEqual(await S.ringReadiness(api, Object.assign({}, dualCfg, { backupCameraName: 'Garage' })),
+    '"Dock Wired" online, "Garage" is not on the account');
+  assert.strictEqual(await S.ringReadiness(api, Object.assign({}, dualCfg, { cameraName: '', backupCameraName: '' })), '3 cameras on the account');
+  await assert.rejects(S.ringReadiness({ fetchRingDevices: async () => { throw new Error('401'); } }, dualCfg), /401/);
+});
+
+// ── The scheduler with a standby gate, whole days ──────────────────────────
+//
+// The main Pi is modelled as checking in at every 5-minute boundary (plus half
+// a second) whenever it is alive; mainDead(at) says when it is not.
+
+async function simulateStandby(from, to, opts = {}) {
+  const { mainDead = () => false, primaryDown = () => false, backupDown = () => false,
+          workerDown = () => false, connectFails = () => false } = opts;
+  let t = from.getTime();
+  const captures = [], checkIns = [], sleeps = [];
+  let pending = null;
+  const lastMainCheckIn = (now) => {
+    let c = Math.floor((now - 500) / 300000) * 300000 + 500;
+    for (let i = 0; i < 3000 && mainDead(new Date(c)); i++) c -= 300000;
+    return mainDead(new Date(c)) ? null : c;
+  };
+  const sb = S.createStandby(standbyCfg, {
+    now: () => new Date(t),
+    identity: ID_STANDBY,
+    checkIn: async (b) => {
+      checkIns.push({ at: new Date(t), state: b.state });
+      if (workerDown(new Date(t))) throw new Error('ECONNREFUSED');
+      const c = lastMainCheckIn(t);
+      return { ok: true, conflict: false, standby: null,
+        main: c === null ? null : { lastSeenSecondsAgo: Math.round((t - c) / 1000), state: 'capturing', ringId: ID_MAIN_RING } };
+    },
+    connect: async () => { if (connectFails(new Date(t))) throw new Error('Refresh token is not valid.'); },
+    ringCheck: async () => '"Dock Wired" online',
+  });
+  const tick = S.createScheduler(standbyCfg, {
+    now: () => new Date(t),
+    setTimer: (fn, ms) => { pending = { fn, ms }; sleeps.push(ms); },
+    hasPrimary: () => true, hasBackup: () => true,
+    gate: sb.gate, wakeOffsetMs: S.STANDBY_WAKE_OFFSET_MS, maxSleepSeconds: S.CHECK_IN_SECONDS,
+    cycle: async (role) => {
+      const at = new Date(t);
+      t += 20000;
+      const down = role === 'backup' ? backupDown(at) : primaryDown(at);
+      captures.push({ role, at, ok: !down });
+      if (down) throw Object.assign(new Error(`${role} offline`), { stage: 'capture' });
+    },
+  });
+  await captureLogs(async () => {
+    await tick();
+    while (pending && t + pending.ms <= to.getTime()) {
+      const p = pending; pending = null;
+      t += p.ms;
+      await p.fn();
+    }
+    await flush();
+  });
+  return { captures, checkIns, sleeps, sb, primary: captures.filter(c => c.role === 'primary'), backup: captures.filter(c => c.role === 'backup') };
+}
+
+test('a normal day: the main Pi checks in all day, and the standby never touches a camera', async () => {
+  const r = await simulateStandby(ny(DAY, 0, 0), ny(NEXT, 0, 0));
+  assert.strictEqual(r.captures.length, 0);
+  const regular = r.checkIns.filter(c => nyClock(c.at).slice(6, 8) === '30');
+  assert.ok(regular.length >= 287, `checks in every 5 minutes, 30 s into the slot (${regular.length})`);
+  assert.ok(Math.max(...r.sleeps) <= 300000 + 30000, 'never sleeps more than 5 minutes');
+  assert.strictEqual(r.sb.state(), 'standing-by');
+});
+
+test('the main Pi dies at 9:02: the standby takes over at 9:15 and captures every 15 minutes; hands back at 11:00', async () => {
+  const r = await simulateStandby(ny(DAY, 8, 0), ny(DAY, 12, 0), { mainDead: between(9 + 2 / 60, 11) });
+  const times = r.primary.map(c => nyClock(c.at));
+  assert.deepStrictEqual(times, ['09:15:30', '09:30:30', '09:45:30', '10:00:30', '10:15:30', '10:30:30', '10:45:30'],
+    'from 15 minutes after the last check-in at 9:00, on the main Pi\'s own slots, until it is back');
+  assert.strictEqual(r.backup.length, 0);
+  assert.ok(!times.includes('11:00:30'), 'the main Pi checked in at 11:00:00; the standby saw it at 11:00:30');
+});
+
+test('the main Pi alive but its dock camera down: the standby leaves both cameras alone', async () => {
+  // The main Pi is using the battery camera; a second Pi waking it too would double the drain.
+  const r = await simulateStandby(ny(DAY, 0, 0), ny(NEXT, 0, 0), { primaryDown: () => true });
+  assert.strictEqual(r.captures.length, 0);
+});
+
+test('takeover with the dock down: the standby runs the main Pi\'s backup timetable, and stops it on hand-back', async () => {
+  const r = await simulateStandby(ny(DAY, 8, 0), ny(DAY, 13, 0), { mainDead: between(8, 12), primaryDown: between(8, 13) });
+  assert.strictEqual(nyClock(r.primary[0].at), '08:10:30', 'last main check-in 7:55:00, so quiet for 15 min at 8:10');
+  assert.deepStrictEqual(r.backup.map(c => hhmm(c.at)), ['08:15', '08:30', '09:00', '09:30', '10:00', '11:00'],
+    'after two dock misses (8:10, 8:15), then its own slots - nothing at 12:00, the main Pi is back');
+});
+
+test('a second takeover starts afresh from the dock camera - two new misses before the battery camera', async () => {
+  // First outage 8:00-8:30: the standby misses the dock, uses the battery
+  // camera, then hands back. Second outage from 9:00: it must not carry those
+  // misses over - the battery camera only after two new ones (9:10, 9:15).
+  const mainDead = (at) => between(8, 8.5)(at) || between(9, 10)(at);
+  const r = await simulateStandby(ny(DAY, 7, 30), ny(DAY, 10, 30), { mainDead, primaryDown: () => true });
+  assert.deepStrictEqual(r.backup.map(c => hhmm(c.at)), ['08:15', '09:15', '09:30'], 'not 9:10');
+});
+
+test('a standby question that throws means standing by', async () => {
+  let t = ny(DAY, 9, 0).getTime(), pending = null, captures = 0;
+  const lines = await captureLogs(async () => {
+    const tick = S.createScheduler(standbyCfg, { now: () => new Date(t), setTimer: (fn, ms) => { pending = { fn, ms }; },
+      gate: async () => { throw new Error('bug'); }, cycle: async () => { captures++; } });
+    await tick();
+    for (let i = 0; i < 5; i++) { const p = pending; t += p.ms; await p.fn(); }
+  });
+  assert.strictEqual(captures, 0);
+  assert.ok(lines.some(l => /standby check failed: bug/.test(l)));
+});
+
+test('the main Pi dies at night with the dock down: the battery camera still sleeps until 5:00', async () => {
+  const r = await simulateStandby(ny(DAY, 21, 0), ny(NEXT, 7, 0), { mainDead: between(22, 6), primaryDown: between(22, 6) });
+  assert.deepStrictEqual(r.backup.map(c => hhmm(c.at)), ['05:00', '05:30']);
+  assert.strictEqual(r.primary.length, 32, 'the dock was tried every 15 minutes all night: the 22:00 slot at 22:10, then 22:15 to 5:45');
+  assert.ok(!r.primary.some(c => hhmm(c.at) === '06:00'), 'handed back at 6:00');
+});
+
+test('a Worker outage while the main Pi is quiet: no takeover on no news', async () => {
+  const r = await simulateStandby(ny(DAY, 8, 0), ny(DAY, 12, 0), { mainDead: between(9, 12), workerDown: between(9, 10) });
+  assert.strictEqual(nyClock(r.primary[0].at), '10:00:30', 'not before the Worker can say the main Pi is quiet');
+  assert.strictEqual(r.primary.length, 8, '10:00 to 11:45, every 15 minutes');
+});
+
+test('a Worker outage while capturing: the standby carries on', async () => {
+  const r = await simulateStandby(ny(DAY, 8, 0), ny(DAY, 12, 0), { mainDead: between(9, 12), workerDown: between(10, 10.5) });
+  assert.strictEqual(nyClock(r.primary[0].at), '09:10:30');
+  assert.strictEqual(r.primary.length, 12, 'every slot from 9:00 (at 9:10) to 11:45, the outage included');
+});
+
+test('a standby that cannot sign in to Ring does not capture until it can', async () => {
+  const r = await simulateStandby(ny(DAY, 8, 0), ny(DAY, 12, 0), { mainDead: () => true, connectFails: (at) => hhmm(at) < '10:00' });
+  assert.ok(r.primary.length > 0, 'it does, once signed in');
+  assert.ok(hhmm(r.primary[0].at) >= '10:00', nyClock(r.primary[0].at));
+});
+
+// ── The main Pi's side: check-ins never get in the way of a capture ─────────
+
+async function simulateMain(cfg, from, to, heartbeat) {
+  let t = from.getTime();
+  const captures = [], sleeps = [];
+  let pending = null;
+  const tick = S.createScheduler(cfg, {
+    now: () => new Date(t),
+    setTimer: (fn, ms) => { pending = { fn, ms }; sleeps.push(ms); },
+    hasPrimary: true, hasBackup: true,
+    cycle: async (role) => { captures.push({ role, at: new Date(t) }); t += 20000; },
+    heartbeat, maxSleepSeconds: S.CHECK_IN_SECONDS,
+  });
+  await tick();
+  while (pending && t + pending.ms <= to.getTime()) {
+    const p = pending; pending = null;
+    t += p.ms;
+    await p.fn();
+  }
+  return { captures, sleeps };
+}
+
+test('the main Pi checks in on every 5-minute mark - 288 a day - and its captures are unchanged', async () => {
+  let beats = 0;
+  const r = await simulateMain(mainCfg, ny(DAY, 0, 0), ny(NEXT, 0, 0), () => { beats++; });
+  assert.strictEqual(r.captures.length, 96, 'the dock camera every 15 minutes, as without a standby');
+  assert.strictEqual(beats, 288);
+  assert.deepStrictEqual(r.captures.slice(0, 3).map(c => nyClock(c.at)), ['00:00:00', '00:15:00', '00:30:00'], 'on the slot, to the second');
+  assert.ok(r.sleeps.every(ms => ms <= 300500), 'never more than 5 minutes between check-ins');
+});
+
+test('a check-in that hangs, throws or rejects never delays or stops a capture', async () => {
+  for (const hb of [() => new Promise(() => {}), () => { throw new Error('boom'); }, async () => { throw new Error('boom'); }]) {
+    const r = await simulateMain(mainCfg, ny(DAY, 0, 0), ny(NEXT, 0, 0), hb);
+    assert.strictEqual(r.captures.length, 96);
+    assert.ok(r.captures.every(c => Number(nyClock(c.at).slice(6, 8)) <= 1), 'on the slot, not after a check-in');
+  }
+});
+
+test('with a daytime-only timetable the main Pi still checks in every 5 minutes, and captures no more', async () => {
+  let beats = 0;
+  const r = await simulateMain(prodCfg, ny(DAY, 0, 0), ny(NEXT, 0, 0), () => { beats++; });
+  assert.deepStrictEqual(r.captures.map(c => hhmm(c.at)), PROD_SLOTS);
+  assert.ok(beats >= 287 && beats <= 289, String(beats));
+  assert.ok(Math.max(...r.sleeps) <= 300500);
+});
+
+test('every upload says which Pi sent it', async () => {
+  const calls = [];
+  const f = async (url, opts) => { calls.push(opts.headers); return { ok: true }; };
+  await S.uploadSnapshot(JPEG, mainCfg, f, { role: 'primary', name: 'Dock Wired' });
+  await S.uploadSnapshot(JPEG, S.backupConfig(standbyCfg), f, { role: 'backup', name: 'Downstream Lot' });
+  await S.uploadSnapshot(JPEG, baseCfg, f, { role: 'primary', name: 'Dock Wired' });
+  assert.deepStrictEqual(calls.map(h => h['X-Camera-Pi']), ['main', 'standby', undefined]);
+});
+
+test('the service wires the check-ins: the main Pi beats, the standby asks before every slot', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
+  const main = src.slice(src.indexOf('async function main()'), src.indexOf('async function runStandby('));
+  assert.ok(/heartbeat: createMainCheckIn\(CONFIG/.test(main), 'the main Pi checks in from its capture loop');
+  assert.ok(/maxSleepSeconds: CHECK_IN_SECONDS/.test(main));
+  const standby = src.slice(src.indexOf('async function runStandby('));
+  assert.ok(/gate: standby\.gate/.test(standby) && /wakeOffsetMs: STANDBY_WAKE_OFFSET_MS/.test(standby));
+  assert.ok(/'NHRC Boathouse Camera \(standby\)'/.test(src), 'listed separately in Ring Control Center');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('6f. Two Pis end to end: real service processes and the real Worker');
+// ═══════════════════════════════════════════════════════════════════════════
+
+const STANDBY_ENV = { CAMERA_PI: 'standby' };
+const seedMain = (box, minutesAgo, extra = {}) => box.host.env.BUCKET.setRecord('main', Object.assign({
+  at: Date.now() - minutesAgo * 60000, state: 'capturing', ring: 'ok', instance: 'aaaaaaaaaaaaaaaa',
+  ringId: S.ringIdentity(ringToken('hid-main-pi')), conflictAt: null }, extra));
+
+test('end to end: the main Pi checks in with the real Worker, and its photos say they are from it', async () => {
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  box.setToken(ringToken('hid-main-pi'));
+  const r = await box.run([], {}, { stopAfter: 1, settleMs: 400 });
+  assert.deepStrictEqual(r.uploads.map(u => [u.role, u.pi]), [['primary', 'main']], r.out);
+  const rec = box.host.env.BUCKET.record('main');
+  assert.deepStrictEqual([rec.state, rec.ring, rec.ringId], ['capturing', 'ok', S.ringIdentity(ringToken('hid-main-pi'))]);
+  assert.ok(/^[0-9a-f]{16}$/.test(rec.instance));
+  const st = await box.host.status();
+  assert.strictEqual(st.pi, 'main');
+  assert.strictEqual(st.pis.main.lastSeenSecondsAgo, 0);
+  assert.ok(/This is the MAIN Pi\. It checks in with the Worker every 5 min/.test(r.out));
+  assert.ok(!r.out.includes(ringToken('hid-main-pi')), 'the token never reaches the log');
+  assert.ok(box.ringEvents().some(e => e.ev === 'construct' && e.displayName === 'NHRC Boathouse Camera'));
+});
+
+test('end to end: the standby stands by while the main Pi checks in - signed in to Ring, no camera touched', async () => {
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  box.setToken(ringToken('hid-standby-pi'));
+  await seedMain(box, 1);
+  const r = await box.run([], STANDBY_ENV, { until: (out) => /Standing by: the main Pi checked in/.test(out), settleMs: 700 });
+  assert.deepStrictEqual(r.uploads, [], r.out);
+  assert.ok(!box.ringEvents().some(e => e.ev === 'snapshot'), 'no camera woken');
+  assert.ok(box.ringEvents().some(e => e.ev === 'construct' && e.displayName === 'NHRC Boathouse Camera (standby)'));
+  assert.ok(box.ringEvents().some(e => e.ev === 'getCameras'), 'signed in and found the cameras, ready');
+  const rec = box.host.env.BUCKET.record('standby');
+  assert.deepStrictEqual([rec.state, rec.ring], ['standing-by', 'ok'], JSON.stringify(rec));
+  assert.ok(/This is the STANDBY Pi/.test(r.out) && /Standing by: the main Pi checked in 60 s ago/.test(r.out), r.out);
+  assert.deepStrictEqual((await box.host.status()).pis.standby.state, 'standing-by');
+});
+
+test('end to end: the main Pi quiet for 20 minutes - the standby takes over, and says its photos are its own', async () => {
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  box.setToken(ringToken('hid-standby-pi'));
+  await seedMain(box, 20);
+  const r = await box.run([], STANDBY_ENV, { stopAfter: 1, settleMs: 500 });
+  assert.deepStrictEqual(r.uploads.map(u => [u.role, u.name, u.pi]), [['primary', 'Dock Wired', 'standby']], r.out);
+  assert.ok(/The main Pi has not checked in for 20 min - this Pi is taking over the cameras/.test(r.out), r.out);
+  assert.strictEqual(box.host.env.BUCKET.record('standby').state, 'capturing');
+  const st = await box.host.status();
+  assert.strictEqual(st.pi, 'standby');
+  assert.ok(st.pis.main.lastSeenSecondsAgo >= 1195, 'the standby\'s photo does not make the main Pi look alive');
+});
+
+test('end to end: a standby with the main Pi\'s Ring device never signs in to Ring, even with the main Pi quiet', async () => {
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  box.setToken(ringToken('hid-main-pi'));   // a copied token file
+  await seedMain(box, 30);
+  let r = await box.run([], STANDBY_ENV, { until: (out) => /same device as the main Pi/.test(out), settleMs: 700 });
+  assert.deepStrictEqual(box.ringEvents(), [], 'not one call to the Ring library');
+  assert.deepStrictEqual(r.uploads, []);
+  assert.strictEqual(box.host.env.BUCKET.record('standby').state, 'blocked');
+  assert.ok(r.code === null || r.code === 0 || r.signal, 'it stays up, saying why');
+  r = await box.run(['--once'], STANDBY_ENV);
+  assert.strictEqual(r.code, 1, r.out);
+  assert.ok(/same device as the main Pi/.test(r.out));
+  assert.deepStrictEqual(box.ringEvents(), [], '--once refuses before touching Ring too');
+  r = await box.run(['--status'], STANDBY_ENV);
+  assert.strictEqual(r.code, 1, '--status reports it as a failure');
+});
+
+test('end to end: against a Worker that predates check-ins, the standby never touches Ring; the main Pi carries on', async () => {
+  const old = { intercept: (e) => (e.path === '/heartbeat' ? { status: 405, body: 'Method not allowed' } : null) };
+  let box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }], old);
+  box.setToken(ringToken('hid-standby-pi'));
+  let r = await box.run([], STANDBY_ENV, { until: (out) => /HTTP 405/.test(out), settleMs: 700 });
+  assert.deepStrictEqual(box.ringEvents(), []);
+  assert.deepStrictEqual(r.uploads, []);
+  assert.ok(/does not know check-ins yet: update it/.test(r.out), r.out);
+  box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }], old);
+  r = await box.run([], {}, { stopAfter: 1, settleMs: 500 });
+  assert.deepStrictEqual(r.uploads.map(u => u.role), ['primary'], 'the cameras do not depend on check-ins');
+  assert.ok(/does not know check-ins yet/.test(r.out));
+});
+
+test('end to end: a standby that cannot sign in to Ring keeps running and says so', async () => {
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  box.setToken(ringToken('hid-standby-pi'));
+  await seedMain(box, 30);
+  const r = await box.run([], Object.assign({ TEST_RING_FAIL_AUTH: '1' }, STANDBY_ENV),
+    { until: (out) => /Could not sign in to Ring/.test(out), settleMs: 700 });
+  assert.ok(r.signal === 'SIGTERM', `still running when stopped (exit ${r.code}): ${r.out}`);
+  assert.deepStrictEqual(r.uploads, []);
+  const rec = box.host.env.BUCKET.record('standby');
+  assert.deepStrictEqual([rec.state, rec.ring], ['ring-failed', 'failed'], JSON.stringify(rec));
+});
+
+test('end to end: both Pis running together - every photo comes from the main Pi', async () => {
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  // Two sandboxes would mean two Workers; instead the two processes share one,
+  // each with its own token file.
+  const standbyToken = path.join(box.dir, 'token-standby');
+  fs.writeFileSync(standbyToken, ringToken('hid-standby-pi'));
+  box.setToken(ringToken('hid-main-pi'));
+  const mainRun = box.run([], {}, { maxMs: 3500 });
+  await new Promise(r => setTimeout(r, 700));     // the main Pi starts first, as after a reboot of both
+  const standbyRun = box.run([], Object.assign({ RING_TOKEN_FILE: standbyToken }, STANDBY_ENV),
+    { until: (out) => /Standing by/.test(out), settleMs: 600 });
+  const [m, s] = await Promise.all([mainRun, standbyRun]);
+  assert.ok(box.uploads().length >= 1, m.out);
+  assert.ok(box.uploads().every(u => u.pi === 'main'), JSON.stringify(box.uploads()));
+  assert.ok(/Standing by: the main Pi checked in \d+ s ago/.test(s.out), s.out);
+  assert.ok(!/taking over/.test(s.out));
+  const st = await box.host.status();
+  assert.deepStrictEqual([st.pis.main.state, st.pis.standby.state], ['capturing', 'standing-by']);
+  assert.strictEqual(st.pis.main.conflict || st.pis.standby.conflict, false);
+});
+
+test('end to end (clock x60): the standby takes over, captures each slot, and hands back when the main Pi returns', async () => {
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  box.setToken(ringToken('hid-standby-pi'));
+  await seedMain(box, 20);
+  let returned = false;
+  const r = await box.run([], Object.assign({ TEST_CLOCK_SPEED: '60' }, STANDBY_ENV), {
+    until: (out) => {
+      // After two standby photos, the main Pi comes back.
+      if (!returned && box.uploads().length >= 2) { returned = true; seedMain(box, 0); }
+      return /back to standing by/.test(out);
+    },
+    settleMs: 6000,                                   // a further simulated 6 minutes: one more check, no capture
+    maxMs: 25000,
+  });
+  assert.ok(/taking over the cameras/.test(r.out) && /The main Pi is checking in again .* back to standing by/.test(r.out), r.out);
+  const ups = box.uploads();
+  assert.ok(ups.length >= 2 && ups.length <= 3, `${ups.length} standby photos`);
+  assert.ok(ups.every(u => u.pi === 'standby' && u.role === 'primary'));
+  assert.strictEqual(box.host.env.BUCKET.record('standby').state, 'standing-by');
+  const snaps = box.ringEvents().filter(e => e.ev === 'snapshot').length;
+  assert.strictEqual(snaps, ups.length, 'no capture after handing back');
+});
+
+test('end to end: --check and --status describe the Pi; CAMERA_PI is read leniently and checked', async () => {
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  box.setToken(ringToken('hid-standby-pi'));
+  let r = await box.run(['--check'], { CAMERA_PI: ' Standby ' });
+  assert.strictEqual(r.code, 0, r.out);
+  assert.ok(/this Pi {6}: the STANDBY - runs the cameras only when the main Pi has not checked in for 15 min/.test(r.out), r.out);
+  r = await box.run(['--check'], {});
+  assert.ok(/the MAIN Pi - runs the cameras, and checks in with the Worker every 5 min/.test(r.out));
+  r = await box.run(['--check'], { CAMERA_PI: 'backup' });
+  assert.strictEqual(r.code, 1);
+  assert.ok(/CAMERA_PI must be "main" or "standby"/.test(r.out));
+  r = await box.run(['--check'], { CAMERA_PI: 'standby', STANDBY_TAKEOVER_MINUTES: '5' });
+  assert.strictEqual(r.code, 1);
+  await seedMain(box, 2);
+  r = await box.run(['--status'], STANDBY_ENV);
+  assert.strictEqual(r.code, 0, r.out);
+  assert.ok(/main Pi {4}: checked in 2 min ago \(capturing\)/.test(r.out), r.out);
+  assert.ok(/standby Pi : has never checked in/.test(r.out));
+  assert.ok(/Ring login : separate from the other Pi's/.test(r.out));
+  assert.ok(/This standby would stand by: it takes over after 15 min/.test(r.out));
+  assert.deepStrictEqual(box.ringEvents(), [], '--status makes no Ring call');
+  assert.strictEqual(box.host.env.BUCKET.record('standby'), null, 'and records nothing');
+});
+
+/**
+ * A stand-in ring-client-api, installed in dir, whose live view is a real
+ * 1080p stream (ffmpeg sending RTP through a relay, as Ring's would arrive),
+ * noting every call - and which Pi made it - in ringLog.
+ */
+function liveRingLibrary(dir, ringLog) {
+  const pkg = path.join(dir, 'node_modules', 'ring-client-api');
+  fs.mkdirSync(pkg, { recursive: true });
+  fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'ring-client-api', type: 'module',
+    exports: { '.': './index.js', './util': './util.js' } }));
+  // Like ring-client-api/util: the service hands it a logger.
+  fs.writeFileSync(path.join(pkg, 'util.js'), 'export function useLogger(l) { globalThis.ringLogger = l; }');
+  fs.writeFileSync(path.join(pkg, 'index.js'), `
+    import fs from 'fs'; import dgram from 'dgram'; import { spawn } from 'child_process';
+    const note = (o) => fs.appendFileSync(${JSON.stringify(ringLog)}, JSON.stringify(Object.assign({ pi: process.env.CAMERA_PI || 'main' }, o)) + String.fromCharCode(10));
+    const JPEG = Buffer.from([0xFF, 0xD8, 0xFF, 0xC0, 0, 17, 8, 1, 104, 2, 128, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 0xFF, 0xD9]);
+    let ffmpegPath = null;
+    class Call {
+      constructor() { this.h = []; this.ended = false; this.subs = []; this.msgs = []; this.msgSubs = []; this.answered = false; this.ans = [];
+        this.onCallEnded = { subscribe: (fn) => { if (this.ended) fn(); else this.h.push(fn); return { unsubscribe() {} }; } };
+        this.onVideoRtp = { subscribe: (fn) => { this.subs.push(fn); return { unsubscribe: () => { this.subs = []; } }; } };
+        this.connection = {
+          onMessage: { subscribe: (fn) => { this.msgs.forEach(fn); this.msgSubs.push(fn); return { unsubscribe() {} }; } },
+          onCallAnswered: { subscribe: (fn) => { if (this.answered) fn('v=0'); else this.ans.push(fn); return { unsubscribe() {} }; } } }; }
+      message(m) { this.msgs.push(m); this.msgSubs.forEach(fn => fn(m)); }
+      end() { if (this.ended) return; this.ended = true; note({ ev: 'call-ended' });
+        try { this.sender && this.sender.kill('SIGKILL'); } catch (e) {}
+        try { this.ff && this.ff.kill('SIGTERM'); } catch (e) {}
+        for (const s of [this.relay, this.out]) { try { s && s.close(); } catch (e) {} }
+        this.h.forEach(f => f()); }
+      stop() { this.end(); }
+      async startTranscoding(o) {
+        this.message({ method: 'session_created', body: {} });
+        this.answered = true; this.message({ method: 'sdp', body: {} }); this.ans.forEach(fn => fn('v=0'));
+        const closing = !!process.env.FAKE_RING_CLOSE;
+        if (closing) {
+          // Ring closes the live view before ffmpeg has the stream's description,
+          // and says so through the library's logger - as ring-client-api does.
+          setTimeout(() => {
+            const body = { reason: { code: 42, text: 'stand-in camera busy' }, token: 'S3CRET-T0KEN' };
+            if (globalThis.ringLogger) { globalThis.ringLogger.logError('Video stream closed'); globalThis.ringLogger.logError(body); }
+            this.message({ method: 'close', body });
+            this.end();
+          }, 1500);
+        }
+        const rp = 45000 + Math.floor(Math.random() * 4000) * 2, vp = rp + 9000;
+        const sdpFile = ${JSON.stringify(dir)} + '/s' + rp + '.sdp';
+        // The camera's ffmpeg: another name (a link), no report - see FakeLiveCall.
+        const senderEnv = Object.assign({}, process.env); delete senderEnv.FFREPORT;
+        this.sender = spawn(${JSON.stringify(path.join(dir, 'ffsender'))}, ['-v', 'error', '-re', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=15', '-t', '40',
+          '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-bf', '0', '-an', '-f', 'rtp', '-sdp_file', sdpFile, 'rtp://127.0.0.1:' + rp],
+          { env: senderEnv });
+        this.relay = dgram.createSocket('udp4'); this.out = dgram.createSocket('udp4');
+        this.relay.on('message', (m) => { const nal = m[12] & 31;
+          if (closing && (nal === 7 || nal === 8 || nal === 24)) return;
+          const seq = m.readUInt16BE(2); this.subs.forEach(fn => fn({ header: { sequenceNumber: seq }, payload: m.subarray(12) }));
+          if (!this.ended) this.out.send(m, vp, '127.0.0.1'); });
+        this.relay.bind(rp, '127.0.0.1');
+        for (let k = 0; k < 100 && !fs.existsSync(sdpFile); k++) await new Promise(r => setTimeout(r, 50));
+        const sdp = fs.readFileSync(sdpFile, 'utf8').replace(/m=video \\d+/, 'm=video ' + vp);
+        const args = ['-hide_banner', '-protocol_whitelist', 'pipe,udp,rtp,file,crypto', '-f', 'sdp', ...(o.input || []), '-i', 'pipe:',
+          ...(o.audio || []), ...(o.video || []), ...(o.output || [])];
+        note({ ev: 'ffmpeg', path: ffmpegPath, args });
+        this.ff = spawn(ffmpegPath || 'ffmpeg', args.map(String), { stdio: ['pipe', 'ignore', 'ignore'] });
+        this.ff.on('error', () => this.end());
+        this.ff.on('exit', () => this.end());
+        this.ff.stdin.on('error', () => {});
+        this.ff.stdin.end(sdp);
+      }
+    }
+    export class RingApi {
+      constructor(opts) { ffmpegPath = opts.ffmpegPath || null; note({ ev: 'construct', ffmpegPath: opts.ffmpegPath || null });
+        this.onRefreshTokenUpdated = { subscribe() {} }; }
+      async getCameras() {
+        note({ ev: 'getCameras' });
+        // Stands in for a Pi Zero's slow sign-in to Ring.
+        if (process.env.FAKE_SLOW_CAMERAS_MS) await new Promise(r => setTimeout(r, Number(process.env.FAKE_SLOW_CAMERAS_MS)));
+        return ['Dock Wired', 'Downstream Lot'].map(name => ({ name, id: name === 'Dock Wired' ? 101 : 202,
+          async getSnapshot() { note({ ev: 'snapshot', camera: name }); return JPEG; },
+          // Ring's health report, as the real library fetches it.
+          async getHealth() { note({ ev: 'health', camera: name });
+            return { battery_percentage: process.env.FAKE_BATTERY || '87', latest_signal_strength: -61 }; },
+          async startLiveCall() { note({ ev: 'live', camera: name });
+            // Stands in for the service being killed mid-capture (for memory, say).
+            if (process.env.FAKE_DIE_ON_LIVE) process.kill(process.pid, 'SIGKILL');
+            return new Call(); } }));
+      }
+      async fetchRingDevices() { note({ ev: 'devices' });
+        return { allCameras: [{ description: 'Dock Wired', id: 101, alerts: { connection: 'online' } },
+          { description: 'Downstream Lot', id: 202, alerts: { connection: 'online' } }] }; }
+      disconnect() { note({ ev: 'disconnect' }); }
+    }`);
+  fs.symlinkSync('/usr/bin/ffmpeg', path.join(dir, 'ffsender'));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('6g. Timelapse: full-resolution frames at set times, gentle on the Pi');
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // The Pi also serves the house's DNS. The timelapse must never disturb the
@@ -1466,7 +2614,13 @@ test('the README\'s Pi steps match the code, and its printf lines write exactly 
   assert.strictEqual(sh(dropIn[1]),
     '[Service]\nNice=10\nCPUWeight=20\nOOMScoreAdjust=500\nRestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK\n'
     + 'RuntimeDirectory=nhrc-camera\nRuntimeDirectoryMode=0700\n');
-  assert.ok(/\nRestrictAddressFamilies=AF_INET AF_INET6\n/.test(md), 'the unit allows these two; the drop-in adds netlink only');
+  // The unit file in the repo (the standby's) has every drop-in line already, so
+  // the drop-in is only for a Pi whose unit came from an earlier README.
+  const unitLines = fs.readFileSync(path.join(__dirname, 'nhrc-camera.service'), 'utf8').split('\n');
+  for (const line of sh(dropIn[1]).split('\n').filter(l => l && l !== '[Service]')) {
+    assert.ok(unitLines.includes(line), `the unit file has the drop-in's ${line}`);
+  }
+  assert.ok(/unit file \(section 6\) has them already/.test(sec), 'the README says who needs the drop-in');
   assert.ok(/\nsudo systemctl daemon-reload\n/.test(sec), 'systemd reads the drop-in');
   // The env lines: every 5 minutes, recorded in the folder the drop-in makes; the old lines removed first.
   const lines = [...sec.matchAll(/echo '([A-Z_]+)=([^']+)' \| sudo tee -a \/opt\/nhrc-camera\/env/g)].map(m => [m[1], m[2]]);
@@ -1617,7 +2771,7 @@ test('if the note cannot be written, it says so - and the capture goes ahead as 
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-section('6f. Timelapse every 5 minutes, sunrise to sunset - and still gentle on the Pi');
+section('6h. Timelapse every 5 minutes, sunrise to sunset - and still gentle on the Pi');
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // About 110 (December) to 180 (June) live views a day of a battery camera,
@@ -1920,6 +3074,8 @@ function intervalRig(dir, opts = {}) {
     openFiles: () => (opts.files ? opts.files(new Date(t)) : 30),
     strays: () => [],
     dockWaitMs: opts.dockWaitMs !== undefined ? opts.dockWaitMs : 300, dockPollMs: 5,
+    // A standby Pi's hooks, when a test gives them.
+    standingBy: opts.standingBy, confirm: opts.confirm, quietSummary: opts.quietSummary, wakeDelayMs: opts.wakeDelayMs,
     liveFrame: async (cam, workDir) => {
       const i = calls.live++;
       calls.liveAt.push(hhmm(new Date(t)));
@@ -2717,95 +3873,18 @@ if (HAVE_FFMPEG) {
   function timelapseSandbox() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-e2e-'));
     fs.copyFileSync(path.join(__dirname, 'snapshot_service.js'), path.join(dir, 'snapshot_service.js'));
-    const pkg = path.join(dir, 'node_modules', 'ring-client-api');
-    fs.mkdirSync(pkg, { recursive: true });
-    fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'ring-client-api', type: 'module',
-      exports: { '.': './index.js', './util': './util.js' } }));
-    // Like ring-client-api/util: the service hands it a logger.
-    fs.writeFileSync(path.join(pkg, 'util.js'), 'export function useLogger(l) { globalThis.ringLogger = l; }');
     const ringLog = path.join(dir, 'ring.log');
-    fs.writeFileSync(path.join(pkg, 'index.js'), `
-      import fs from 'fs'; import dgram from 'dgram'; import { spawn } from 'child_process';
-      const note = (o) => fs.appendFileSync(${JSON.stringify(ringLog)}, JSON.stringify(o) + String.fromCharCode(10));
-      const JPEG = Buffer.from([0xFF, 0xD8, 0xFF, 0xC0, 0, 17, 8, 1, 104, 2, 128, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 0xFF, 0xD9]);
-      let ffmpegPath = null;
-      class Call {
-        constructor() { this.h = []; this.ended = false; this.subs = []; this.msgs = []; this.msgSubs = []; this.answered = false; this.ans = [];
-          this.onCallEnded = { subscribe: (fn) => { if (this.ended) fn(); else this.h.push(fn); return { unsubscribe() {} }; } };
-          this.onVideoRtp = { subscribe: (fn) => { this.subs.push(fn); return { unsubscribe: () => { this.subs = []; } }; } };
-          this.connection = {
-            onMessage: { subscribe: (fn) => { this.msgs.forEach(fn); this.msgSubs.push(fn); return { unsubscribe() {} }; } },
-            onCallAnswered: { subscribe: (fn) => { if (this.answered) fn('v=0'); else this.ans.push(fn); return { unsubscribe() {} }; } } }; }
-        message(m) { this.msgs.push(m); this.msgSubs.forEach(fn => fn(m)); }
-        end() { if (this.ended) return; this.ended = true; note({ ev: 'call-ended' });
-          try { this.sender && this.sender.kill('SIGKILL'); } catch (e) {}
-          try { this.ff && this.ff.kill('SIGTERM'); } catch (e) {}
-          for (const s of [this.relay, this.out]) { try { s && s.close(); } catch (e) {} }
-          this.h.forEach(f => f()); }
-        stop() { this.end(); }
-        async startTranscoding(o) {
-          this.message({ method: 'session_created', body: {} });
-          this.answered = true; this.message({ method: 'sdp', body: {} }); this.ans.forEach(fn => fn('v=0'));
-          const closing = !!process.env.FAKE_RING_CLOSE;
-          if (closing) {
-            // Ring closes the live view before ffmpeg has the stream's description,
-            // and says so through the library's logger - as ring-client-api does.
-            setTimeout(() => {
-              const body = { reason: { code: 42, text: 'stand-in camera busy' }, token: 'S3CRET-T0KEN' };
-              if (globalThis.ringLogger) { globalThis.ringLogger.logError('Video stream closed'); globalThis.ringLogger.logError(body); }
-              this.message({ method: 'close', body });
-              this.end();
-            }, 1500);
-          }
-          const rp = 45000 + Math.floor(Math.random() * 4000) * 2, vp = rp + 9000;
-          const sdpFile = ${JSON.stringify(dir)} + '/s' + rp + '.sdp';
-          // The camera's ffmpeg: another name (a link), no report - see FakeLiveCall.
-          const senderEnv = Object.assign({}, process.env); delete senderEnv.FFREPORT;
-          this.sender = spawn(${JSON.stringify(path.join(dir, 'ffsender'))}, ['-v', 'error', '-re', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=15', '-t', '40',
-            '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-bf', '0', '-an', '-f', 'rtp', '-sdp_file', sdpFile, 'rtp://127.0.0.1:' + rp],
-            { env: senderEnv });
-          this.relay = dgram.createSocket('udp4'); this.out = dgram.createSocket('udp4');
-          this.relay.on('message', (m) => { const nal = m[12] & 31;
-            if (closing && (nal === 7 || nal === 8 || nal === 24)) return;
-            const seq = m.readUInt16BE(2); this.subs.forEach(fn => fn({ header: { sequenceNumber: seq }, payload: m.subarray(12) }));
-            if (!this.ended) this.out.send(m, vp, '127.0.0.1'); });
-          this.relay.bind(rp, '127.0.0.1');
-          for (let k = 0; k < 100 && !fs.existsSync(sdpFile); k++) await new Promise(r => setTimeout(r, 50));
-          const sdp = fs.readFileSync(sdpFile, 'utf8').replace(/m=video \\d+/, 'm=video ' + vp);
-          const args = ['-hide_banner', '-protocol_whitelist', 'pipe,udp,rtp,file,crypto', '-f', 'sdp', ...(o.input || []), '-i', 'pipe:',
-            ...(o.audio || []), ...(o.video || []), ...(o.output || [])];
-          note({ ev: 'ffmpeg', path: ffmpegPath, args });
-          this.ff = spawn(ffmpegPath || 'ffmpeg', args.map(String), { stdio: ['pipe', 'ignore', 'ignore'] });
-          this.ff.on('error', () => this.end());
-          this.ff.on('exit', () => this.end());
-          this.ff.stdin.on('error', () => {});
-          this.ff.stdin.end(sdp);
-        }
-      }
-      export class RingApi {
-        constructor(opts) { ffmpegPath = opts.ffmpegPath || null; note({ ev: 'construct', ffmpegPath: opts.ffmpegPath || null });
-          this.onRefreshTokenUpdated = { subscribe() {} }; }
-        async getCameras() {
-          note({ ev: 'getCameras' });
-          // Stands in for a Pi Zero's slow sign-in to Ring.
-          if (process.env.FAKE_SLOW_CAMERAS_MS) await new Promise(r => setTimeout(r, Number(process.env.FAKE_SLOW_CAMERAS_MS)));
-          return ['Dock Wired', 'Downstream Lot'].map(name => ({ name, id: name === 'Dock Wired' ? 101 : 202,
-            async getSnapshot() { note({ ev: 'snapshot', camera: name }); return JPEG; },
-            // Ring's health report, as the real library fetches it.
-            async getHealth() { note({ ev: 'health', camera: name });
-              return { battery_percentage: process.env.FAKE_BATTERY || '87', latest_signal_strength: -61 }; },
-            async startLiveCall() { note({ ev: 'live', camera: name });
-              // Stands in for the service being killed mid-capture (for memory, say).
-              if (process.env.FAKE_DIE_ON_LIVE) process.kill(process.pid, 'SIGKILL');
-              return new Call(); } }));
-        }
-      }`);
+    liveRingLibrary(dir, ringLog);
     fs.writeFileSync(path.join(dir, 'token'), 'stand-in-refresh-token');
-    fs.symlinkSync('/usr/bin/ffmpeg', path.join(dir, 'ffsender'));
     const uploads = path.join(dir, 'uploads.log');
+    // Uploads are counted; a check-in (the main Pi's, every 5 minutes) is
+    // answered as a Worker that has heard from no other Pi would.
     fs.writeFileSync(path.join(dir, 'fakefetch.js'), `
       const fs = require('fs');
       globalThis.fetch = async (url, opts) => {
+        if (new URL(String(url)).pathname === '/heartbeat') {
+          return { ok: true, status: 200, json: async () => ({ ok: true, conflict: false, main: null, standby: null, photo: null }) };
+        }
         fs.appendFileSync(${JSON.stringify(uploads)}, JSON.stringify({ role: opts.headers['X-Camera-Role'] || null }) + String.fromCharCode(10));
         return { ok: true, status: 200, text: async () => 'OK' };
       };`);
@@ -3170,7 +4249,7 @@ if (HAVE_FFMPEG) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-section('6g. Copying the frames to iCloud: the Pi\'s read-only export, the Mac\'s evening copy');
+section('6i. Copying the frames to iCloud: the Pi\'s read-only export, the Mac\'s evening copy');
 // ═══════════════════════════════════════════════════════════════════════════
 //
 // Every evening the Mac fetches each finished day it does not have yet, with
@@ -3213,29 +4292,47 @@ function macRig() {
   const fakeSsh = path.join(bin, 'ssh');
   fs.writeFileSync(fakeSsh, [
     '#!/bin/bash',
-    'batch=no; for a in "$@"; do [ "$a" = BatchMode=yes ] && batch=yes; done',
-    '[ "$batch" = yes ] || { echo "ssh would have asked for a password" >&2; exit 99; }',
-    '[ -n "${FAKE_SSH_DOWN:-}" ] && { echo "ssh: connect to host pihole2 port 22: Operation timed out" >&2; exit 255; }',
+    // The Pi asked: the argument before the request. The standby has its own folder (and home).
+    'host="${@: -2:1}"; req="${@: -1}"; dir="$FAKE_PI_DIR"; home="${FAKE_PI_HOME:-}"',
+    '[ "$host" = emre@standby ] && { dir="$FAKE_PI_DIR_STANDBY"; home="${FAKE_PI_HOME_STANDBY:-}"; }',
+    'case ",${FAKE_SSH_DOWN:-}," in *",1,"*|*",$host,"*) echo "ssh: connect to host ${host#*@} port 22: Operation timed out" >&2; exit 255 ;; esac',
+    'batch=no; key=; prev=; for a in "$@"; do [ "$a" = BatchMode=yes ] && batch=yes; [ "$prev" = -i ] && key="$a"; prev="$a"; done',
+    // Without BatchMode, ssh would ask for the Pi's password. With FAKE_SSH_PASSWORD the Pi lets the
+    // install in, and runs what it sends as that user (the export installed where FAKE_HELPER says).
+    'if [ "$batch" != yes ]; then',
+    '  [ -n "${FAKE_SSH_PASSWORD:-}" ] || { echo "ssh would have asked for a password" >&2; exit 99; }',
+    '  exec env HOME="$home" bash -c "${req//\\/usr\\/local\\/bin\\/nhrc-timelapse-export/$FAKE_HELPER}"',
+    'fi',
+    // With the key: refused unless that Pi has it, tied to the export (FAKE_SSH_KEYCHECK).
+    'if [ -n "${FAKE_SSH_KEYCHECK:-}" ] && ! grep -qxF "restrict,command=\\"/usr/local/bin/nhrc-timelapse-export\\" $(cat "$key.pub")" "$home/.ssh/authorized_keys" 2>/dev/null; then',
+    '  echo "$host: Permission denied (publickey)." >&2; exit 255',
+    'fi',
     // Like ssh, it reads what it is given unless told not to (-n): in a loop that would swallow the rest of the list.
     'nostdin=no; for a in "$@"; do [ "$a" = -n ] && nostdin=yes; done',
     '[ "$nostdin" = yes ] || cat > /dev/null',
-    'req="${@: -1}"',
     'if [ -n "${FAKE_SSH_CUT:-}" ] && [ "${req#get }" != "$req" ]; then',
-    '  SSH_ORIGINAL_COMMAND="$req" NHRC_TIMELAPSE_DIR="$FAKE_PI_DIR" "$FAKE_SH" "$FAKE_EXPORT" | head -c 2000; exit 0',
+    '  SSH_ORIGINAL_COMMAND="$req" NHRC_TIMELAPSE_DIR="$dir" "$FAKE_SH" "$FAKE_EXPORT" | head -c 2000; exit 0',
     'fi',
-    'SSH_ORIGINAL_COMMAND="$req" NHRC_TIMELAPSE_DIR="$FAKE_PI_DIR" exec "$FAKE_SH" "$FAKE_EXPORT"',
+    'SSH_ORIGINAL_COMMAND="$req" NHRC_TIMELAPSE_DIR="$dir" exec "$FAKE_SH" "$FAKE_EXPORT"',
   ].join('\n'), { mode: 0o755 });
   const dest = path.join(home, 'iCloud', 'NHRC Timelapse');
   const support = path.join(home, 'Library', 'Application Support', 'NHRC Timelapse');
   const logFile = path.join(home, 'Library', 'Logs', 'nhrc-timelapse.log');
+  // A standby Pi's folder: empty until a test has it film.
+  const standby = { dir: tlDir() };
+  standby.day = (d, ...times) => {
+    fs.mkdirSync(path.join(standby.dir, d), { recursive: true });
+    for (const hm of times) fs.writeFileSync(path.join(standby.dir, d, `${d}_${hm}.jpg`), fakeJpeg(1280, 720));
+  };
   const exec = (args, env = {}) => run2('bash', [ICLOUD_SH, ...args], { encoding: 'utf8', env: Object.assign({
     PATH: process.env.PATH, HOME: home, NHRC_TIMELAPSE_SSH: fakeSsh, NHRC_TIMELAPSE_DEST: dest,
-    FAKE_PI_DIR: pi.dir, FAKE_EXPORT: EXPORT_SH, FAKE_SH: POSIX_SH }, env) });
-  const copy = (today, hour, env = {}) => exec(['run', 'emre@pihole2'],
+    FAKE_PI_DIR: pi.dir, FAKE_PI_DIR_STANDBY: standby.dir, FAKE_EXPORT: EXPORT_SH, FAKE_SH: POSIX_SH }, env) });
+  const copy = (today, hour, env = {}, pis = ['emre@pihole2']) => exec(['run', ...pis],
     Object.assign({ NHRC_TIMELAPSE_TODAY: today, NHRC_TIMELAPSE_HOUR: hour }, env));
   const lastLog = () => fs.readFileSync(logFile, 'utf8').trim().split('\n').pop();
   const state = () => fs.readFileSync(path.join(support, 'days-copied'), 'utf8');
-  return { pi, home, dest, support, exec, copy, lastLog, state };
+  const logLines = () => fs.readFileSync(logFile, 'utf8').trim().split('\n').map(l => l.slice(20));
+  return { pi, standby, home, dest, support, exec, copy, lastLog, logLines, state };
 }
 
 test('the Pi\'s export: lists the days and sends one whole - and nothing else, whatever it is asked', () => {
@@ -3272,8 +4369,8 @@ test('the Mac copies each finished day once, whole - never a day still being fil
   assert.deepStrictEqual(fs.readdirSync(path.join(m.dest, '2026-10-14')).sort(),
     ['2026-10-14_0705.jpg', '2026-10-14_0710.jpg', '2026-10-14_0715.jpg', '2026-10-14_0720.jpg']);
   assert.ok(fs.readFileSync(path.join(m.dest, '2026-10-12', '2026-10-12_0715.jpg')).equals(fs.readFileSync(path.join(m.pi.dir, '2026-10-12', '2026-10-12_0715.jpg'))));
-  assert.strictEqual(m.state(), '2026-10-12\n2026-10-13\n2026-10-14\n');
-  assert.ok(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d copied 3 days, 9 frames, to iCloud Drive\/NHRC Timelapse$/.test(m.lastLog()), m.lastLog());
+  assert.strictEqual(m.state(), 'emre@pihole2 2026-10-12\nemre@pihole2 2026-10-13\nemre@pihole2 2026-10-14\n');
+  assert.ok(/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d copied 3 days, 9 frames, from emre@pihole2 to iCloud Drive\/NHRC Timelapse$/.test(m.lastLog()), m.lastLog());
   // Again: nothing to do.
   m.copy('2026-10-14', '22');
   assert.ok(/ nothing new to copy$/.test(m.lastLog()), m.lastLog());
@@ -3282,7 +4379,7 @@ test('the Mac copies each finished day once, whole - never a day still being fil
   m.copy('2026-10-15', '08');
   assert.ok(!fs.existsSync(path.join(m.dest, '2026-10-15')));
   m.copy('2026-10-15', '21');
-  assert.ok(/ copied 1 day, 2 frames, to iCloud Drive\/NHRC Timelapse$/.test(m.lastLog()), m.lastLog());
+  assert.ok(/ copied 1 day, 2 frames, from emre@pihole2 to iCloud Drive\/NHRC Timelapse$/.test(m.lastLog()), m.lastLog());
   // The Mac was away for two evenings: the next copy brings both, but not the day in progress.
   m.pi.day('2026-10-16', 2); m.pi.day('2026-10-17', 1); m.pi.day('2026-10-18', 1);
   m.copy('2026-10-18', '07');
@@ -3301,12 +4398,12 @@ test('the Mac\'s copy when things go wrong: Pi unreachable, a transfer cut short
   let m = macRig();
   let r = m.copy('2026-10-14', '21', { FAKE_SSH_DOWN: '1' });
   assert.strictEqual(r.status, 0);
-  assert.ok(/ could not reach the Pi \(ssh: connect to host pihole2 port 22: Operation timed out\); trying again tomorrow at 21:30, or when this Mac wakes$/.test(m.lastLog()), m.lastLog());
+  assert.ok(/ could not reach emre@pihole2 \(ssh: connect to host pihole2 port 22: Operation timed out\); trying again tomorrow at 21:30, or when this Mac wakes$/.test(m.lastLog()), m.lastLog());
   assert.strictEqual(m.state(), '');
   // Cut short: that day is not counted as copied, nothing half-copied is left in iCloud.
   m.copy('2026-10-14', '21', { FAKE_SSH_CUT: '1' });
   const lines = fs.readFileSync(path.join(m.home, 'Library', 'Logs', 'nhrc-timelapse.log'), 'utf8');
-  assert.ok(/could not copy 2026-10-12: \d of its 3 frames arrived \(.*\); trying again next time/.test(lines), lines);
+  assert.ok(/could not copy 2026-10-12 from emre@pihole2: \d of its 3 frames arrived \(.*\); trying again next time/.test(lines), lines);
   assert.ok(!fs.existsSync(path.join(m.dest, '2026-10-12')) || fs.readdirSync(path.join(m.dest, '2026-10-12')).length === 0);
   assert.deepStrictEqual(fs.readdirSync(m.dest).filter(f => f.startsWith('.')), []);
   assert.deepStrictEqual(fs.readdirSync(m.support).filter(f => f.startsWith('incoming')), [], 'the part that arrived is not left lying');
@@ -3322,7 +4419,7 @@ test('the Mac\'s copy when things go wrong: Pi unreachable, a transfer cut short
   assert.strictEqual(fs.readFileSync(path.join(m.dest, '2026-10-13', '2026-10-13_0705.jpg'), 'utf8'), 'mine');
   assert.strictEqual(fs.readdirSync(path.join(m.dest, '2026-10-13')).length, 2);
   assert.ok(!fs.existsSync(path.join(m.dest, '2026-10-11')));
-  assert.strictEqual(m.state(), '2026-10-11\n2026-10-12\n2026-10-13\n2026-10-14\n');
+  assert.strictEqual(m.state(), 'emre@pihole2 2026-10-11\nemre@pihole2 2026-10-12\nemre@pihole2 2026-10-13\nemre@pihole2 2026-10-14\n');
   // iCloud Drive not writable (macOS has not allowed it): said, with what to do.
   m = macRig();
   fs.mkdirSync(path.dirname(m.dest), { recursive: true });
@@ -3335,6 +4432,87 @@ test('the Mac\'s copy when things go wrong: Pi unreachable, a transfer cut short
   run2('bash', [ICLOUD_SH, 'run', 'emre@pihole2'], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: m.home,
     NHRC_TIMELAPSE_SSH: '/bin/false', NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' } });
   assert.ok(/ iCloud Drive cannot be found: is it on \(System Settings > Apple Account > iCloud\), and may "NHRC Timelapse" use it/.test(m.lastLog()), m.lastLog());
+});
+
+test('two Pis: the standby\'s frames join the main Pi\'s in each day\'s folder - each Pi\'s days copied once, a frame never over another', () => {
+  const m = macRig();
+  const both = ['emre@pihole2', 'emre@standby'];
+  // 14 October: the main Pi filmed 07:05-07:20 and died; the standby took over at 07:30.
+  m.standby.day('2026-10-14', '0730', '0735', '0740');
+  // 13 October, 07:05 from both (the main Pi back mid-slot): one frame - the first copied, the main Pi's.
+  m.standby.day('2026-10-13', '0705');
+  const r = m.copy('2026-10-14', '21', {}, both);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.deepStrictEqual(fs.readdirSync(path.join(m.dest, '2026-10-14')).sort(), ['2026-10-14_0705.jpg', '2026-10-14_0710.jpg',
+    '2026-10-14_0715.jpg', '2026-10-14_0720.jpg', '2026-10-14_0730.jpg', '2026-10-14_0735.jpg', '2026-10-14_0740.jpg']);
+  assert.ok(fs.readFileSync(path.join(m.dest, '2026-10-13', '2026-10-13_0705.jpg'))
+    .equals(fs.readFileSync(path.join(m.pi.dir, '2026-10-13', '2026-10-13_0705.jpg'))), 'the main Pi\'s frame, not overwritten');
+  assert.deepStrictEqual(m.logLines(), ['copied 3 days, 9 frames, from emre@pihole2 to iCloud Drive/NHRC Timelapse',
+    'copied 2 days, 3 frames, from emre@standby to iCloud Drive/NHRC Timelapse']);
+  assert.strictEqual(m.state(), 'emre@pihole2 2026-10-12\nemre@pihole2 2026-10-13\nemre@pihole2 2026-10-14\n'
+    + 'emre@standby 2026-10-13\nemre@standby 2026-10-14\n');
+  m.copy('2026-10-14', '22', {}, both);
+  assert.strictEqual(m.lastLog().slice(20), 'nothing new to copy');
+  // The standby away one evening: the main Pi's day is copied; the standby's the next time.
+  m.pi.day('2026-10-15', 2);
+  m.standby.day('2026-10-15', '1200');
+  m.copy('2026-10-15', '21', { FAKE_SSH_DOWN: 'emre@standby' }, both);
+  assert.deepStrictEqual(m.logLines().slice(-2), ['copied 1 day, 2 frames, from emre@pihole2 to iCloud Drive/NHRC Timelapse',
+    'could not reach emre@standby (ssh: connect to host standby port 22: Operation timed out); trying again tomorrow at 21:30, or when this Mac wakes']);
+  assert.ok(!fs.existsSync(path.join(m.dest, '2026-10-15', '2026-10-15_1200.jpg')));
+  m.copy('2026-10-16', '21', {}, both);
+  assert.strictEqual(m.lastLog().slice(20), 'copied 1 day, 1 frame, from emre@standby to iCloud Drive/NHRC Timelapse');
+  assert.strictEqual(fs.readdirSync(path.join(m.dest, '2026-10-15')).length, 3);
+  // The main Pi away, the standby with nothing new: said - and not that there was nothing new, which is not known.
+  m.copy('2026-10-16', '22', { FAKE_SSH_DOWN: 'emre@pihole2' }, both);
+  assert.deepStrictEqual(m.logLines().slice(-2), ['copied 1 day, 1 frame, from emre@standby to iCloud Drive/NHRC Timelapse',
+    'could not reach emre@pihole2 (ssh: connect to host pihole2 port 22: Operation timed out); trying again tomorrow at 21:30, or when this Mac wakes']);
+  // Neither there: two lines, nothing copied, nothing lost.
+  m.copy('2026-10-16', '22', { FAKE_SSH_DOWN: '1' }, both);
+  assert.deepStrictEqual(m.logLines().slice(-2).map(l => l.split(' (')[0]), ['could not reach emre@pihole2', 'could not reach emre@standby']);
+  assert.deepStrictEqual(fs.readdirSync(m.support).filter(f => f.startsWith('incoming')), []);
+});
+
+test('the days an earlier version copied (listed bare) count as the main Pi\'s - given first - and the standby\'s are still copied', () => {
+  const m = macRig();
+  fs.mkdirSync(m.support, { recursive: true });
+  fs.writeFileSync(path.join(m.support, 'days-copied'), '2026-10-12\n2026-10-13\n');
+  m.standby.day('2026-10-13', '1100');
+  m.copy('2026-10-14', '21', {}, ['emre@pihole2', 'emre@standby']);
+  assert.ok(!fs.existsSync(path.join(m.dest, '2026-10-12')), 'not fetched again from the main Pi');
+  assert.deepStrictEqual(fs.readdirSync(path.join(m.dest, '2026-10-13')), ['2026-10-13_1100.jpg'],
+    'the standby\'s frame of a day whose main Pi frames were copied before');
+  assert.strictEqual(fs.readdirSync(path.join(m.dest, '2026-10-14')).length, 4);
+  assert.deepStrictEqual(m.logLines(), ['copied 1 day, 4 frames, from emre@pihole2 to iCloud Drive/NHRC Timelapse',
+    'copied 1 day, 1 frame, from emre@standby to iCloud Drive/NHRC Timelapse']);
+  assert.strictEqual(m.state(), '2026-10-12\n2026-10-13\nemre@pihole2 2026-10-14\nemre@standby 2026-10-13\n');
+  // The bare days are the first Pi's only: had the standby been given first, its 13 October would have counted as copied.
+  const n = macRig();
+  fs.mkdirSync(n.support, { recursive: true });
+  fs.writeFileSync(path.join(n.support, 'days-copied'), '2026-10-13\n');
+  n.standby.day('2026-10-13', '1100');
+  n.copy('2026-10-14', '21', {}, ['emre@pihole2', 'emre@standby']);
+  assert.ok(fs.existsSync(path.join(n.dest, '2026-10-13', '2026-10-13_1100.jpg')), 'second in line: its days are its own');
+});
+
+test('the Mac\'s copy takes a Pi only as user@address - nothing ssh could read as an option, nothing that breaks the app\'s command', () => {
+  const m = macRig();
+  for (const bad of ['-oProxyCommand=touch /tmp/x', 'emre@-oProxyCommand=x', 'emre@pihole2;id', 'emre@pihole 2', 'pihole2', '@pihole2',
+    'emre@', 'emre@pi"hole', "emre@pi'hole", 'emre@pihole2\nid', 'emre@$(id)']) {
+    let r = m.copy('2026-10-14', '21', {}, [bad]);
+    assert.strictEqual(r.status, 0, bad);
+    assert.strictEqual(m.lastLog().slice(20), `not a Pi: "${bad.replace(/[^A-Za-z0-9@._:-]/g, '?')}" - give each as user@address`, bad);
+    r = m.exec(['install', bad]);
+    assert.ok(r.status !== 0 && /Give the Pi as user@address/.test(r.stderr), bad);
+  }
+  assert.ok(!fs.existsSync(m.dest) || fs.readdirSync(m.dest).length === 0, 'nothing reached, nothing copied');
+  assert.strictEqual(m.state(), '');
+  // One bad, one good: the good one is copied.
+  m.copy('2026-10-14', '21', {}, ['emre@pi"hole', 'emre@pihole2']);
+  assert.strictEqual(m.lastLog().slice(20), 'copied 3 days, 9 frames, from emre@pihole2 to iCloud Drive/NHRC Timelapse');
+  for (const good of ['emre@pihole2', 'emre@192.0.2.10', 'pi_user@pihole-2.local', 'emre@fe80::1']) {
+    assert.strictEqual(run2('bash', ['-c', `source <(sed -n '/^valid_pi()/,/^}/p' "${ICLOUD_SH}"); valid_pi "$1"`, 'x', good]).status, 0, good);
+  }
 });
 
 test('the Mac\'s copy: one at a time; a lock left by a copy that died is taken over', () => {
@@ -3374,10 +4552,10 @@ if (fs.existsSync('/usr/sbin/sshd') && fs.existsSync('/usr/bin/ssh-keygen')) {
       const wrapper = path.join(t, 'ssh');
       fs.writeFileSync(wrapper, `#!/bin/bash\nexec ssh -F ${t}/ssh_config "$@"\n`, { mode: 0o755 });
       await new Promise(r => setTimeout(r, 700));
-      const r = run2('bash', [ICLOUD_SH, 'run', 'pi'], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: m.home,
+      const r = run2('bash', [ICLOUD_SH, 'run', `${user}@pi`], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: m.home,
         NHRC_TIMELAPSE_SSH: wrapper, NHRC_TIMELAPSE_DEST: m.dest, NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' } });
       assert.strictEqual(r.status, 0, r.stderr);
-      assert.ok(/ copied 3 days, 9 frames, to iCloud Drive\/NHRC Timelapse$/.test(m.lastLog()), m.lastLog());
+      assert.strictEqual(m.lastLog().slice(20), `copied 3 days, 9 frames, from ${user}@pi to iCloud Drive/NHRC Timelapse`);
       assert.deepStrictEqual(fs.readdirSync(m.dest).sort(), ['2026-10-12', '2026-10-13', '2026-10-14']);
       const as = (args, opts = {}) => run2(args[0], args.slice(1), Object.assign({ encoding: 'utf8', timeout: 10000 }, opts));
       const base = ['-F', `${t}/ssh_config`, '-i', key, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes'];
@@ -3393,13 +4571,55 @@ if (fs.existsSync('/usr/sbin/sshd') && fs.existsSync('/usr/bin/ssh-keygen')) {
       sshd.kill('SIGTERM');
     }
   }, 60000);
+
+  test('end to end, with two real ssh servers - the main Pi and the standby: one evening\'s copy brings both Pis\' frames into the same days', async () => {
+    const m = macRig();
+    m.standby.day('2026-10-14', '0730', '0735');
+    const t = tlDir();
+    const user = require('os').userInfo().username;
+    const key = path.join(m.home, '.ssh', 'nhrc_timelapse');
+    fs.mkdirSync(path.dirname(key), { recursive: true });
+    run2('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'nhrc-timelapse (read-only frames)', '-f', key]);
+    const servers = [];
+    let config = '';
+    try {
+      // Each Pi: its own ssh server, the Mac's one key tied to that Pi's export and folder.
+      for (const [alias, folder] of [['main', m.pi.dir], ['standby', m.standby.dir]]) {
+        const d = path.join(t, alias);
+        fs.mkdirSync(d);
+        run2('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-f', path.join(d, 'hostkey')]);
+        fs.writeFileSync(path.join(d, 'authorized_keys'),
+          `restrict,command="NHRC_TIMELAPSE_DIR=${folder} ${POSIX_SH} ${EXPORT_SH}" ${fs.readFileSync(key + '.pub', 'utf8')}`, { mode: 0o600 });
+        const port = 30000 + Math.floor(Math.random() * 20000);
+        fs.writeFileSync(path.join(d, 'sshd_config'), [`Port ${port}`, 'ListenAddress 127.0.0.1', `HostKey ${d}/hostkey`, `PidFile ${d}/sshd.pid`,
+          `AuthorizedKeysFile ${d}/authorized_keys`, 'StrictModes no', 'UsePAM no', 'PasswordAuthentication no',
+          'KbdInteractiveAuthentication no', 'PubkeyAuthentication yes'].join('\n') + '\n');
+        servers.push(require('child_process').spawn('/usr/sbin/sshd', ['-D', '-e', '-f', path.join(d, 'sshd_config')], { stdio: 'ignore' }));
+        config += `Host ${alias}\n  HostName 127.0.0.1\n  Port ${port}\n  UserKnownHostsFile ${t}/known_hosts\n  StrictHostKeyChecking no\n  LogLevel ERROR\n`;
+      }
+      fs.writeFileSync(path.join(t, 'ssh_config'), config);
+      const wrapper = path.join(t, 'ssh');
+      fs.writeFileSync(wrapper, `#!/bin/bash\nexec ssh -F ${t}/ssh_config "$@"\n`, { mode: 0o755 });
+      await new Promise(r => setTimeout(r, 700));
+      const r = run2('bash', [ICLOUD_SH, 'run', `${user}@main`, `${user}@standby`], { encoding: 'utf8', env: { PATH: process.env.PATH,
+        HOME: m.home, NHRC_TIMELAPSE_SSH: wrapper, NHRC_TIMELAPSE_DEST: m.dest, NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' } });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.deepStrictEqual(m.logLines(), [`copied 3 days, 9 frames, from ${user}@main to iCloud Drive/NHRC Timelapse`,
+        `copied 1 day, 2 frames, from ${user}@standby to iCloud Drive/NHRC Timelapse`]);
+      assert.deepStrictEqual(fs.readdirSync(path.join(m.dest, '2026-10-14')).sort(), ['2026-10-14_0705.jpg', '2026-10-14_0710.jpg',
+        '2026-10-14_0715.jpg', '2026-10-14_0720.jpg', '2026-10-14_0730.jpg', '2026-10-14_0735.jpg']);
+      assert.ok(fs.readFileSync(path.join(m.dest, '2026-10-14', '2026-10-14_0730.jpg')).equals(fs.readFileSync(path.join(m.standby.dir, '2026-10-14', '2026-10-14_0730.jpg'))));
+    } finally {
+      for (const sv of servers) sv.kill('SIGTERM');
+    }
+  }, 60000);
 }
 
 test('the Mac\'s script: refuses what it cannot do, schedules 21:30 through its own app, and keeps to the Mac\'s bash 3.2', () => {
   const m = macRig();
   let r = m.exec([]);
   assert.strictEqual(r.status, 1);
-  assert.ok(/Usage: bash \S+ install\|run user@pi-address, or: bash \S+ uninstall/.test(r.stderr), r.stderr);
+  assert.ok(/Usage: bash \S+ install\|run user@pi-address \[user@standby-address\], or: bash \S+ uninstall/.test(r.stderr), r.stderr);
   r = m.exec(['install', 'pihole2']);
   assert.ok(r.status !== 0 && /Give the Pi as user@address/.test(r.stderr), r.stderr);
   r = m.exec(['install', 'emre@pihole2']);
@@ -3418,8 +4638,13 @@ test('the Mac\'s script: refuses what it cannot do, schedules 21:30 through its 
       StartCalendarInterval: { Hour: 21, Minute: 30 },
       StandardOutPath: '/Users/emre/Library/Logs/nhrc-timelapse.log', StandardErrorPath: '/Users/emre/Library/Logs/nhrc-timelapse.log' });
   }
-  // The app runs the copy, and never shows an error dialog in the evening (the log says what happened).
-  assert.ok(/-e 'try'[\s\S]*do shell script \\"\/bin\/bash \\" & quoted form of \\"\$SCRIPT\\" & \\" run \\" & quoted form of \\"\$PI\\"[\s\S]*-e 'end try'/.test(src));
+  // The app runs the copy - from each Pi given - and never shows an error dialog in the evening (the log says what happened).
+  assert.ok(/-e 'try'[\s\S]*-e "do shell script \\"\/bin\/bash \\" & quoted form of \\"\$SCRIPT\\" & \\" run\\"\$pis"[\s\S]*-e 'end try'/.test(src));
+  const loop = /\n {2}(for PI in "\$@"; do pis="\$pis & [^\n]*; done)\n/.exec(src);
+  assert.ok(loop, 'the Pis\' part of the app\'s command');
+  const built = run2('bash', ['-c', `pis=''; ${loop[1]}; printf '%s' "$pis"`, 'x', 'emre@pihole2', 'emre@standby'], { encoding: 'utf8' }).stdout;
+  assert.strictEqual(built, ' & " " & quoted form of "emre@pihole2" & " " & quoted form of "emre@standby"',
+    'AppleScript: run \'emre@pihole2\' \'emre@standby\', each quoted for the shell');
   // The key goes on the Pi tied to the export: list and fetch, nothing else.
   assert.ok(/printf 'restrict,command="%s" %s\\n' "\$HELPER"/.test(src) && /HELPER="\/usr\/local\/bin\/nhrc-timelapse-export"/.test(src));
   // bash 3.2, as on every Mac: none of bash 4's additions.
@@ -3429,6 +4654,87 @@ test('the Mac\'s script: refuses what it cannot do, schedules 21:30 through its 
   }
   // Every run is fenced from asking for a password, from waiting for ever, and from reading the list it loops over.
   assert.ok(/"\$SSH" -n -i "\$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20/.test(src));
+});
+
+test('the Mac\'s install, run here with stand-ins for macOS: the key goes on each Pi once, tied to the export; the app copies from both Pis', () => {
+  const m = macRig();
+  m.standby.day('2026-10-14', '0730');
+  // Stand-ins for what only a Mac has: uname, osacompile (noting what the app is to run), launchctl, and open
+  // (running the app: its AppleScript command, worked out as macOS would).
+  const mac = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-macos-'));
+  const tool = (name, body) => fs.writeFileSync(path.join(mac, name), body, { mode: 0o755 });
+  tool('uname', '#!/bin/bash\necho Darwin\n');
+  tool('launchctl', `#!/bin/bash\necho "$*" >> ${mac}/launchctl.log\n`);
+  fs.writeFileSync(path.join(mac, 'osacompile.js'), `const fs = require('fs'); const a = process.argv.slice(2);
+    fs.writeFileSync(${JSON.stringify(mac)} + '/osacompile.json', JSON.stringify(a)); fs.mkdirSync(a[a.indexOf('-o') + 1], { recursive: true });`);
+  tool('osacompile', `#!/bin/bash\nexec "${process.execPath}" ${mac}/osacompile.js "$@"\n`);
+  fs.writeFileSync(path.join(mac, 'open.js'), `const fs = require('fs'); const a = process.argv.slice(2);
+    const osa = JSON.parse(fs.readFileSync(${JSON.stringify(mac)} + '/osacompile.json', 'utf8'));
+    if (a[0] !== '-W' || a[1] !== osa[osa.indexOf('-o') + 1]) { console.error('open: not the app: ' + a.join(' ')); process.exit(2); }
+    const cmd = osa.find(x => x.startsWith('do shell script '));
+    let e = cmd.slice('do shell script '.length), i = 0, out = '';
+    const lit = () => { let v = ''; i++; while (e[i] !== '"') { if (e[i] === '\\\\') i++; v += e[i++]; } i++; return v; };
+    while (i < e.length) {
+      if (e.startsWith('quoted form of ', i)) { i += 15; out += "'" + lit().split("'").join("'\\\\''") + "'"; }
+      else if (e[i] === '"') out += lit(); else { console.error('open: cannot read ' + e.slice(i)); process.exit(2); }
+      while (e[i] === ' ') i++;
+      if (i < e.length) { if (e[i] !== '&') { console.error('open: expected & at ' + e.slice(i)); process.exit(2); } i++; while (e[i] === ' ') i++; }
+    }
+    fs.writeFileSync(${JSON.stringify(mac)} + '/ran', out);
+    process.exit(require('child_process').spawnSync('/bin/sh', ['-c', out], { stdio: 'inherit' }).status);`);
+  tool('open', `#!/bin/bash\nexec "${process.execPath}" ${mac}/open.js "$@"\n`);
+  tool('nhrc-timelapse-export', `#!/bin/sh\nexec ${POSIX_SH} ${EXPORT_SH} "$@"\n`);
+  const piHome = tlDir(), standbyHome = tlDir();
+  const env = { PATH: `${mac}:${process.env.PATH}`, FAKE_SSH_PASSWORD: '1', FAKE_SSH_KEYCHECK: '1', FAKE_HELPER: path.join(mac, 'nhrc-timelapse-export'),
+    FAKE_PI_HOME: piHome, FAKE_PI_HOME_STANDBY: standbyHome, NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' };
+  let r = m.exec(['install', 'emre@pihole2', 'emre@standby'], env);
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  const keyLine = `restrict,command="/usr/local/bin/nhrc-timelapse-export" ${fs.readFileSync(path.join(m.home, '.ssh', 'nhrc_timelapse.pub'), 'utf8').trim()}`;
+  const keysOn = (home) => fs.readFileSync(path.join(home, '.ssh', 'authorized_keys'), 'utf8');
+  for (const home of [piHome, standbyHome]) {
+    assert.strictEqual(keysOn(home), keyLine + '\n', 'the one line, tied to the export');
+    assert.strictEqual(fs.statSync(path.join(home, '.ssh', 'authorized_keys')).mode & 0o777, 0o600);
+  }
+  assert.ok(/emre@pihole2 answers: 3 days of frames there\.\nAdding this Mac's key to emre@standby[\s\S]*emre@standby answers: 1 day of frames there\./.test(r.stdout), r.stdout);
+  // The app: what osacompile was given, and the command it ran.
+  const support = path.join(m.home, 'Library', 'Application Support', 'NHRC Timelapse');
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(mac, 'osacompile.json'), 'utf8')), ['-o', path.join(support, 'NHRC Timelapse.app'),
+    '-e', 'try', '-e', `do shell script "/bin/bash " & quoted form of "${path.join(support, 'timelapse_to_icloud.sh')}" & " run" & " " & quoted form of "emre@pihole2" & " " & quoted form of "emre@standby"`,
+    '-e', 'end try']);
+  assert.strictEqual(fs.readFileSync(path.join(mac, 'ran'), 'utf8'), `/bin/bash '${path.join(support, 'timelapse_to_icloud.sh')}' run 'emre@pihole2' 'emre@standby'`);
+  assert.ok(/bootstrap gui\/\d+ \S+com\.nhrc\.timelapse-to-icloud\.plist/.test(fs.readFileSync(path.join(mac, 'launchctl.log'), 'utf8')));
+  // Its first copy, through the app: both Pis.
+  assert.deepStrictEqual(m.logLines(), ['copied 3 days, 9 frames, from emre@pihole2 to iCloud Drive/NHRC Timelapse',
+    'copied 1 day, 1 frame, from emre@standby to iCloud Drive/NHRC Timelapse']);
+  assert.ok(fs.existsSync(path.join(m.dest, '2026-10-14', '2026-10-14_0730.jpg')));
+  // Installed again: nothing added twice, nothing copied twice.
+  r = m.exec(['install', 'emre@pihole2', 'emre@standby'], env);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.ok(!/Adding this Mac's key/.test(r.stdout), 'the key works already: not added again');
+  assert.strictEqual(m.lastLog().slice(20), 'nothing new to copy');
+  // A Pi whose export fails although the key is there: the install says so - and still leaves one line.
+  fs.rmSync(m.standby.dir, { recursive: true });
+  fs.writeFileSync(m.standby.dir, 'not a folder');
+  r = m.exec(['install', 'emre@pihole2', 'emre@standby'], env);
+  assert.ok(r.status !== 0 && /The key does not work on emre@standby yet: /.test(r.stderr), r.stdout + r.stderr);
+  assert.strictEqual(keysOn(standbyHome), keyLine + '\n', 'the line already there was not added again');
+  // A Pi without the export installed: said - and nothing is put on it.
+  const newHome = tlDir();
+  r = m.exec(['install', 'emre@standby'], Object.assign({}, env, { FAKE_PI_HOME_STANDBY: newHome, FAKE_HELPER: '/nonexistent/nhrc-timelapse-export' }));
+  assert.ok(r.status !== 0 && /First install \S+ on the Pi - see camera\/README\.md/.test(r.stderr), r.stderr);
+  assert.ok(!fs.existsSync(path.join(newHome, '.ssh', 'authorized_keys')));
+});
+
+test('the Pi\'s export on a Pi that has never filmed (a standby): no days - not an error', () => {
+  const missing = path.join(tlDir(), 'timelapse');
+  const r = exportAsk(missing, 'list');
+  assert.strictEqual(r.status, 0, r.stderr.toString());
+  assert.strictEqual(r.stdout.toString(), '');
+  assert.strictEqual(exportAsk(missing, 'get 2026-10-14').status, 1);
+  // The Mac then copies the main Pi's days, and has nothing to say about the standby.
+  const m = macRig();
+  m.copy('2026-10-14', '21', { FAKE_PI_DIR_STANDBY: missing }, ['emre@pihole2', 'emre@standby']);
+  assert.deepStrictEqual(m.logLines(), ['copied 3 days, 9 frames, from emre@pihole2 to iCloud Drive/NHRC Timelapse']);
 });
 
 test('the README\'s iCloud steps match the scripts: where the export goes, the commands, what the log can say', () => {
@@ -3442,16 +4748,613 @@ test('the README\'s iCloud steps match the scripts: where the export goes, the c
   assert.ok(sec.includes(`sudo chmod 755 ${helper}`) && sec.includes('SSH_ORIGINAL_COMMAND=list nhrc-timelapse-export'));
   assert.ok(sec.includes('bash camera/timelapse_to_icloud.sh install emre@pihole2') && sec.includes('bash camera/timelapse_to_icloud.sh uninstall'));
   assert.ok(sec.includes('~/Library/Application\\ Support/NHRC\\ Timelapse/timelapse_to_icloud.sh run emre@pihole2'), 'the copy the install leaves behind');
-  for (const said of ['copied 1 day, 134 frames, to iCloud Drive/NHRC Timelapse', 'nothing new to copy', 'could not reach the Pi (',
-    'could not write to iCloud Drive (', 'iCloud Drive cannot be found']) {
+  for (const said of ['copied 1 day, 134 frames, from emre@pihole2 to iCloud Drive/NHRC Timelapse', 'nothing new to copy', 'could not reach emre@pihole2 (',
+    'could not copy 2026-10-14 from emre@pihole2: 80 of its 134 frames arrived', 'could not write to iCloud Drive (', 'iCloud Drive cannot be found']) {
     assert.ok(sec.includes(said), `the README explains "${said}"`);
   }
-  for (const said of ['nothing new to copy', 'could not reach the Pi (', 'could not write to iCloud Drive (', 'iCloud Drive cannot be found',
-    'could not copy $day: $got of its $count frames arrived']) {
+  for (const said of ['copied $copied day', 'from $PI to iCloud Drive/$NAME', 'nothing new to copy', 'could not reach $PI (',
+    'could not write to iCloud Drive (', 'iCloud Drive cannot be found', 'could not copy $day from $PI: $got of its $count frames arrived']) {
     assert.ok(src.includes(said), `the script says "${said}"`);
   }
   assert.ok(/RUN_HOUR=21\nRUN_MINUTE=30/.test(src) && sec.includes('At\n21:30'), 'the time the README gives');
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('6j. Two Pis and the timelapse: the standby films only while it has taken over');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The battery camera must never be filmed by both Pis. The standby films only
+// while it runs the cameras; each frame comes after the slot's check and dock
+// photo, as the main Pi's come after its photo; it asks the Worker again just
+// before each live view; and while standing by it makes no camera call at all
+// - not even for the battery level - says nothing, and writes nothing.
+
+const TL_DAY = '2026-10-13', TL_NEXT = '2026-10-14';   // sunrise 07:02, sunset 18:14: frames 07:05 to 18:10
+
+/** The frame names from one time to another on TL_DAY, every 5 minutes. */
+function framesBetween(from, to) {
+  const min = (s) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3, 5));
+  const out = [];
+  for (let m = min(from); m <= min(to); m += 5) {
+    out.push(`${TL_DAY}_${String(Math.floor(m / 60)).padStart(2, '0')}${String(m % 60).padStart(2, '0')}.jpg`);
+  }
+  return out;
+}
+
+/**
+ * One Pi on a fake clock: its dock photos' loop and its every-5-minutes
+ * timelapse, wired as main() and runStandby() wire them, sharing one clock as
+ * setTimeout would run them (each wake runs to its end before the next; the
+ * stand-ins add a dock photo's 20 s and a live view's 40 s to the clock). The
+ * Worker knows when the main Pi last checked in: on every 5-minute mark
+ * (+0.5 s) unless mainDead(at), and at each of mainStarts (a restart).
+ */
+async function twoPiDay(role, from, to, opts = {}) {
+  const { mainDead = () => false, mainStarts = [], workerDown = () => false, primaryDown = () => false,
+          sameRing = false, heartbeat = true } = opts;
+  const dir = tlDir();
+  const cfg = Object.assign({}, role === 'standby' ? standbyCfg : mainCfg, {
+    timelapse: tlCfg(dir, { times: [], everyMinutes: 5, minBattery: 40, targetHeight: 1080, recordSeconds: 45 }).timelapse });
+  let t = from.getTime(), seq = 0;
+  const timers = [];
+  const now = () => new Date(t);
+  const setTimer = (fn, ms) => { timers.push({ at: t + Math.max(0, ms), seq: seq++, fn }); };
+  const rec = { photos: [], live: [], health: 0, probes: [], beats: 0 };
+  const worker = () => {
+    if (workerDown(now())) throw new Error('check-in with nhrc-camera.example.workers.dev failed: ECONNREFUSED');
+    let c = Math.floor((t - 500) / 300000) * 300000 + 500;
+    for (let i = 0; i < 3000 && mainDead(new Date(c)); i++) c -= 300000;
+    if (mainDead(new Date(c))) c = null;
+    for (const s of mainStarts) if (s.getTime() <= t && (c === null || s.getTime() > c)) c = s.getTime();
+    return { ok: true, conflict: false, standby: null, main: c === null ? null
+      : { lastSeenSecondsAgo: Math.round((t - c) / 1000), state: 'capturing', ringId: sameRing ? ID_STANDBY.ringId : ID_MAIN_RING } };
+  };
+  const camera = { name: 'Downstream Lot', id: 202,
+    getHealth: async () => { rec.health++; return { battery_percentage: 87, latest_signal_strength: -61 }; } };
+  let tick = null, sb = null;
+  if (role === 'standby') {
+    sb = S.createStandby(cfg, { now, identity: ID_STANDBY, ringWaitMs: 50, checkIn: async () => worker(),
+      connect: async () => {}, ringCheck: async () => '"Dock Wired" online, "Downstream Lot" online' });
+  }
+  const tl = S.createTimelapse(cfg, Object.assign({
+    camera: () => camera, now, setTimer,
+    exists: () => true,                                // ffmpeg, wherever the tests run
+    dockBusy: () => !!(tick && tick.busy()),
+    backupInUse: () => !!(tick && tick.onBackup()),
+    exit: () => {}, rssBytes: () => 90 * 1048576, openFiles: () => 30, strays: () => [],
+    dockWaitMs: 300, dockPollMs: 5,
+    liveFrame: async (cam, workDir) => {
+      rec.live.push(nyClock(now()));
+      t += 40000;
+      const frame = path.join(workDir, 'frame.jpg');
+      fs.writeFileSync(frame, fakeJpeg(1920, 1080));
+      return { frame, liveSeconds: 13, missing: 0, received: 950, checked: ['9.8 s clean'], resolutions: '1920x1080 from 9.8 s',
+        target: 1080, stoppedEarly: { at: 12.8, size: { width: 1920, height: 1080 } }, largest: { width: 1920, height: 1080 } };
+    },
+  }, role === 'standby' ? {
+    // As runStandby wires them.
+    standingBy: () => sb.state() !== 'capturing',
+    confirm: async () => {
+      rec.probes.push(nyClock(now()));
+      const reply = worker();
+      return S.standbyDecision(reply, cfg).capture && !S.sameRingDevice(reply.main, ID_STANDBY);
+    },
+    quietSummary: true,
+    wakeDelayMs: S.STANDBY_WAKE_OFFSET_MS + S.INTERVAL_WAKE_MS,
+  } : {}));
+  tick = S.createScheduler(cfg, Object.assign({
+    now, setTimer, hasPrimary: true, hasBackup: true,
+    cycle: async (which) => {
+      const at = now();
+      t += 20000;
+      const down = which === 'primary' && primaryDown(at);
+      rec.photos.push({ role: which, at: nyClock(at), ok: !down });
+      if (down) throw Object.assign(new Error(`${which} offline`), { stage: 'capture' });
+    },
+  }, role === 'standby' ? { gate: sb.gate, wakeOffsetMs: S.STANDBY_WAKE_OFFSET_MS, maxSleepSeconds: S.CHECK_IN_SECONDS }
+    : heartbeat ? { heartbeat: () => { rec.beats++; }, maxSleepSeconds: S.CHECK_IN_SECONDS } : {}));
+  const lines = await captureLogs(async () => {
+    await tick();
+    await tl.intervalTick();   // after the first dock photo, as main() and runStandby() start it
+    for (;;) {
+      timers.sort((a, b) => a.at - b.at || a.seq - b.seq);
+      const next = timers[0];
+      if (!next || next.at > to.getTime()) break;
+      timers.shift();
+      t = Math.max(t, next.at);
+      await next.fn();
+    }
+    await flush();
+  });
+  const frames = [];
+  for (const d of fs.readdirSync(dir).filter(f => /^\d{4}-\d\d-\d\d$/.test(f)).sort()) {
+    frames.push(...fs.readdirSync(path.join(dir, d)).filter(f => f.endsWith('.jpg')).sort());
+  }
+  const plain = (l) => l.replace(/^\S+ - (ERROR: )?/, '');
+  return { rec, lines, frames, dir, sb, tlLines: lines.filter(l => /Timelapse/.test(l)).map(plain),
+           pauses: lines.filter(l => /Timelapse (paused|resumed)/.test(l)).map(plain) };
+}
+
+test('a normal day for the standby: the main Pi checks in all day - no live view, no battery reading, not a word about the timelapse, nothing written', async () => {
+  const r = await twoPiDay('standby', ny(TL_DAY, 0, 0), ny(TL_NEXT, 0, 0));
+  assert.deepStrictEqual([r.rec.live.length, r.rec.health, r.rec.probes.length, r.rec.photos.length], [0, 0, 0, 0]);
+  assert.deepStrictEqual(r.tlLines, [], r.tlLines.join(' | '));
+  assert.deepStrictEqual(fs.readdirSync(r.dir), [], 'nothing on its SD card - not even the note of captures');
+  assert.strictEqual(r.sb.state(), 'standing-by');
+});
+
+test('the main Pi dies at 9:02 and is back at 11:00: the standby films 9:15 to 10:55, each frame after its check and dock photo, then stops', async () => {
+  const r = await twoPiDay('standby', ny(TL_DAY, 8, 0), ny(TL_NEXT, 0, 0), { mainDead: between(9 + 2 / 60, 11) });
+  assert.deepStrictEqual(r.frames, framesBetween('09:15', '10:55'), 'from the takeover slot; none after the hand-back');
+  assert.deepStrictEqual(r.rec.photos.map(p => p.at), ['09:15:30', '09:30:30', '09:45:30', '10:00:30', '10:15:30', '10:30:30', '10:45:30']);
+  // 30 s into the slot, after the check - on a quarter hour after the dock photo too.
+  for (const at of r.rec.live) assert.strictEqual(at.slice(6), Number(at.slice(3, 5)) % 15 === 0 ? '50' : '32', at);
+  assert.strictEqual(r.rec.probes.length, 21, 'the Worker asked again before each of the 21 live views');
+  assert.deepStrictEqual(r.pauses, [], 'the hand-back was seen by its check, before the frame was due');
+  assert.ok(r.tlLines.some(l => /^Timelapse 2026-10-13: 21 frames saved \(21 at 1920x1080\)/.test(l)), 'the day in one line after sunset - it filmed that day');
+  assert.strictEqual(r.sb.state(), 'standing-by');
+});
+
+test('the main Pi back mid-slot, just after the standby\'s check (11:00:31): asked again before the live view, the standby does not film', async () => {
+  const back = ny(TL_DAY, 11, 0, 31);
+  const r = await twoPiDay('standby', ny(TL_DAY, 8, 0), ny(TL_DAY, 12, 0),
+    { mainDead: (at) => at >= ny(TL_DAY, 9, 2) && at < back, mainStarts: [back] });
+  assert.ok(r.rec.photos.some(p => p.at === '11:00:30'), 'its check at 11:00:30 had not seen it: that dock photo was taken');
+  assert.deepStrictEqual(r.frames, framesBetween('09:15', '10:55'), 'but not the 11:00 frame');
+  assert.deepStrictEqual(r.rec.probes.slice(-1), ['11:00:50'], 'the question that stopped it');
+  assert.deepStrictEqual(r.pauses, ['Timelapse paused: the Worker does not confirm that the main Pi is still away (it may be back).']);
+  assert.strictEqual(r.sb.state(), 'standing-by', 'and at its next check, 11:05:30, it stood by');
+});
+
+test('a Worker outage while the standby has taken over: the dock photos go on, the timelapse pauses - no answer is not a yes - and resumes after', async () => {
+  const r = await twoPiDay('standby', ny(TL_DAY, 8, 0), ny(TL_DAY, 12, 0), { mainDead: between(8, 12), workerDown: between(10, 10.5) });
+  assert.deepStrictEqual(r.frames, [...framesBetween('08:10', '09:55'), ...framesBetween('10:30', '11:55')]);
+  assert.deepStrictEqual(r.rec.photos.filter(p => p.at >= '10:00' && p.at < '10:30').map(p => p.at), ['10:00:30', '10:15:30'],
+    'the dock photos went on');
+  assert.deepStrictEqual(r.pauses, ['Timelapse paused: the Worker does not confirm that the main Pi is still away (it may be back).',
+    'Timelapse resumed at 10:30.'], 'said when it began and when it ended - not every 5 minutes');
+});
+
+test('takeover with the dock camera down: the standby films until the website needs the battery camera as its backup, then pauses, as the main Pi does', async () => {
+  const r = await twoPiDay('standby', ny(TL_DAY, 8, 0), ny(TL_DAY, 13, 0), { mainDead: between(8, 12), primaryDown: () => true });
+  assert.deepStrictEqual(r.frames, [`${TL_DAY}_0810.jpg`], 'the takeover slot, before the second dock miss');
+  assert.deepStrictEqual(r.rec.photos.filter(p => p.role === 'backup').map(p => p.at.slice(0, 5)),
+    ['08:15', '08:30', '09:00', '09:30', '10:00', '11:00'], 'the main Pi\'s backup timetable');
+  assert.deepStrictEqual(r.pauses, ['Timelapse paused: the website is using "Downstream Lot" as its backup camera, until the dock camera answers again.']);
+  // Never two things at once from the battery camera: its one live view ended before the first backup photo.
+  assert.deepStrictEqual(r.rec.live, ['08:10:50']);
+});
+
+test('a standby with the main Pi\'s Ring device never films - even with the main Pi gone since 6:00', async () => {
+  const r = await twoPiDay('standby', ny(TL_DAY, 0, 0), ny(TL_NEXT, 0, 0), { mainDead: (at) => at >= ny(TL_DAY, 6, 0), sameRing: true });
+  assert.deepStrictEqual([r.rec.live.length, r.rec.health, r.rec.photos.length, r.frames.length], [0, 0, 0, 0]);
+  assert.strictEqual(r.sb.state(), 'blocked');
+  assert.deepStrictEqual(r.tlLines, []);
+});
+
+test('the main Pi\'s day with its check-ins is its day without them: 96 dock photos and 134 frames, in the same slots - and 288 check-ins', async () => {
+  const withThem = await twoPiDay('main', ny(TL_DAY, 0, 0), ny(TL_NEXT, 0, 0));
+  const before = await twoPiDay('main', ny(TL_DAY, 0, 0), ny(TL_NEXT, 0, 0), { heartbeat: false });
+  assert.strictEqual(withThem.rec.photos.length, 96);
+  assert.ok(withThem.rec.photos.every(p => /^\d\d:(00|15|30|45):00$/.test(p.at)), 'on the quarter hour, to the second');
+  assert.strictEqual(withThem.rec.beats, 288);
+  assert.deepStrictEqual(withThem.frames, framesBetween('07:05', '18:10'));
+  assert.deepStrictEqual(withThem.frames, before.frames);
+  assert.deepStrictEqual(withThem.rec.live.map(x => x.slice(0, 5)), before.rec.live.map(x => x.slice(0, 5)), 'each frame in the same minute');
+  assert.deepStrictEqual(withThem.rec.photos.map(p => p.at.slice(0, 5)), before.rec.photos.map(p => p.at.slice(0, 5)));
+  assert.deepStrictEqual([withThem.rec.probes.length, withThem.pauses.length], [0, 0], 'the main Pi never asks before filming');
+  assert.ok(withThem.tlLines.some(l => /^Timelapse 2026-10-13: 134 frames saved \(134 at 1920x1080\)/.test(l)));
+});
+
+test('while the standby asks the Worker, the slot is busy - so a frame due waits for the answer', async () => {
+  let answer;
+  const t = ny(TL_DAY, 9, 15, 30).getTime();
+  const tick = S.createScheduler(standbyCfg, { now: () => new Date(t), setTimer: () => {}, cycle: async () => {},
+    gate: () => new Promise(r => { answer = r; }) });
+  const done = tick();
+  assert.strictEqual(tick.busy(), true, 'busy while it asks');
+  answer(false);
+  await done;
+  assert.strictEqual(tick.busy(), false, 'free once answered');
+  const failing = S.createScheduler(standbyCfg, { now: () => new Date(t), setTimer: () => {}, cycle: async () => {},
+    gate: async () => { throw new Error('bug'); } });
+  await captureLogs(() => failing());
+  assert.strictEqual(failing.busy(), false, 'and once a question fails');
+  let mt = ny(TL_DAY, 9, 15, 0).getTime();
+  const main = S.createScheduler(mainCfg, { now: () => new Date(mt), setTimer: () => {}, cycle: async () => {},
+    heartbeat: () => new Promise(() => {}) });
+  await main();                                        // the 9:15 dock photo
+  mt = ny(TL_DAY, 9, 20, 0).getTime() + 500;
+  main();                                              // 9:20: only a check-in, which never answers
+  assert.strictEqual(main.busy(), false, 'the main Pi\'s check-in never holds a frame back');
+});
+
+test('at the takeover the frame due waits for the standby\'s answer, then is filmed in that same slot', async () => {
+  const dir = tlDir();
+  let standing = true, asking = true;
+  // 9:15:32: the check (and dock photo) under way; it answers 60 ms later - taking over.
+  const rig = intervalRig(dir, { start: [9, 15, 32], dockBusy: () => asking, standingBy: () => standing, dockWaitMs: 5000 });
+  setTimeout(() => { standing = false; asking = false; }, 60);
+  await captureLogs(() => rig.runUntil(ny('2026-10-13', 9, 16)));
+  assert.deepStrictEqual(rig.calls.liveAt, ['09:15'], 'not lost: asked before the answer, it would have been');
+  // Standing by, the frame is not filmed - and nothing is read, not even the battery.
+  const dir2 = tlDir();
+  const idle = intervalRig(dir2, { start: [9, 15, 32], standingBy: () => true, quietSummary: true });
+  const lines = await captureLogs(() => idle.runUntil(ny('2026-10-13', 18, 30)));
+  assert.deepStrictEqual([idle.calls.live, idle.calls.health, idle.calls.snap], [0, 0, 0]);
+  assert.deepStrictEqual(lines, [], 'not a word');
+});
+
+test('the standby asks before every live view; a refusal, a throw or a hang-up is not a yes - and the battery camera is not woken', async () => {
+  for (const confirm of [async () => false, async () => { throw new Error('ECONNREFUSED'); }, async () => 'yes', async () => undefined]) {
+    const dir = tlDir();
+    const rig = intervalRig(dir, { start: [9, 15], standingBy: () => false, confirm });
+    const lines = await captureLogs(() => rig.runUntil(ny('2026-10-13', 9, 40)));
+    assert.strictEqual(rig.calls.live, 0, String(confirm));
+    assert.strictEqual(lines.filter(l => /Timelapse paused: the Worker does not confirm/.test(l)).length, 1, 'said once');
+  }
+  const dir = tlDir();
+  let asked = 0;
+  const rig = intervalRig(dir, { start: [9, 15], standingBy: () => false, confirm: async () => { asked++; return true; } });
+  await captureLogs(() => rig.runUntil(ny('2026-10-13', 9, 40)));
+  assert.deepStrictEqual([rig.calls.live, asked], [5, 5], 'a yes before each of the five');
+});
+
+test('the standby\'s day summary: only for a day it filmed', async () => {
+  const quiet = intervalRig(tlDir(), { start: [17, 0], standingBy: () => true, quietSummary: true });
+  let lines = await captureLogs(() => quiet.runUntil(ny('2026-10-13', 18, 30)));
+  assert.deepStrictEqual(lines, []);
+  let standing = false;
+  const filmed = intervalRig(tlDir(), { start: [17, 0], standingBy: () => standing, quietSummary: true, confirm: async () => true });
+  lines = await captureLogs(async () => {
+    await filmed.runUntil(ny('2026-10-13', 17, 20));
+    standing = true;                                   // handed back at 17:20
+    await filmed.runUntil(ny('2026-10-13', 18, 30));
+  });
+  assert.ok(lines.some(l => /Timelapse 2026-10-13: 4 frames saved \(4 at 1920x1080\)/.test(l)), lines.join(' | '));
+  // Filmed, but every frame failed: it tried that day, so it says how it went.
+  let standingNow = false;
+  const failing = intervalRig(tlDir(), { start: [17, 0], standingBy: () => standingNow, quietSummary: true, confirm: async () => true,
+    frames: () => new Error('the camera did not answer') });
+  lines = await captureLogs(async () => {
+    await failing.runUntil(ny('2026-10-13', 17, 20));
+    standingNow = true;
+    await failing.runUntil(ny('2026-10-13', 18, 30));
+  });
+  assert.ok(lines.some(l => /Timelapse 2026-10-13: 0 frames saved; 4 failed/.test(l)), lines.join(' | '));
+  // The main Pi (no quietSummary) sums up a day even with nothing filmed.
+  const main = intervalRig(tlDir(), { start: [17, 0], battery: () => 30 });
+  lines = await captureLogs(() => main.runUntil(ny('2026-10-13', 18, 30)));
+  assert.ok(lines.some(l => /Timelapse 2026-10-13: 0 frames saved/.test(l)), lines.join(' | '));
+});
+
+test('the service wires the standby\'s timelapse: films only while capturing, asks before each live view, after the slot\'s check', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
+  const standby = src.slice(src.indexOf('async function runStandby('), src.indexOf('module.exports'));
+  assert.ok(/standingBy: \(\) => standby\.state\(\) !== 'capturing'/.test(standby));
+  assert.ok(/wakeDelayMs: STANDBY_WAKE_OFFSET_MS \+ INTERVAL_WAKE_MS/.test(standby));
+  assert.ok(/confirm: async \(\) => \{\s*const reply = await checkIn\(\{ pi: 'standby', probe: true,[^}]*\}, CONFIG\);\s*return standbyDecision\(reply, CONFIG\)\.capture && !sameRingDevice\(reply\.main, identity\);/.test(standby),
+    'a probe - recorded nowhere - and the same decision as the check, the same Ring rule');
+  const main = src.slice(src.indexOf('async function main()'), src.indexOf('async function runStandby('));
+  assert.ok(/setUpTimelapse\(\{ camera: \(\) => camera, backup: \(\) => backup, api: \(\) => api, scheduler: \(\) => tick \}\)/.test(main),
+    'the main Pi films as before: no standby hooks');
+  const setup = src.slice(src.indexOf('function setUpTimelapse('), src.indexOf('async function main()'));
+  assert.ok(/quietSummary: !!hooks\.standingBy/.test(setup) && /wakeDelayMs: hooks\.wakeDelayMs/.test(setup));
+});
+
+test('the README\'s standby section matches the code: the timetable it runs, what the journal says, the commands', () => {
+  const md = fs.readFileSync(path.join(__dirname, 'README.md'), 'utf8');
+  const sec = md.slice(md.indexOf('## 8. A standby Pi'), md.indexOf('## Settings worth knowing'));
+  assert.ok(sec.length > 3000, 'the section is there');
+  const flat = (x) => x.replace(/\s+/g, ' ');
+  const text = flat(sec);
+  assert.ok(text.includes(`quiet for \`STANDBY_TAKEOVER_MINUTES\` (${S.CONFIG.takeoverMinutes})`));
+  assert.ok(text.includes(`the dock camera every ${S.CONFIG.intervalMinutes} minutes, the battery camera only after two dock misses`)
+    && S.CONFIG.backup.afterMisses === 2, 'today\'s timetable, not the 5 minutes and six misses of 4 October');
+  const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
+  const code = flat(src).replace(/\\'/g, "'");   // as the strings read, not as they are escaped
+  for (const said of ['This is the STANDBY Pi', 'Standing by: the main Pi checked in', 'separate from the other Pi\'s',
+    'this standby would stand by', 'Timelapse paused: the Worker does not confirm that the main Pi is still away', 'Timelapse resumed at',
+    'the STANDBY', 'is taking over the cameras', 'back to standing by']) {
+    assert.ok(text.includes(said), `the README quotes "${said}"`);
+    // (A pause is said as "Timelapse paused: " and its reason.)
+    assert.ok(code.toLowerCase().includes(said.replace(/^Timelapse paused: /, '').toLowerCase()), `the service says "${said}"`);
+  }
+  // The commands: the same checks as the timelapse's, the unit file from the repo, no drop-in.
+  assert.ok(sec.includes("sudo -u nhrccam bash -c 'set -a; . /opt/nhrc-camera/env; /usr/local/bin/node /opt/nhrc-camera/snapshot_service.js --check'"));
+  assert.ok(sec.includes("sudo -u nhrccam bash -c 'set -a; . /opt/nhrc-camera/env; /usr/local/bin/node /opt/nhrc-camera/snapshot_service.js --status'"));
+  assert.ok(sec.includes('sudo curl -fsSL -o /etc/systemd/system/nhrc-camera.service https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/nhrc-camera.service'));
+  assert.ok(!/timelapse\.conf/.test(sec), 'no drop-in on the standby: the unit file has those settings');
+  const unit = fs.readFileSync(path.join(__dirname, 'nhrc-camera.service'), 'utf8');
+  assert.ok(/\nMemoryMax=200M\n/.test(unit) && sec.includes(`MemoryMax=${200 * 1048576}`), 'what systemctl shows for the cap');
+  // Every command block is paste-safe: top level, one command a line, no heredoc.
+  for (const [, block] of sec.matchAll(/```bash\n([\s\S]*?)```/g)) {
+    for (const line of block.split('\n').filter(Boolean)) {
+      assert.ok(!/^\s/.test(line) && !/<<|\\$/.test(line), `paste-safe: ${line}`);
+    }
+  }
+  // The settings: the main Pi's env, with CAMERA_PI=standby - run on a copy (one with an old line too).
+  const envFile = path.join(tlDir(), 'env');
+  fs.writeFileSync(envFile, 'CAMERA_UPLOAD_URL=x\nCAMERA_PI=main\nTIMELAPSE_EVERY_MINUTES=5\n');
+  const lines = [/sudo sed -i '\/\^CAMERA_PI=\/d' \/opt\/nhrc-camera\/env\n/, /echo 'CAMERA_PI=standby' \| sudo tee -a \/opt\/nhrc-camera\/env\n/]
+    .map(re => { const m = re.exec(sec); assert.ok(m, String(re)); return m[0]; }).join('');
+  const r = require('child_process').spawnSync('bash', ['-c', lines.replace(/sudo /g, '').replace(/\/opt\/nhrc-camera\/env/g, envFile)], { encoding: 'utf8' });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(fs.readFileSync(envFile, 'utf8'), 'CAMERA_UPLOAD_URL=x\nTIMELAPSE_EVERY_MINUTES=5\nCAMERA_PI=standby\n');
+  // The token goes where the env says, owned by the service alone.
+  assert.ok(sec.includes('sudo mv ~/.nhrc-ring-token /opt/nhrc-camera/ring-token') && sec.includes('sudo chmod 600 /opt/nhrc-camera/ring-token'));
+  assert.ok(sec.includes('sudo install -m 600 -o nhrccam -g nhrccam /tmp/env.main /opt/nhrc-camera/env') && sec.includes('rm /tmp/env.main'),
+    'the copy of the secret is made private, and removed');
+});
+
+// ── What runs at the boathouse now, against this release ──
+//
+// The Worker is updated first. Until the main Pi is updated too, it must take
+// the main Pi's photos and serve them exactly as before - and a standby must
+// not take over from a main Pi that does not check in.
+
+test('the Worker update is safe for the main Pi as it runs now: its photos go up and are served as before, and a standby does not take over from it', async () => {
+  const deployed = atCommit(DEPLOYED_SERVICE, 'snapshot_service.js');
+  if (!deployed) { console.log(`    (skipped: git does not have ${DEPLOYED_SERVICE} here)`); return; }
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }], {}, { serviceSource: deployed });
+  box.setToken(ringToken('hid-main-pi'));
+  let r = await box.run([], {}, { stopAfter: 1, settleMs: 1500 });
+  assert.deepStrictEqual(r.uploads.map(u => [u.method, u.role, u.name, u.pi]), [['PUT', 'primary', 'Dock Wired', null]], r.out);
+  assert.deepStrictEqual(box.host.checkIns(), [], 'it does not know check-ins');
+  assert.ok(!/ERROR/.test(r.out), r.out);
+  const img = await box.host.get();
+  assert.strictEqual(img.status, 200);
+  assert.deepStrictEqual([img.headers.get('X-Camera-Role'), img.headers.get('X-Camera-Name')], ['primary', 'Dock Wired'], 'what the website reads');
+  assert.ok(img.headers.get('Last-Modified'));
+  let st = await box.host.status();
+  assert.deepStrictEqual([st.ok, st.role, st.camera, st.pi], [true, 'primary', 'Dock Wired', null]);
+  assert.deepStrictEqual([st.pis.main.state, st.pis.standby], [null, null], 'the main Pi known by its photo only');
+  // A standby on this release, the main Pi's photo 20 minutes old: it stands by.
+  fs.copyFileSync(path.join(__dirname, 'snapshot_service.js'), path.join(box.dir, 'snapshot_service.js'));
+  const standbyToken = path.join(box.dir, 'token-standby');
+  fs.writeFileSync(standbyToken, ringToken('hid-standby-pi'));
+  ageBy(box.host.env, 20);
+  box.reset();
+  r = await box.run([], Object.assign({ RING_TOKEN_FILE: standbyToken }, STANDBY_ENV),
+    { until: (out) => /Standing by: the main Pi's last photo came/.test(out), settleMs: 700 });
+  assert.ok(/The main Pi sends photos but has never checked in with the Worker: it runs older software/.test(r.out), r.out);
+  assert.ok(/Standing by: the main Pi's last photo came 20 min ago, but it does not check in yet - this Pi will not take over until it does\./.test(r.out), r.out);
+  assert.deepStrictEqual(r.uploads, []);
+  assert.ok(!box.ringEvents().some(e => e.ev === 'snapshot'), 'no camera woken');
+  st = await box.host.status();
+  assert.strictEqual(st.pis.standby.state, 'standing-by');
+});
+
+test('the main Pi updated before the Worker: the Worker as deployed takes its photos as before; its check-ins are refused, said once, and change nothing', async () => {
+  const oldWorker = atCommit(DEPLOYED_WORKER, 'cloudflare_worker.js');
+  if (!oldWorker) { console.log(`    (skipped: git does not have ${DEPLOYED_WORKER} here)`); return; }
+  const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }], { workerSource: oldWorker });
+  box.setToken(ringToken('hid-main-pi'));
+  const r = await box.run([], {}, { stopAfter: 1, settleMs: 1500 });
+  assert.deepStrictEqual(r.uploads.map(u => [u.role, u.name, u.pi]), [['primary', 'Dock Wired', 'main']], r.out);
+  assert.ok(/Snapshot uploaded/.test(r.out), r.out);
+  assert.strictEqual((r.out.match(/check-in failed: HTTP 405/g) || []).length, 1, r.out);
+  assert.ok(/this Worker does not know check-ins yet: update it \(camera\/README\.md\)\. The cameras carry on\./.test(r.out), r.out);
+  assert.ok(!/a standby Pi will take over/.test(r.out), 'no standby can take over through that Worker either: not said');
+  const img = await box.host.get();
+  assert.strictEqual(img.status, 200);
+  assert.deepStrictEqual([img.headers.get('X-Camera-Role'), img.headers.get('X-Camera-Name')], ['primary', 'Dock Wired']);
+  const st = await box.host.status();
+  assert.deepStrictEqual([st.ok, st.role, st.camera], [true, 'primary', 'Dock Wired']);
+});
+
+// ── Both Pis for real, with the timelapse: real ffmpeg, the real Worker ──
+
+if (HAVE_FFMPEG) {
+  /**
+   * Both Pis for real, with the timelapse every 5 minutes (all day, for the
+   * tests): the service processes, the stand-in Ring library whose live view
+   * is a real 1080p stream, and the real Worker over HTTP - one Worker for both,
+   * each Pi with its own Ring login, timelapse folder and recording folder.
+   */
+  const twoPiBox = async (hostOpts) => {
+    const host = await workerHost(hostOpts);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-2pi-e2e-'));
+    fs.copyFileSync(path.join(__dirname, 'snapshot_service.js'), path.join(dir, 'snapshot_service.js'));
+    const ringLog = path.join(dir, 'ring.log');
+    liveRingLibrary(dir, ringLog);
+    for (const pi of ['main', 'standby']) {
+      fs.writeFileSync(path.join(dir, `token-${pi}`), ringToken(`hid-${pi}-pi`));
+      fs.mkdirSync(path.join(dir, `tmp-${pi}`));
+      fs.mkdirSync(path.join(dir, `run-${pi}`));
+    }
+    fs.writeFileSync(path.join(dir, 'fakefetch.js'), `
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = async (url, opts) => {
+        const u = new URL(String(url));
+        if (u.host !== ${JSON.stringify(WORKER_HOST)}) throw new Error('test: no network access to ' + u.host);
+        return realFetch('http://127.0.0.1:${host.port}' + u.pathname + u.search, opts);
+      };`);
+    // TEST_CLOCK_SPEED runs the service's clock and timers that many times faster.
+    fs.writeFileSync(path.join(dir, 'clock.js'), `
+      const speed = Number(process.env.TEST_CLOCK_SPEED || 1);
+      if (speed !== 1) {
+        const RealDate = Date, realNow = RealDate.now.bind(RealDate), t0 = realNow();
+        const now = () => t0 + (realNow() - t0) * speed;
+        globalThis.Date = class extends RealDate {
+          constructor(...a) { if (a.length) super(...a); else super(now()); }
+          static now() { return now(); }
+        };
+        const st = globalThis.setTimeout, si = globalThis.setInterval;
+        globalThis.setTimeout = (fn, ms, ...rest) => st(fn, Math.max(0, Number(ms) || 0) / speed, ...rest);
+        globalThis.setInterval = (fn, ms, ...rest) => si(fn, Math.max(1, (Number(ms) || 0) / speed), ...rest);
+      }`);
+    const events = (pi) => (fs.existsSync(ringLog) ? fs.readFileSync(ringLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : [])
+      .filter(e => !pi || e.pi === pi);
+    const tlOut = (pi) => path.join(dir, `timelapse-${pi}`);
+    const run = (pi, args, env = {}, opts = {}) => new Promise((resolve) => {
+      const { until = null, settleMs = 0, maxMs = 40000, onStart = null } = opts;
+      const child = require('child_process').spawn(process.execPath, ['-r', path.join(dir, 'fakefetch.js'), '-r', path.join(dir, 'clock.js'),
+        path.join(dir, 'snapshot_service.js'), ...args], {
+        cwd: dir,
+        env: Object.assign({ PATH: process.env.PATH, HOME: dir, TMPDIR: path.join(dir, `tmp-${pi}`), CAMERA_PI: pi,
+          RING_TOKEN_FILE: path.join(dir, `token-${pi}`), TIMELAPSE_DIR: tlOut(pi), TIMELAPSE_WORK_DIR: path.join(dir, `run-${pi}`),
+          CAMERA_UPLOAD_URL: `https://${WORKER_HOST}/latest.jpg`, CAMERA_UPLOAD_SECRET: baseCfg.uploadSecret,
+          RING_CAMERA_NAME: 'Dock Wired', RING_BACKUP_CAMERA_NAME: 'Downstream Lot', CAMERA_RETRIES: '1', CAMERA_RETRY_DELAY_SECONDS: '0',
+          TIMELAPSE_EVERY_MINUTES: '5', TIMELAPSE_FROM: '0:00', TIMELAPSE_UNTIL: '23:59', TIMELAPSE_RECORD_SECONDS: '20' }, env),
+      });
+      let out = '';
+      child.stdout.on('data', d => { out += d; });
+      child.stderr.on('data', d => { out += d; });
+      if (onStart) onStart(child, () => out);
+      const started = Date.now();
+      let seenAt = null;
+      const poll = setInterval(() => {
+        if (seenAt === null && until && until(out)) seenAt = Date.now();
+        if ((seenAt !== null && Date.now() - seenAt >= settleMs) || Date.now() - started > maxMs) child.kill('SIGKILL');
+      }, 50);
+      child.on('exit', (code, signal) => { clearInterval(poll); resolve({ code, signal, out }); });
+    });
+    // The camera's stand-in ffmpegs, and any recording one, once the services have gone.
+    const cleanup = () => require('child_process').spawnSync('pkill', ['-KILL', '-f', dir]);
+    return { dir, host, run, events, tlOut, cleanup, uploads: () => host.uploads().map(u => ({ role: u.role, name: u.name, pi: u.pi })) };
+  };
+  const anyFrame = (o) => /Timelapse \S+ \S+: (saved|live video failed)/.test(o);
+
+  test('end to end, both Pis with the timelapse: the main Pi films; the standby, standing by, touches no camera - not even for the battery - and says nothing about it', async () => {
+    const box = await twoPiBox();
+    try {
+      let mainDone = false;
+      const mainRun = box.run('main', [], {}, { until: anyFrame, settleMs: 500, maxMs: 45000 }).then((r) => { mainDone = true; return r; });
+      // The standby starts once the main Pi has checked in, as when both have been running.
+      for (let i = 0; i < 200 && !box.host.checkIns('main').length; i++) await new Promise(r => setTimeout(r, 50));
+      const standbyRun = box.run('standby', [], {}, { until: () => mainDone, maxMs: 50000 });
+      const [m, s] = await Promise.all([mainRun, standbyRun]);
+      assert.ok(/Timelapse \S+ \S+: saved \S+ - 1920x1080/.test(m.out), m.out);
+      assert.ok(/Standing by: the main Pi checked in \d+ s ago/.test(s.out), s.out);
+      assert.ok(/Timelapse: "Downstream Lot" every 5 min .*; on this standby Pi only while it has taken over\. Test it now/.test(s.out), s.out);
+      assert.ok(!/Timelapse (\d{4}-\d\d-\d\d|paused|resumed)/.test(s.out), s.out);
+      assert.deepStrictEqual(box.events('standby').map(e => e.ev).filter(ev => ev !== 'construct' && ev !== 'getCameras'), [],
+        'not one camera call from the standby');
+      assert.deepStrictEqual(box.events('main').filter(e => e.camera === 'Downstream Lot').map(e => e.ev), ['health', 'live']);
+      assert.ok(!fs.existsSync(box.tlOut('standby')) || fs.readdirSync(box.tlOut('standby')).length === 0, 'nothing written on the standby');
+      assert.ok(box.uploads().length >= 1 && box.uploads().every(u => u.pi === 'main'), JSON.stringify(box.uploads()));
+      const st = await box.host.status();
+      assert.deepStrictEqual([st.pis.main.state, st.pis.standby.state], ['capturing', 'standing-by']);
+      assert.strictEqual(st.pis.main.conflict || st.pis.standby.conflict, false);
+    } finally {
+      box.cleanup();
+    }
+  }, 70000);
+
+  test('end to end: the main Pi quiet for 20 minutes - the standby takes over and films the timelapse into its own folder, after its dock photo', async () => {
+    const box = await twoPiBox();
+    try {
+      await seedMain(box, 20);
+      const r = await box.run('standby', [], {}, { until: anyFrame, settleMs: 300, maxMs: 45000 });
+      assert.ok(/The main Pi has not checked in for 20 min - this Pi is taking over the cameras/.test(r.out), r.out);
+      const saved = /Timelapse (\d{4}-\d\d-\d\d) (\d\d):(\d\d): saved (\S+) - 1920x1080, \d+ KB, from live video/.exec(r.out);
+      assert.ok(saved, r.out);
+      assert.ok(fs.existsSync(path.join(box.tlOut('standby'), saved[1], saved[4])), 'in the standby\'s own folder');
+      assert.ok(r.out.indexOf('Snapshot uploaded') < r.out.indexOf(': saved'), 'the dock photo first');
+      assert.deepStrictEqual(box.uploads().map(u => [u.role, u.pi]), [['primary', 'standby']]);
+      const probes = box.host.checkIns('standby').filter(c => c.json && c.json.probe === true);
+      assert.strictEqual(probes.length, 1, 'the Worker asked again just before the live view');
+      assert.deepStrictEqual(box.events('standby').filter(e => e.camera).map(e => [e.ev, e.camera]),
+        [['snapshot', 'Dock Wired'], ['health', 'Downstream Lot'], ['live', 'Downstream Lot']]);
+      assert.strictEqual(box.host.env.BUCKET.record('standby').state, 'capturing');
+      assert.strictEqual(box.host.env.BUCKET.record('main').state, 'capturing', 'the probe recorded nothing');
+      const notes = fs.readFileSync(path.join(box.tlOut('standby'), '.interval-log'), 'utf8');
+      assert.strictEqual(notes, `${saved[1]} ${saved[2]}:${saved[3]} start\n${saved[1]} ${saved[2]}:${saved[3]} done\n`);
+    } finally {
+      box.cleanup();
+    }
+  }, 60000);
+
+  test('end to end: the main Pi back between the standby\'s check and its live view - the Worker, asked again, says so: the camera is not woken', async () => {
+    let box = null, back = false;
+    box = await twoPiBox({ intercept: (e) => {
+      // The main Pi checks in again just as the standby is about to film.
+      if (!back && e.json && e.json.probe === true && e.json.pi === 'standby') { back = true; seedMain(box, 0); }
+      return null;
+    } });
+    try {
+      await seedMain(box, 20);
+      const r = await box.run('standby', [], {}, { until: (o) => /Timelapse paused: /.test(o), settleMs: 500, maxMs: 30000 });
+      assert.ok(back, 'the standby asked');
+      assert.ok(/taking over the cameras/.test(r.out) && /Snapshot uploaded/.test(r.out), r.out);
+      assert.ok(/Timelapse paused: the Worker does not confirm that the main Pi is still away \(it may be back\)\./.test(r.out), r.out);
+      assert.ok(!box.events('standby').some(e => e.ev === 'live'), 'no live view');
+      assert.ok(!fs.existsSync(path.join(box.tlOut('standby'), '.interval-log')), 'nothing started, nothing noted');
+    } finally {
+      box.cleanup();
+    }
+  }, 45000);
+
+  test('end to end (clock x60): after the hand-back the standby\'s timelapse goes quiet - not even a battery reading', async () => {
+    const box = await twoPiBox();
+    try {
+      await seedMain(box, 20);
+      let returned = false, healthAtReturn = null;
+      // The battery under 40%: the standby's timelapse reads it every 5 minutes while it has taken over, and films nothing.
+      const r = await box.run('standby', [], { TEST_CLOCK_SPEED: '60', FAKE_BATTERY: '30' }, {
+        until: (out) => {
+          if (!returned && box.uploads().length >= 1 && /Timelapse paused/.test(out)) { returned = true; seedMain(box, 0); }
+          if (healthAtReturn === null && /back to standing by/.test(out)) healthAtReturn = box.events('standby').filter(e => e.ev === 'health').length;
+          return healthAtReturn !== null;
+        },
+        settleMs: 12000,                                  // a further simulated 12 minutes: two more 5-minute marks
+        maxMs: 40000,
+      });
+      assert.ok(/taking over the cameras/.test(r.out) && /The main Pi is checking in again .* back to standing by/.test(r.out), r.out);
+      assert.ok(/Timelapse paused: "Downstream Lot" battery at 30%/.test(r.out), r.out);
+      assert.ok(healthAtReturn >= 1, String(healthAtReturn));
+      assert.strictEqual(box.events('standby').filter(e => e.ev === 'health').length, healthAtReturn, 'no camera call after the hand-back');
+      assert.ok(!box.events('standby').some(e => e.ev === 'live'));
+      assert.strictEqual(box.host.env.BUCKET.record('standby').state, 'standing-by');
+    } finally {
+      box.cleanup();
+    }
+  }, 60000);
+
+  test('end to end: the standby\'s timelapse test (SIGUSR2) works while it stands by - so it can be tried before it is needed', async () => {
+    const box = await twoPiBox();
+    try {
+      await seedMain(box, 0);
+      const r = await box.run('standby', [], {}, {
+        onStart: (child, out) => { const iv = setInterval(() => {
+          if (/Standing by: the main Pi checked in/.test(out()) && /Test it now with/.test(out())) { clearInterval(iv); child.kill('SIGUSR2'); } }, 100); },
+        until: (o) => /Timelapse test: (saved|live video failed)/.test(o), settleMs: 300, maxMs: 45000 });
+      assert.ok(/Timelapse test: saved \S+\.jpg - 1920x1080/.test(r.out), r.out);
+      assert.strictEqual(fs.readdirSync(path.join(box.tlOut('standby'), 'tests')).filter(f => f.endsWith('.jpg')).length, 1);
+      assert.deepStrictEqual(box.uploads(), [], 'no photo: it is standing by');
+      assert.ok(!/Timelapse \d{4}-\d\d-\d\d/.test(r.out), 'and no timelapse frame');
+    } finally {
+      box.cleanup();
+    }
+  }, 60000);
+
+  test('end to end: a timelapse camera name that cannot be settled never stops the standby taking over the dock photos', async () => {
+    const box = await twoPiBox();
+    try {
+      await seedMain(box, 20);
+      // "o" is in both cameras' names: ambiguous, refused rather than guessed.
+      const r = await box.run('standby', [], { TIMELAPSE_CAMERA_NAME: 'o' }, { until: (o) => /Snapshot uploaded/.test(o), settleMs: 1500, maxMs: 20000 });
+      assert.ok(/Timelapse: .*"o"/.test(r.out), r.out);
+      assert.ok(/taking over the cameras/.test(r.out), r.out);
+      assert.deepStrictEqual(box.uploads().map(u => [u.role, u.pi]), [['primary', 'standby']], 'the website still gets its photo');
+      assert.ok(!box.events('standby').some(e => e.ev === 'live'), 'and no camera is guessed for the timelapse');
+    } finally {
+      box.cleanup();
+    }
+  }, 40000);
+
+  test('end to end: the standby\'s --check says it films only while it has taken over', async () => {
+    const box = await twoPiBox();
+    const r = await box.run('standby', ['--check'], {}, {});
+    assert.strictEqual(r.code, 0, r.out);
+    assert.ok(/this Pi {6}: the STANDBY/.test(r.out), r.out);
+    assert.ok(/timelapse {4}: "Downstream Lot" every 5 min from 00:00 to 23:59 .*, while this standby has taken over; ffmpeg found/.test(r.out), r.out);
+    assert.deepStrictEqual(box.events(), [], '--check makes no Ring call');
+  });
+} else {
+  test('(two-Pi timelapse end-to-end tests skipped: ffmpeg is not installed here)', () => {});
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 section('7. Security guards');
@@ -3503,6 +5406,50 @@ test('the ESM-only Ring package is imported, not required', () => {
     'ring-client-api should be loaded with a dynamic import()');
 });
 
+test('the systemd unit in the repo keeps its protections, and is the one the README installs', () => {
+  const unit = fs.readFileSync(path.join(__dirname, 'nhrc-camera.service'), 'utf8');
+  for (const line of ['User=nhrccam', 'EnvironmentFile=/opt/nhrc-camera/env',
+                      'ExecStart=/usr/local/bin/node /opt/nhrc-camera/snapshot_service.js', 'Restart=always',
+                      'Environment=NODE_OPTIONS=--dns-result-order=ipv4first', 'MemoryMax=200M',
+                      'NoNewPrivileges=true', 'PrivateTmp=true', 'PrivateDevices=true', 'ProtectSystem=strict', 'ProtectHome=true',
+                      'ProtectKernelTunables=true', 'ProtectKernelModules=true', 'ProtectControlGroups=true',
+                      'RestrictNamespaces=true', 'LockPersonality=true',
+                      'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK', 'ReadWritePaths=/opt/nhrc-camera',
+                      // Pi-hole first, and the timelapse's recordings in memory.
+                      'Nice=10', 'CPUWeight=20', 'OOMScoreAdjust=500',
+                      'RuntimeDirectory=nhrc-camera', 'RuntimeDirectoryMode=0700']) {
+    assert.ok(unit.split('\n').includes(line), `unit file is missing: ${line}`);
+  }
+  // Each setting once: a second RestrictAddressFamilies= line would widen the first.
+  const keys = unit.split('\n').filter(l => /^[A-Za-z]+=/.test(l)).map(l => l.split('=')[0]);
+  assert.deepStrictEqual(keys.filter((k, i) => keys.indexOf(k) !== i), [], 'no setting twice');
+  assert.ok(!/AF_UNIX|AF_PACKET/.test(unit), 'no local or raw sockets');
+  const readme = fs.readFileSync(path.join(__dirname, 'README.md'), 'utf8');
+  assert.ok(readme.includes('main/camera/nhrc-camera.service'), 'the README installs the file from the repo');
+  assert.ok(!/^\[Service\]$/m.test(readme), 'no second, drifting copy of the unit inside the README');
+});
+
+test('a check-in never carries the token or the secret in its body', async () => {
+  let body;
+  await S.checkIn({ pi: 'main', ringId: S.ringIdentity(ringToken('hid-x')) }, baseCfg,
+    async (url, opts) => { body = opts.body; return { ok: true, status: 200, json: async () => ({ ok: true }) }; });
+  assert.ok(!body.includes(baseCfg.uploadSecret) && !body.includes('hid-x') && !body.includes(ringToken('hid-x')));
+  const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
+  assert.ok(!/checkIn\(\{[^}]*readToken\(/.test(src), 'the token is never put in a check-in');
+});
+
+test('no address of the home network in anything published: the README, the code, the scripts, the website', () => {
+  const files = ['README.md', 'snapshot_service.js', 'cloudflare_worker.js', 'timelapse_export.sh', 'timelapse_to_icloud.sh',
+    'nhrc-camera.service', 'test_snapshot_service.js', path.join('..', 'index.html')];
+  const lan = /\b(192\.168|10\.\d{1,3}|172\.(1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b/;
+  for (const f of files) {
+    const p = path.join(__dirname, f);
+    if (!fs.existsSync(p)) continue;
+    const m = lan.exec(fs.readFileSync(p, 'utf8'));
+    assert.ok(!m, `${f}: ${m && m[0]}`);
+  }
+});
+
 test('secrets and captures are gitignored', () => {
   const gi = fs.readFileSync(path.join(__dirname, '..', '.gitignore'), 'utf8');
   for (const pattern of ['camera/env', 'ring-token', '*.jpg']) {
@@ -3512,6 +5459,9 @@ test('secrets and captures are gitignored', () => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 asyncChain.then(async () => {
+  // The Worker hosts the end-to-end tests served; left open they would keep
+  // this process alive after the summary.
+  await Promise.all(openHosts.map(h => h.close()));
   console.log(`\n${'='.repeat(60)}`);
   console.log(`${passed} passed, ${failed} failed${SHARD ? ` (shard ${SHARD[1]} of ${SHARD[2]})` : ''}${ONLY ? ` (only ${ONLY})` : ''}`);
   console.log('='.repeat(60));
@@ -3520,4 +5470,5 @@ asyncChain.then(async () => {
     failures.forEach(([n, e]) => console.log(`  - ${n}: ${e.message}`));
     process.exit(1);
   }
+  process.exit(0);
 });

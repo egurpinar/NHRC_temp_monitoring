@@ -22,11 +22,15 @@ Ring setting first, then `CAMERA_INTERVAL_MINUTES` and `BACKUP_AFTER_MISSES`
 together (keep the misses at about half an hour), and the website's
 `CAMERA_CADENCE_LABEL`.
 
+Two Pis run the same program. The **main Pi** captures; a **standby Pi**
+checks in alongside it and takes over only if the main Pi stops checking in
+for 15 minutes (section 8).
+
 ```
-Ring cloud  <--  Pi Zero W (snapshot_service.js)  -->  Cloudflare Worker + R2
-                 outbound only, no open ports          *.workers.dev
-                                                              |
-                                                       roworno.com <img>
+Ring cloud  <--  main Pi (snapshot_service.js)      -->  Cloudflare Worker + R2
+            <--  standby Pi (CAMERA_PI=standby)     -->  *.workers.dev
+                 outbound only, no open ports               |
+                                                     roworno.com <img>
 ```
 
 Tested on Raspbian GNU/Linux 12 (bookworm), 32-bit, Pi Zero W (ARMv6).
@@ -98,8 +102,10 @@ no snapshot has been uploaded yet.
 ## 2. Node on the Pi Zero W
 
 Pi Zero W is **ARMv6**, which official Node builds dropped years ago. Use the
-unofficial builds — v20 is the newest with ARMv6 available (nothing from v22
-onward is compiled for it).
+unofficial builds. The main Pi was set up with v20, below, and runs fine on it;
+v20 is past end of life (April 2026), though, and the unofficial builds also
+cover v22 for ARMv6 (v22.23.3, September 2026), which is what the standby
+setup in section 8 installs. v24 onward has no ARMv6 build.
 
 ```bash
 uname -m          # armv6l confirms this applies to you
@@ -237,55 +243,14 @@ Then open the same URL in a browser — you should see the river.
 
 ## 6. Run it permanently
 
-```ini
-# /etc/systemd/system/nhrc-camera.service
-[Unit]
-Description=NHRC boathouse camera snapshots
-After=network-online.target
-Wants=network-online.target
+The systemd unit is [`nhrc-camera.service`](nhrc-camera.service) in this
+folder - the same file on both Pis. Its comments explain each setting: the
+IPv4-first DNS order, the 200 MB memory cap that protects Pi-hole, and the
+containment that keeps a compromised dependency away from the rest of a
+machine serving DNS.
 
-[Service]
-Type=simple
-User=nhrccam
-Group=nhrccam
-WorkingDirectory=/opt/nhrc-camera
-EnvironmentFile=/opt/nhrc-camera/env
-ExecStart=/usr/local/bin/node /opt/nhrc-camera/snapshot_service.js
-Restart=always
-RestartSec=60
-
-# IPv6 is disabled at the router (so all DNS goes through Pi-hole), but DNS
-# still returns AAAA records for Cloudflare. Without this, every upload first
-# attempts an unroutable IPv6 address and waits for it to fail before falling
-# back. Harmless once; wasteful on every upload for months.
-Environment=NODE_OPTIONS=--dns-result-order=ipv4first
-
-# This box also serves DNS. Cap memory so a leak here can never take Pi-hole
-# down with it — systemd kills this service instead of the OOM killer choosing.
-# 200M sits comfortably above the ~80-120M the service actually uses (including
-# startup spikes) while leaving headroom on a 427M Pi Zero W. Set it too low and
-# systemd kills the service on every start, producing a restart loop.
-MemoryMax=200M
-
-# --- Containment -----------------------------------------------------------
-# This process runs a large third-party dependency tree on a machine that
-# serves DNS for the whole network. Limit what a compromise could reach.
-NoNewPrivileges=true
-PrivateTmp=true
-PrivateDevices=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6
-RestrictNamespaces=true
-LockPersonality=true
-# The only writable path it needs is its own state directory.
-ReadWritePaths=/opt/nhrc-camera
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo curl -fsSL -o /etc/systemd/system/nhrc-camera.service https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/nhrc-camera.service
 ```
 
 Create the unprivileged account and move the token into the service directory
@@ -337,6 +302,248 @@ The page describes the Pi's settings in a few constants next to
 `_END_HOUR`). They do not control the cameras; change them when the Pi's
 settings change.
 
+## 8. A standby Pi
+
+A second Pi takes over the cameras - the website's photos and, if it is on,
+the timelapse - if the main Pi dies (SD card, power supply, a crash), and hands
+them back when it returns. The two Pis never talk to each other, only to the
+Worker, so the standby can live anywhere with internet. (Two Pis on one home
+connection protect against a Pi failing, not against the house losing power or
+internet.)
+
+### How it works
+
+- **Both Pis check in with the Worker every 5 minutes** (`POST /heartbeat`,
+  the upload secret). The Worker times each check-in with its own clock - a
+  Pi without a real-time clock can be hours out after a power cut - and keeps
+  one record per Pi. The main Pi checks in from its capture loop, so a
+  check-in proves the loop is running; a photo it uploads counts too.
+- **The standby looks 30 s into each 5-minute slot**: has the main Pi been
+  quiet for `STANDBY_TAKEOVER_MINUTES` (15)? If so it runs the main Pi's exact
+  timetable - the dock camera every 15 minutes, the battery camera only after
+  two dock misses, in daylight - and the timelapse (below). The first standby
+  photo appears 15-20 minutes after the main Pi's last check-in.
+- **The moment the main Pi checks in again, the standby stops** (at its next
+  check, within 5 minutes).
+- **When in doubt it changes nothing.** If the Worker cannot be reached, or
+  answers in a way the standby does not understand, it keeps doing what it was
+  doing. A hiccup can never have both Pis waking the battery camera.
+- **While the main Pi is alive the standby never touches a camera** - not even
+  to read the battery level, and not when the dock camera is down and the main
+  Pi is using the battery camera.
+- **A main Pi on older software is never taken over from.** Until the main Pi
+  runs this release it does not check in: the standby sees only its photos,
+  says so in its journal, and stands by.
+- **It stays ready.** It signs in to Ring when it starts, then proves the
+  sign-in still works every 6 hours by reading the account's device list
+  (which wakes no camera). A standby that could not take over shows up in
+  `/status` long before it is needed.
+- Every upload says which Pi sent it, and `/status` shows both Pis:
+
+```json
+"pi": "main",
+"pis": {
+  "main":    { "lastSeenSecondsAgo": 41, "state": "capturing",   "ring": "ok", "conflict": false },
+  "standby": { "lastSeenSecondsAgo": 12, "state": "standing-by", "ring": "ok", "conflict": false }
+}
+```
+
+| Standby `state` | Meaning |
+|---|---|
+| `starting` | Not signed in to Ring yet - it waits for the Worker's answer first (below) |
+| `standing-by` | Signed in and ready; the main Pi is checking in |
+| `capturing` | The main Pi has gone quiet: the standby is running the cameras |
+| `blocked` | It shares the main Pi's Ring login, so it makes no Ring calls at all (below) |
+| `ring-failed` | It cannot sign in to Ring; it retries hourly and cannot take over meanwhile |
+
+`"conflict": true` means two different Pis have checked in under the same name
+in the last hour - both set to `CAMERA_PI=main`, say, so both are capturing.
+
+### The timelapse on the standby
+
+With the same `TIMELAPSE_` lines in its `env` as the main Pi, the standby films
+the timelapse while - and only while - it has taken over:
+
+- **Each frame comes 30 s into its 5-minute slot**, after the standby's check
+  with the Worker and its dock photo - as the main Pi's frames come after its
+  dock photo.
+- **It asks the Worker once more just before each live view**, so a main Pi
+  that came back a moment ago is not filmed over. No answer is not a yes: the
+  journal says `Timelapse paused: the Worker does not confirm that the main Pi
+  is still away`, and `Timelapse resumed at ...` when it does.
+- **Its frames stay on its own SD card**, in the same day folders
+  (`/opt/nhrc-camera/timelapse/2026-10-14/...`). The Mac fetches from both Pis
+  into the same iCloud folders ("Copying the frames to iCloud").
+- **Standing by, it writes nothing and says nothing** about the timelapse. Its
+  day summary appears only for a day it filmed.
+- **Every guard of the main Pi's timelapse applies**: Pi-hole first, the
+  memory floor, the battery pause, the pause while the website uses the
+  battery camera as its backup, the hour's rest after failures, no restart
+  loop.
+- **One overlap remains possible**: if the main Pi restarts during a standby
+  frame (a live view lasts up to a minute), both may film that minute. At
+  worst one of the two frames fails, and its journal says so.
+
+Without the `TIMELAPSE_` lines the standby takes over the website's photos
+only.
+
+### Its own Ring login - this matters
+
+Ring rotates the refresh token every time it is used, so two Pis using one
+token race each other and one is signed out (see "Why a service and not a cron
+job"). The standby therefore signs in to the **same Ring account** - the
+cameras are shared with the account, not with a device - but with **its own
+login**, made by running `ring-auth-cli` on the standby itself. Never copy
+`ring-token` from one Pi to the other.
+
+`ring-client-api` keeps a device id inside the token, derived from
+`/etc/machine-id` when you sign in. Each Pi sends the Worker a one-way hash of
+its own. If the standby's matches the main Pi's - a copied token, or SD cards
+cloned from one another - the standby makes no Ring call at all, logs why, and
+reports `blocked`. So check that the machine ids differ **before** signing in
+on the standby:
+
+```bash
+sha256sum /etc/machine-id | cut -c1-12
+```
+
+Run it on each Pi: the two must differ. If they match, give the standby a new
+one and reboot it before signing in:
+`sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup && sudo reboot`.
+
+In Ring Control Center → Authorized Client Devices the standby appears as
+**NHRC Boathouse Camera (standby)**.
+
+### DNS: the standby must not depend on the main Pi
+
+Both Pis are Pi-holes. If the standby resolves names through the main Pi-hole
+only, it goes deaf at exactly the moment it is needed. On the standby:
+
+```bash
+grep nameserver /etc/resolv.conf
+getent hosts api.ring.com oauth.ring.com app-snaps.ring.com nhrc-camera.gurpinar-emre.workers.dev
+```
+
+The first must not list ONLY the main Pi-hole's address. Each name must
+resolve to a real address (not `0.0.0.0`) - a Pi-hole blocklist covering
+`ring.com` would stop the standby signing in. If it cannot, the journal says
+so after a minute, and the standby keeps checking in.
+
+### Pi-hole first, on the standby too
+
+The standby serves the house's second DNS, and gets the main Pi's protections:
+the unit file (section 6) caps the service at 200 MB, gives Pi-hole the
+processor first, and has the kernel stop this service - never Pi-hole - if
+memory ever ran out; a live view starts only with 80 MB to spare and stops
+below 40 MB. Standing by, the service sleeps between check-ins: one small
+HTTPS request every 5 minutes, no camera, no video.
+
+The heavy moment is the install (`npm install`, section 3): do it when nobody
+needs the internet much, and check `free -m` first. If the standby slows down
+meanwhile, the house's devices use the main Pi-hole - the reason there are two.
+
+### Setting it up
+
+**In this order: the Worker, the main Pi, then the standby.** Each step leaves
+the boathouse working as before:
+
+1. **The Worker** ("Updating the service on the Pi", step 1 of the two-camera
+   release: paste the new `cloudflare_worker.js`, Deploy). It takes the main
+   Pi's photos and serves them to the website exactly as before.
+2. **The main Pi**: only `snapshot_service.js` changes ("Updating the service
+   on the Pi"); its `env` and unit file stay as they are. The journal then says
+   `This is the MAIN Pi. It checks in with the Worker every 5 min`, and
+   `/status` shows `"main"` with `"state": "capturing"`.
+3. **The standby**, as follows - on the standby unless it says otherwise.
+
+The checks above, before anything is installed: the machine ids, DNS, and
+`free -m`. Then:
+
+- **Node v22**, as section 2 but for the standby's processor (`uname -m`):
+  `armv6l` from `unofficial-builds.nodejs.org`, `armv7l` / `aarch64` (arm64)
+  from `nodejs.org/dist`. Install it under `/usr/local` - the unit file runs
+  `/usr/local/bin/node`.
+- **The service** (section 3), with the main Pi's `ring-client-api` version:
+  on the main Pi `node -p "require('/opt/nhrc-camera/node_modules/ring-client-api/package.json').version"`,
+  and on the standby `npm install ring-client-api@THAT_VERSION --ignore-scripts --no-audit --no-fund`.
+- **Its own Ring login** (section 4), on the standby, after the machine-id
+  check. Then the service's own account, which alone may read it:
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin nhrccam
+sudo mv ~/.nhrc-ring-token /opt/nhrc-camera/ring-token
+sudo chown -R nhrccam:nhrccam /opt/nhrc-camera
+sudo chmod 600 /opt/nhrc-camera/ring-token
+```
+
+- **ffmpeg and the network buffers** for the timelapse ("Timelapse", "Setting
+  it up": the `apt install` and `sysctl` lines - not the drop-in: the unit file
+  has those settings).
+- **The settings**: the main Pi's `env`, copied Pi to Pi (it holds the upload
+  secret: never through a chat or a note), with one line added. On the main
+  Pi:
+
+```bash
+sudo install -m 600 -o $USER /opt/nhrc-camera/env ~/env.main
+```
+
+On the standby (with the main Pi's name or address), then delete the copy on
+the main Pi with `rm ~/env.main`:
+
+```bash
+scp emre@pihole2:env.main /tmp/env.main
+sudo install -m 600 -o nhrccam -g nhrccam /tmp/env.main /opt/nhrc-camera/env
+rm /tmp/env.main
+sudo sed -i '/^CAMERA_PI=/d' /opt/nhrc-camera/env
+echo 'CAMERA_PI=standby' | sudo tee -a /opt/nhrc-camera/env
+```
+
+- **Check before starting**: `--check` must say `the STANDBY` and
+  `ffmpeg found` (and `recordings : /run/nhrc-camera - not there yet`, until
+  it starts); `--status` must say the main Pi `checked in ... ago (capturing)`,
+  `Ring login : separate from the other Pi's`, and that this standby would
+  stand by:
+
+```bash
+sudo -u nhrccam bash -c 'set -a; . /opt/nhrc-camera/env; /usr/local/bin/node /opt/nhrc-camera/snapshot_service.js --check'
+sudo -u nhrccam bash -c 'set -a; . /opt/nhrc-camera/env; /usr/local/bin/node /opt/nhrc-camera/snapshot_service.js --status'
+```
+
+- **Start it**, with the unit file (section 6), and see that it stands by and
+  that the protections are in place (`Nice=10`, `CPUWeight=20`,
+  `OOMScoreAdjust=500`, `AF_NETLINK`, `nhrc-camera`, `MemoryMax=209715200`):
+
+```bash
+sudo curl -fsSL -o /etc/systemd/system/nhrc-camera.service https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/nhrc-camera.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now nhrc-camera
+journalctl -u nhrc-camera -n 20 --no-pager
+systemctl show nhrc-camera -p Nice -p CPUWeight -p OOMScoreAdjust -p RestrictAddressFamilies -p RuntimeDirectory -p MemoryMax
+```
+
+The journal says `This is the STANDBY Pi` and `Standing by: the main Pi
+checked in ... ago`.
+
+- **Try its timelapse once** (optional): a test frame, saved in its
+  `timelapse/tests/`. Send it two or three minutes after a 5-minute mark -
+  10:02, 10:07 - so it does not meet the main Pi's frame:
+
+```bash
+sudo kill -USR2 $(systemctl show -p MainPID --value nhrc-camera)
+```
+
+- **The Mac's copy from both Pis**: the export command on the standby, then
+  the Mac's install again with both Pis ("Copying the frames to iCloud").
+- **Try a failover once**, in daylight to see the timelapse too. On the main
+  Pi `sudo systemctl stop nhrc-camera`; 15-20 minutes later `/status` shows
+  `"pi": "standby"`, and the standby's journal says `this Pi is taking over
+  the cameras`, then saves frames. Then `sudo systemctl start nhrc-camera` on
+  the main Pi; within 5 minutes the standby's journal says `back to standing
+  by`.
+
+To take the standby out of service: `sudo systemctl disable --now
+nhrc-camera` on it. The main Pi carries on as before.
+
 ---
 
 ## Settings worth knowing
@@ -353,8 +560,10 @@ settings change.
 | `BACKUP_SLOW_AFTER_HOUR` / `BACKUP_SLOW_INTERVAL_MINUTES` | 10 / 60 | Backup rate after that hour. Must stay under the Worker's backup limit (130 min) |
 | `BACKUP_ACTIVE_START_HOUR` / `_END_HOUR` | 5 / 16 | Backup window. Night frames are dark and still cost battery |
 | `CAMERA_RETRIES` | 3 | Battery cameras cannot snapshot *while recording*, so motion events cause failures worth retrying |
-| `RING_TOKEN_FILE` | `~/.nhrc-ring-token` | Must persist across reboots |
-| `TIMELAPSE_TIMES` | (off) | Full-resolution frames saved on the Pi at these times - see [Timelapse](#timelapse-optional) |
+| `RING_TOKEN_FILE` | `~/.nhrc-ring-token` | Must persist across reboots. Each Pi has its own (section 8) |
+| `CAMERA_PI` | `main` | `main` or `standby` (section 8). Exactly one Pi is `main` |
+| `STANDBY_TAKEOVER_MINUTES` | 15 | Standby only: how long the main Pi must be quiet before the standby takes over. 10 to 1440 |
+| `TIMELAPSE_EVERY_MINUTES` | (off) | Full-resolution frames saved on the Pi every so many minutes, sunrise to sunset - see [Timelapse](#timelapse-optional) |
 
 ## The timetable
 
@@ -387,6 +596,15 @@ reached. Now:
 - after a restart it captures straight away, then rejoins the timetable.
 
 ## Updating the service on the Pi
+
+**Standby release (October 2026) — in order:** the Worker first (it learns
+`/heartbeat`; an older Worker answers 405 and the Pis say so in the journal,
+once an hour), then `snapshot_service.js` on the main Pi, as below - no change
+to its `env` (`CAMERA_PI` defaults to `main`) or to its unit file - then the
+standby (section 8). The main Pi's photos and timelapse are as before; it also
+wakes every 5 minutes to check in, which never delays a photo or a frame.
+Updated alone, it carries on exactly as before: its check-ins simply have
+nobody listening yet.
 
 **Two-camera release (October 2026) — do these in order:**
 
@@ -540,7 +758,9 @@ sudo sysctl -p /etc/sysctl.d/90-nhrc-camera.conf
 
 Pi-hole first, a netlink socket (which the live video needs to list the Pi's
 network addresses), and a folder in memory for the recordings - the service is
-otherwise as locked down as before:
+otherwise as locked down as before. The unit file (section 6) has them already;
+a Pi whose unit was copied from an earlier version of this README - the main
+Pi - gets them from a drop-in:
 
 ```bash
 sudo mkdir -p /etc/systemd/system/nhrc-camera.service.d
@@ -647,7 +867,7 @@ What else the journal can say:
 | `stopped: the memory available fell to N MB` | Stopped mid-capture to keep memory for Pi-hole |
 | `no clean keyframe (...)` | Too many packets lost on the way (usually Wi-Fi at either end) |
 | `nothing was recorded (...)` | Video arrived, but ffmpeg never started the file: the video's description (SPS/PPS) did not arrive whole, or the live view ended first. The brackets say how it went - when Ring answered, when video came and stopped, what Ring and ffmpeg said |
-| `TIMELAPSE_WORK_DIR /run/nhrc-camera cannot be used (...)` | The drop-in's `RuntimeDirectory=` line is missing: recording on the SD card instead |
+| `TIMELAPSE_WORK_DIR /run/nhrc-camera cannot be used (...)` | `RuntimeDirectory=nhrc-camera` is missing (the unit file, or the main Pi's drop-in): recording on the SD card instead |
 | `Timelapse settings problems - the timelapse is OFF` | A mistake in the settings, listed under it; the dock photos go on |
 | `only N MB free on the SD card` | Nothing saved: copy the frames off and delete them |
 
@@ -683,18 +903,20 @@ sudo rm -r /opt/nhrc-camera/timelapse/2026-10-14
 ### Copying the frames to iCloud, every evening
 
 Your Mac can fetch the timelapse every evening and keep it in iCloud Drive. At
-21:30 - after sunset, when the Pi has stopped filming - it copies each
+21:30 - after sunset, when the Pis have stopped filming - it copies each
 finished day it does not have yet into **iCloud Drive > NHRC Timelapse**, one
 folder a day, and macOS uploads them. If the Mac is asleep at 21:30 it does it
 when it wakes, and days it missed are caught up. A day being filmed is never
-copied half-done.
+copied half-done. With a standby Pi (section 8), the Mac fetches from both:
+the frames the standby filmed while it had taken over go into the same day's
+folder, and a frame already there is never replaced.
 
-The Mac uses a key of its own, which the Pi lets do two things - list the days,
-and send one - and nothing else: no shell, no other file, nothing written
+The Mac uses a key of its own, which each Pi lets do two things - list the
+days, and send one - and nothing else: no shell, no other file, nothing written
 (`camera/timelapse_export.sh`, as the only command that key may run). No Apple
-password goes on the Pi.
+password goes on a Pi.
 
-On the Pi, the command the key will be allowed:
+On each Pi, the command the key will be allowed:
 
 ```bash
 sudo curl -fsSL -o /usr/local/bin/nhrc-timelapse-export https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/timelapse_export.sh
@@ -702,19 +924,25 @@ sudo chmod 755 /usr/local/bin/nhrc-timelapse-export
 SSH_ORIGINAL_COMMAND=list nhrc-timelapse-export
 ```
 
-The last line lists the days so far, as `2026-10-14 134`.
+The last line lists the days so far, as `2026-10-14 134` (on a standby that
+has never taken over, nothing).
 
-On the Mac, in this repository's folder:
+On the Mac, in this repository's folder - the main Pi, then the standby if
+there is one:
 
 ```bash
 bash camera/timelapse_to_icloud.sh install emre@pihole2
+bash camera/timelapse_to_icloud.sh install emre@pihole2 emre@STANDBY-PI
 ```
 
-It makes the key and adds it to the Pi, read-only (asking once for your Pi
+It makes the key and adds it to each Pi, read-only (asking once for each Pi's
 password), sets up the 21:30 schedule, and copies what is there now. If macOS
 asks whether "NHRC Timelapse" may access iCloud Drive or find devices on your
 local network, click Allow; if it says a background item was added, leave it
-allowed (System Settings > General > Login Items).
+allowed (System Settings > General > Login Items). Installing again with the
+standby added replaces the schedule; nothing already copied is copied again.
+Give each Pi the same way every time (the same name or address): what has
+been copied is noted by it.
 
 What it did:
 
@@ -724,26 +952,30 @@ tail ~/Library/Logs/nhrc-timelapse.log
 
 | Log | Meaning |
 |---|---|
-| `copied 1 day, 134 frames, to iCloud Drive/NHRC Timelapse` | That evening's day is in iCloud |
-| `nothing new to copy` | Every finished day is there already |
-| `could not reach the Pi (...)` | The Mac was away from home, or the Pi was off: tried again the next evening |
-| `could not copy 2026-10-14: 80 of its 134 frames arrived (...)` | The connection broke: that day is tried again next time, whole |
+| `copied 1 day, 134 frames, from emre@pihole2 to iCloud Drive/NHRC Timelapse` | That evening's day is in iCloud |
+| `nothing new to copy` | Every finished day is there already, from every Pi |
+| `could not reach emre@pihole2 (...)` | The Mac was away from home, or that Pi was off: tried again the next evening |
+| `could not copy 2026-10-14 from emre@pihole2: 80 of its 134 frames arrived (...)` | The connection broke: that day is tried again next time, whole |
 | `could not write to iCloud Drive (...)` | macOS has not let "NHRC Timelapse" use it: System Settings > Privacy & Security > Files & Folders |
 | `iCloud Drive cannot be found` | iCloud Drive is off on this Mac |
+| `not a Pi: "..."` | A Pi was not given as user@address: install again |
 
 To copy now rather than wait for 21:30, or to stop it (the frames stay, in
-iCloud and on the Pi):
+iCloud and on the Pis):
 
 ```bash
 bash ~/Library/Application\ Support/NHRC\ Timelapse/timelapse_to_icloud.sh run emre@pihole2
 bash camera/timelapse_to_icloud.sh uninstall
 ```
 
-The frames stay on the Pi too: once a day is in iCloud, delete it there as
+(With a standby: `run emre@pihole2 emre@STANDBY-PI`.)
+
+The frames stay on the Pis too: once a day is in iCloud, delete it there as
 above. In iCloud they take 0.5-2 GB a month. The set-time frames from before
 (loose in the timelapse folder, not in day folders) are not copied: copy them
-once by hand. To have a day copied again, delete its line from
-`~/Library/Application Support/NHRC Timelapse/days-copied`.
+once by hand. To have a day copied again, delete its line - `emre@pihole2
+2026-10-14`, or just the date for a day copied before the standby release -
+from `~/Library/Application Support/NHRC Timelapse/days-copied`.
 
 ### Turning it off
 
@@ -771,7 +1003,7 @@ sudo systemctl restart nhrc-camera
 | `TIMELAPSE_TIMES` | (off) | Instead: local times, e.g. `8:00,12:00,15:00`. Each is due for 15 minutes (one dock slot) |
 | `TIMELAPSE_CAMERA_NAME` | `RING_BACKUP_CAMERA_NAME` | The camera to film |
 | `TIMELAPSE_DIR` | `/opt/nhrc-camera/timelapse` | Must be inside `ReadWritePaths` |
-| `TIMELAPSE_WORK_DIR` | the temp folder | Where each recording is made: `/run/nhrc-camera`, in memory (needs the drop-in's `RuntimeDirectory=`) |
+| `TIMELAPSE_WORK_DIR` | the temp folder | Where each recording is made: `/run/nhrc-camera`, in memory (needs `RuntimeDirectory=nhrc-camera`, in the unit file or the drop-in) |
 | `TIMELAPSE_RECORD_SECONDS` | 45 | Seconds of live video at most, 4-60. The resolution rises as the live view runs (see above) |
 | `TIMELAPSE_TARGET_HEIGHT` | 1080 | Stop as soon as a keyframe this tall has arrived; 0 = always the whole time |
 | `TIMELAPSE_MIN_BATTERY` | 40 | Every 5 minutes: no live views below this charge (%), until 15 points above it. 0 = no check |
@@ -810,6 +1042,14 @@ journalctl -u nhrc-camera -n 50           # what the Pi has been doing
   or Ring). The journal shows its capture errors.
 - **`ok: false` with a large `ageSeconds`** — the Pi has stopped uploading.
   Check the service is running and the Pi is online.
+- **`"pi": "standby"`** — the main Pi has stopped checking in and the standby
+  has taken over. `pis.main.lastSeenSecondsAgo` says since when. Look at the
+  main Pi: power, SD card, `journalctl -u nhrc-camera`.
+- **`pis.standby` is `null`, or its `lastSeenSecondsAgo` keeps growing** — the
+  standby is down, and would not take over. **`"state": "blocked"`** or
+  **`"ring-failed"`** — it is up but could not take over; its journal says why.
+- **`node snapshot_service.js --status`** on either Pi prints the same, from
+  that Pi's side, without recording anything or calling Ring.
 - **401 on upload** — the secret on the Pi and in the Worker disagree.
 - **Snapshots repeatedly fail** — often the camera recording during motion.
   Persistent failure usually means a dead battery or lost Wi-Fi.
@@ -861,12 +1101,15 @@ Ring account terms, and unwinding it later is harder than asking first.
 No ports are opened, no port forwarding, no home IP published. The Pi pushes to
 Cloudflare and never listens. This is why the design does not serve the image
 from the Pi directly — that would mean exposing a DNS server to the internet.
+(The Mac's evening copy of the timelapse uses the Pis' own ssh, inside the home
+network, with a key that can only list and send frames.)
 
 ### The upload secret
 
-Worst case if it leaks: someone replaces the published picture. Annoying, but
-it grants no access to the Pi, the Ring
-account, or the website repo.
+Worst case if it leaks: someone replaces the published picture, or fakes the
+Pis' check-ins (keeping a standby from taking over). Annoying, but it grants no
+access to either Pi, the Ring account, or the website repo. Both Pis hold the
+same secret; rotate it on both.
 
 Hardening applied:
 
@@ -928,10 +1171,11 @@ default. If the committee wants a formal retention answer: *the current frame
 only, replaced at each capture (every 15 minutes), never stored historically.*
 
 The one exception is the timelapse, when it is on: a frame every 5 minutes in
-daylight (about 110-180 a day) from the Downstream Lot camera, kept on the Pi's
-SD card - never uploaded, never in git - until they are copied off and deleted.
-Its retention answer: *kept on the club's Pi only for making the construction
-timelapse, deleted once it is made.*
+daylight (about 110-180 a day) from the Downstream Lot camera, kept on the
+Pis' SD cards (the standby's only for the times it filmed) and, with the Mac's
+evening copy, in that Mac owner's iCloud Drive - never on the website, never
+in git - until the timelapse is made. Its retention answer: *kept by the club
+only for making the construction timelapse, deleted once it is made.*
 
 ---
 
@@ -941,7 +1185,7 @@ timelapse, deleted once it is made.*
 node camera/test_snapshot_service.js
 ```
 
-About 4 minutes. To run it in parts (each takes the quick tests and a third
+About 6 minutes. To run it in parts (each takes the quick tests and a third
 of the slow ones), or only the tests whose names match:
 
 ```bash
@@ -949,14 +1193,32 @@ TEST_SHARD=1/3 node camera/test_snapshot_service.js
 TEST_ONLY='battery' node camera/test_snapshot_service.js
 ```
 
-199 tests covering config validation, the timezone-aware windows, the capture
+287 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including
 both daylight-saving days and day-long outages), camera selection, atomic token
 persistence and file permissions, upload auth and retry behaviour, the Worker
 itself (run in Node against an in-memory R2), and the real service process end
-to end, with a stand-in Ring library. Every test is hermetic: a
-fixed clock and a fake network, never the real endpoint. The Ring API itself is
+to end, with a stand-in Ring library, talking over HTTP to the real Worker
+code. The two-Pi tests cover the check-ins and the standby's decision on a fake
+clock (takeover at 15 minutes, hand-back, Worker outages, a Ring sign-in that
+hangs or fails, a shared Ring login, two Pis under one name), whole days of
+the main Pi dying and returning with and without the dock camera, and real main
+and standby processes running side by side - one on a clock 60 times faster,
+to watch it take over and hand back. The release is also run against what ran
+at the boathouse before it: the main Pi's service and the Worker as deployed
+(from git), each with the other's new version. Every test is hermetic: a fixed
+clock and a fake network, never the real endpoint. The Ring API itself is
 stubbed, so no credentials are needed.
+
+The standby's timelapse, on a fake clock and for real: a normal day (no live
+view, no battery reading, not a word, nothing written), the main Pi dying and
+returning (frames from the takeover slot to the hand-back, each after the
+standby's check and dock photo), the main Pi back between the standby's check
+and its live view, a Worker outage, the dock camera down, a shared Ring login,
+and the main Pi's day unchanged by its check-ins; then both Pis as real
+processes with real ffmpeg - the main Pi filming while the standby stands by,
+the standby taking over and filming into its own folder, and going quiet after
+the hand-back.
 
 The timelapse tests use real ffmpeg (skipped where it is not installed): a
 1920x1080 H.264 stream sent over RTP through a relay that can lose packets,
@@ -985,8 +1247,9 @@ end - stopped (SIGTERM) and killed (SIGKILL) during a capture.
 
 For the copy to iCloud: the Pi's export asked 20 things it must refuse; the
 Mac's copy against a stand-in Pi (finished days only, catching up, a transfer
-cut short, iCloud not writable, two copies at once); and against a real ssh
-server, the Mac's key copying the days and being refused a command, a shell,
-scp and sftp. The macOS parts - the app, the schedule, the permission prompts -
+cut short, iCloud not writable, two copies at once), and against two (the
+standby's frames merged into the same days, one Pi away, the record kept by
+the first version); and against real ssh servers, the Mac's key copying the
+days from both Pis and being refused a command, a shell, scp and sftp. The macOS parts - the app, the schedule, the permission prompts -
 can only run on a Mac: its install ends with a first copy, and the log says how
 it went.

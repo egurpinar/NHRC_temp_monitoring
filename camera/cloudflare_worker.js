@@ -32,9 +32,30 @@
  * GoDaddy nameservers, and Worker custom domains require the zone to be hosted
  * on Cloudflare. The workers.dev hostname has valid TLS and needs no DNS change,
  * so the live site is never put at risk. See README.md "Which URL".
+ *
+ * ─── Two Pis: a main one and a standby ──────────────────────────────────────
+ * Each Pi POSTs a small check-in to /heartbeat every 5 minutes (same secret as
+ * uploads). The Worker keeps one record per Pi, timed by its OWN clock - a Pi
+ * that has just rebooted without a real-time clock can be hours out until NTP
+ * catches up - and answers with what it knows about both Pis. The standby uses
+ * that answer to decide whether the main Pi has gone quiet and it should take
+ * over the cameras. Uploads say which Pi sent them (X-Camera-Pi), and /status
+ * shows both Pis, so a dead standby is noticed before it is needed.
  */
 
 const OBJECT_KEY = 'latest.jpg';
+
+// The two Pis and the states they report. Anything else is stored as unknown,
+// so a check-in can never put arbitrary text into /status.
+const PIS = ['main', 'standby'];
+const PI_STATES = ['starting', 'capturing', 'standing-by', 'blocked', 'ring-failed'];
+const RING_STATES = ['ok', 'failed', 'not-connected'];
+const piKey = (pi) => `pi/${pi}.json`;
+// Two different Pis checking in under the same name within this window means
+// both are configured as that Pi - both would capture, and the battery camera
+// would be woken twice as often. Reported for an hour after it last happened.
+const CONFLICT_WINDOW_MS = 15 * 60 * 1000;
+const CONFLICT_SHOW_MS = 60 * 60 * 1000;
 
 // A frame older than this is treated as stale, by the camera that took it. A
 // stale image is more dangerous than no image, because people trust a
@@ -58,12 +79,14 @@ const maxAgeFor = (role) => (Object.prototype.hasOwnProperty.call(MAX_AGE_MS, ro
 // Custom headers are only visible to another origin when listed here.
 const EXPOSED = 'X-Camera-Role, X-Camera-Name, X-Snapshot-Age-Seconds';
 
-/** Camera role and name from an upload, reduced to what is safe to store and echo. */
+/** Camera role and name, and which Pi sent it, reduced to what is safe to store and echo. */
 function cameraMeta(request) {
   const role = (request.headers.get('X-Camera-Role') || '').trim().toLowerCase();
+  const pi = (request.headers.get('X-Camera-Pi') || '').trim().toLowerCase();
   return {
     role: role === 'primary' || role === 'backup' ? role : '',
     camera: (request.headers.get('X-Camera-Name') || '').replace(/[^A-Za-z0-9 ._-]/g, '').trim().slice(0, 60),
+    pi: PIS.includes(pi) ? pi : '',
   };
 }
 
@@ -72,6 +95,7 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === 'PUT') return handleUpload(request, env);
+    if (request.method === 'POST' && url.pathname === '/heartbeat') return handleHeartbeat(request, env);
     if (request.method === 'GET' || request.method === 'HEAD') {
       if (url.pathname === '/status') return handleStatus(env);
       return handleGet(request, env);
@@ -80,12 +104,15 @@ export default {
   },
 };
 
-async function handleUpload(request, env) {
+/** The shared secret, as a bearer token - required for uploads and check-ins. */
+function authorized(request, env) {
   const auth = request.headers.get('Authorization') || '';
-  const expected = `Bearer ${env.UPLOAD_SECRET}`;
-
   // Constant-time-ish comparison: avoid leaking secret length/prefix via timing.
-  if (!env.UPLOAD_SECRET || !timingSafeEqual(auth, expected)) {
+  return !!env.UPLOAD_SECRET && timingSafeEqual(auth, `Bearer ${env.UPLOAD_SECRET}`);
+}
+
+async function handleUpload(request, env) {
+  if (!authorized(request, env)) {
     return new Response('Unauthorized', { status: 401 });
   }
 
@@ -157,23 +184,155 @@ async function handleGet(request, env) {
   return new Response(object.body, { headers });
 }
 
-/** Small JSON endpoint so a dead camera is diagnosable without guesswork. */
+/**
+ * A Pi checking in. Body: {"pi": "main"|"standby", "state", "ring", "ringId",
+ * "instance"}; "probe": true asks without being recorded (the Pi's --status).
+ * The answer describes both Pis, including which Ring device each signs in
+ * as, so the standby can refuse to share the main Pi's Ring login - that is
+ * only ever told to a caller holding the secret.
+ */
+async function handleHeartbeat(request, env) {
+  if (!authorized(request, env)) {
+    return new Response('Unauthorized', { status: 401 });
+  }
+  let body;
+  try {
+    const text = await request.text();
+    if (text.length > 2048) return new Response('Too large', { status: 413 });
+    body = JSON.parse(text);
+  } catch (e) {
+    return new Response('Expected JSON', { status: 400 });
+  }
+  const pi = body && typeof body === 'object' ? String(body.pi || '').trim().toLowerCase() : '';
+  if (!PIS.includes(pi)) return new Response('"pi" must be "main" or "standby"', { status: 400 });
+
+  const now = Date.now();
+  try {
+    if (body.probe !== true) {
+      const prev = await readPi(env, pi);
+      const instance = hexId(body.instance);
+      let conflictAt = prev && Number.isFinite(prev.conflictAt) ? prev.conflictAt : null;
+      if (prev && prev.instance && instance && prev.instance !== instance && now - prev.at < CONFLICT_WINDOW_MS) {
+        conflictAt = now;
+      }
+      const record = {
+        at: now,
+        state: oneOf(body.state, PI_STATES),
+        ring: oneOf(body.ring, RING_STATES),
+        instance,
+        ringId: hexId(body.ringId),
+        conflictAt,
+      };
+      await env.BUCKET.put(piKey(pi), JSON.stringify(record), { httpMetadata: { contentType: 'application/json' } });
+    }
+
+    const [mainRec, standbyRec, photo] = await Promise.all([
+      readPi(env, 'main'), readPi(env, 'standby'), env.BUCKET.head(OBJECT_KEY),
+    ]);
+    return json({
+      ok: true,
+      conflict: conflictActive(pi === 'main' ? mainRec : standbyRec, now),
+      main: piSummary('main', mainRec, photo, now, true),
+      standby: piSummary('standby', standbyRec, photo, now, true),
+      photo: photoSummary(photo, now),
+    });
+  } catch (e) {
+    // Storage trouble. Never answer "the main Pi has not been heard from" when
+    // the truth is "could not look": the standby treats an error as no news
+    // and carries on doing what it was doing.
+    return new Response('Storage unavailable', { status: 503 });
+  }
+}
+
+/**
+ * A Pi's stored check-in, or null if there is none. A storage error is
+ * thrown, not turned into null - see handleHeartbeat. A damaged record (which
+ * the Pi's next check-in overwrites) reads as none.
+ */
+async function readPi(env, pi) {
+  const object = await env.BUCKET.get(piKey(pi));
+  if (!object) return null;
+  try {
+    const record = await object.json();
+    return record && typeof record === 'object' && Number.isFinite(record.at) ? record : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * What is known about one Pi, or null if it has never been heard from. A photo
+ * it uploaded counts as hearing from it. A photo that does not say which Pi
+ * sent it came from software older than the standby, when there was only the
+ * main Pi - so it counts for the main Pi.
+ */
+function piSummary(pi, record, photo, now, withIds) {
+  let last = record ? record.at : null;
+  if (photo) {
+    const meta = photo.customMetadata || {};
+    if ((meta.pi || 'main') === pi) {
+      const t = meta.capturedAt ? Date.parse(meta.capturedAt) : new Date(photo.uploaded).getTime();
+      if (Number.isFinite(t) && (last === null || t > last)) last = t;
+    }
+  }
+  if (last === null) return null;
+  const summary = {
+    lastSeenSecondsAgo: Math.max(0, Math.round((now - last) / 1000)),
+    state: record && record.state ? record.state : null,
+    ring: record && record.ring ? record.ring : null,
+    conflict: conflictActive(record, now),
+  };
+  if (withIds) summary.ringId = record && record.ringId ? record.ringId : null;
+  return summary;
+}
+
+function photoSummary(photo, now) {
+  if (!photo) return null;
+  const meta = photo.customMetadata || {};
+  const capturedAt = meta.capturedAt || photo.uploaded;
+  return {
+    ageSeconds: Math.round((now - new Date(capturedAt).getTime()) / 1000),
+    pi: meta.pi || null,
+    role: meta.role || null,
+    camera: meta.camera || null,
+  };
+}
+
+const conflictActive = (record, now) => !!(record && Number.isFinite(record.conflictAt)
+  && now - record.conflictAt < CONFLICT_SHOW_MS);
+const oneOf = (v, allowed) => (allowed.includes(v) ? v : 'unknown');
+const hexId = (v) => (typeof v === 'string' && /^[0-9a-f]{8,32}$/.test(v) ? v : '');
+
+/** Small JSON endpoint so a dead camera - or a dead Pi - is diagnosable without guesswork. */
 async function handleStatus(env) {
-  const object = await env.BUCKET.head(OBJECT_KEY);
+  const now = Date.now();
+  const failed = Symbol('failed');
+  const [object, mainRec, standbyRec] = await Promise.all([
+    env.BUCKET.head(OBJECT_KEY),
+    readPi(env, 'main').catch(() => failed), readPi(env, 'standby').catch(() => failed),
+  ]);
+  // Public, so without the Ring device ids: when each Pi last checked in, and
+  // what it was doing.
+  const pis = mainRec === failed || standbyRec === failed ? 'unavailable' : {
+    main: piSummary('main', mainRec, object, now, false),
+    standby: piSummary('standby', standbyRec, object, now, false),
+  };
   if (!object) {
-    return json({ ok: false, reason: 'no snapshot has ever been uploaded' }, 404);
+    return json({ ok: false, reason: 'no snapshot has ever been uploaded', pis }, 404);
   }
   const meta = object.customMetadata || {};
   const capturedAt = meta.capturedAt || object.uploaded;
-  const ageSeconds = Math.round((Date.now() - new Date(capturedAt).getTime()) / 1000);
+  const ageSeconds = Math.round((now - new Date(capturedAt).getTime()) / 1000);
   return json({
     ok: ageSeconds * 1000 <= maxAgeFor(meta.role),
     camera: meta.camera || null,
     role: meta.role || null,
+    pi: meta.pi || null,
     capturedAt: new Date(capturedAt).toISOString(),
     ageSeconds,
     staleAfterSeconds: maxAgeFor(meta.role) / 1000,
     sizeBytes: object.size,
+    pis,
   });
 }
 

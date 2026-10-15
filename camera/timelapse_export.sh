@@ -19,6 +19,8 @@ request="${SSH_ORIGINAL_COMMAND:-}"
 
 case "$request" in
   list)
+    # No folder yet - a standby Pi that has never filmed: no days.
+    [ -e "$DIR" ] || exit 0
     cd "$DIR" || exit 1
     for day in 2[0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]; do
       [ -d "$day" ] || continue

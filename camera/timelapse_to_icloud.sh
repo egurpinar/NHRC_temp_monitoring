@@ -1,23 +1,24 @@
 #!/bin/bash
-# NHRC timelapse - copies the finished days from the Pi into iCloud Drive.
+# NHRC timelapse - copies the finished days from the Pis into iCloud Drive.
 #
-# Runs on your Mac, every evening at 21:30: after sunset, when the Pi has
+# Runs on your Mac, every evening at 21:30: after sunset, when the Pis have
 # stopped filming (the latest sunset, in June, is 20:30). Each finished day the
 # Mac does not have yet is fetched once, whole, into
 #
 #   iCloud Drive / NHRC Timelapse / 2026-10-14 / 2026-10-14_0705.jpg ...
 #
-# and macOS uploads it. If the Mac is asleep at 21:30, it runs when it wakes,
-# and catches up on any days it missed. Nothing changes on the Pi, and no
-# Apple password goes anywhere.
+# and macOS uploads it. With a standby Pi, the frames it filmed while it had
+# taken over go into the same day's folder. If the Mac is asleep at 21:30, it
+# runs when it wakes, and catches up on any days it missed. Nothing changes on
+# the Pis, and no Apple password goes anywhere.
 #
-# It reaches the Pi with its own key, which can only list and fetch the
+# It reaches each Pi with its own key, which can only list and fetch the
 # frames (the Pi's nhrc-timelapse-export) - see camera/README.md,
 # "Copying the frames to iCloud".
 #
-#   bash timelapse_to_icloud.sh install emre@pihole2   set it up (once)
-#   bash timelapse_to_icloud.sh run emre@pihole2       copy now (what the schedule runs)
-#   bash timelapse_to_icloud.sh uninstall                   stop it (the frames stay)
+#   bash timelapse_to_icloud.sh install emre@pihole2 [emre@standby]   set it up (once): the main Pi first
+#   bash timelapse_to_icloud.sh run emre@pihole2 [emre@standby]       copy now (what the schedule runs)
+#   bash timelapse_to_icloud.sh uninstall                             stop it (the frames stay)
 #
 # What it did: ~/Library/Logs/nhrc-timelapse.log
 #
@@ -48,6 +49,14 @@ log() {
   printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"
 }
 
+# A Pi as user@address: letters, digits, dots, dashes and underscores (and the
+# colons of an IPv6 address) - nothing ssh could take for an option, nothing
+# the app's command line could break on.
+valid_pi() {
+  local re='^[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9_][A-Za-z0-9._:-]*$'
+  [[ $1 =~ $re ]]
+}
+
 # The Pi, through the read-only key. Never waits for a password, and never
 # reads this script's input (-n): in the loop over the days, ssh would
 # otherwise swallow the rest of the list after the first day.
@@ -59,8 +68,18 @@ pi() {
 # The last line of a file, on one line, for the log.
 last_line() { tail -n 1 "$1" 2>/dev/null | tr -d '\r'; }
 
+# A value as the log shows it: on one line, plain characters only.
+shown() { printf '%s' "$1" | tr -c 'A-Za-z0-9@._:-' '?'; }
+
+# Copied already from this Pi? The days an earlier version copied are listed
+# bare - from the one Pi there was then, given first.
+copied_before() {
+  grep -qxF "$PI $1" "$STATE" && return 0
+  [ "$FIRST" = yes ] && grep -qxF "$1" "$STATE"
+}
+
 run() {
-  PI="$1"
+  [ "$#" -ge 1 ] || return 0
   mkdir -p "$SUPPORT" || return 0
   touch "$STATE"
   local err="$SUPPORT/.last-error"
@@ -86,70 +105,97 @@ run() {
   hour="${NHRC_TIMELAPSE_HOUR:-$(TZ=America/New_York date +%H)}"
   hour=$((10#$hour))
 
-  local list
-  if ! list=$(pi list 2>"$err"); then
-    log "could not reach the Pi ($(last_line "$err")); trying again tomorrow at 21:30, or when this Mac wakes"
-    return 0
-  fi
-  if ! mkdir -p "$DEST" 2>"$err" || ! touch "$DEST/.nhrc-write-test" 2>"$err"; then
-    log "could not write to iCloud Drive ($(last_line "$err")) - allow \"$NAME\" in System Settings > Privacy & Security > Files & Folders"
-    return 0
-  fi
-  rm -f "$DEST/.nhrc-write-test"
-
-  local copied=0 frames=0 failed=0 day count got incoming f
-  while read -r day count; do
-    case "$day" in
-      2[0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]) ;;
-      *) continue ;;
-    esac
-    case "$count" in ''|*[!0-9]*) continue ;; esac
-    # Finished days only: before today - or today, once its last frame is in.
-    if [[ "$day" > "$today" ]]; then continue; fi
-    if [ "$day" = "$today" ] && [ "$hour" -lt "$DAY_DONE_HOUR" ]; then continue; fi
-    if grep -qx "$day" "$STATE"; then continue; fi
-    if [ "$count" -eq 0 ]; then
-      echo "$day" >> "$STATE"
+  local list n=0 reached=0 writable=no any=no failed=0
+  local copied frames day count got left incoming f
+  FIRST=yes
+  for PI in "$@"; do
+    n=$((n + 1))
+    [ "$n" -gt 1 ] && FIRST=no
+    if ! valid_pi "$PI"; then
+      log "not a Pi: \"$(shown "$PI")\" - give each as user@address"
       continue
     fi
-    # Fetched into a folder of this Mac's own first (not uploaded): a day
-    # arrives in iCloud Drive whole, or not at all.
-    incoming="$SUPPORT/incoming-$day"
-    rm -rf "$incoming"
-    mkdir -p "$incoming"
-    if pi "get $day" 2>"$err" | tar -xf - -C "$incoming" 2>>"$err"; then
-      got=$(find "$incoming/$day" -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l | tr -d ' ')
-    else
-      got=0
+    if ! list=$(pi list 2>"$err"); then
+      log "could not reach $PI ($(last_line "$err")); trying again tomorrow at 21:30, or when this Mac wakes"
+      continue
     fi
-    if [ "$got" -ge "$count" ]; then
-      mkdir -p "$DEST/$day"
-      for f in "$incoming/$day"/*.jpg; do mv -n "$f" "$DEST/$day/"; done
-      rm -rf "$incoming"
-      echo "$day" >> "$STATE"
-      copied=$((copied + 1))
-      frames=$((frames + got))
-    else
-      log "could not copy $day: $got of its $count frames arrived ($(last_line "$err")); trying again next time"
-      rm -rf "$incoming"
-      failed=$((failed + 1))
+    reached=$((reached + 1))
+    if [ "$writable" = no ]; then
+      if ! mkdir -p "$DEST" 2>"$err" || ! touch "$DEST/.nhrc-write-test" 2>"$err"; then
+        log "could not write to iCloud Drive ($(last_line "$err")) - allow \"$NAME\" in System Settings > Privacy & Security > Files & Folders"
+        return 0
+      fi
+      rm -f "$DEST/.nhrc-write-test"
+      writable=yes
     fi
-  done <<< "$list"
 
-  if [ "$copied" -gt 0 ]; then
-    log "copied $copied day$([ "$copied" -eq 1 ] || echo s), $frames frames, to iCloud Drive/$NAME"
-  elif [ "$failed" -eq 0 ]; then
+    copied=0
+    frames=0
+    while read -r day count; do
+      case "$day" in
+        2[0-9][0-9][0-9]-[01][0-9]-[0-3][0-9]) ;;
+        *) continue ;;
+      esac
+      case "$count" in ''|*[!0-9]*) continue ;; esac
+      # Finished days only: before today - or today, once its last frame is in.
+      if [[ "$day" > "$today" ]]; then continue; fi
+      if [ "$day" = "$today" ] && [ "$hour" -lt "$DAY_DONE_HOUR" ]; then continue; fi
+      if copied_before "$day"; then continue; fi
+      if [ "$count" -eq 0 ]; then
+        echo "$PI $day" >> "$STATE"
+        continue
+      fi
+      # Fetched into a folder of this Mac's own first (not uploaded): a day
+      # arrives in iCloud Drive whole, or not at all.
+      incoming="$SUPPORT/incoming-$n-$day"
+      rm -rf "$incoming"
+      mkdir -p "$incoming"
+      if pi "get $day" 2>"$err" | tar -xf - -C "$incoming" 2>>"$err"; then
+        got=$(find "$incoming/$day" -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l | tr -d ' ')
+      else
+        got=0
+      fi
+      if [ "$got" -ge "$count" ]; then
+        mkdir -p "$DEST/$day"
+        # Never over a frame already there: one the other Pi filmed in the same
+        # minute, say - the two would be the same view.
+        for f in "$incoming/$day"/*.jpg; do mv -n "$f" "$DEST/$day/"; done
+        left=$(find "$incoming/$day" -maxdepth 1 -name '*.jpg' 2>/dev/null | wc -l | tr -d ' ')
+        rm -rf "$incoming"
+        echo "$PI $day" >> "$STATE"
+        copied=$((copied + 1))
+        frames=$((frames + got - left))
+      else
+        log "could not copy $day from $PI: $got of its $count frames arrived ($(last_line "$err")); trying again next time"
+        rm -rf "$incoming"
+        failed=$((failed + 1))
+      fi
+    done <<< "$list"
+    if [ "$copied" -gt 0 ]; then
+      log "copied $copied day$([ "$copied" -eq 1 ] || echo s), $frames frame$([ "$frames" -eq 1 ] || echo s), from $PI to iCloud Drive/$NAME"
+      any=yes
+    fi
+  done
+
+  # Said only when every Pi answered: with one away, its line says enough.
+  if [ "$any" = no ] && [ "$failed" -eq 0 ] && [ "$reached" -eq "$n" ]; then
     log "nothing new to copy"
   fi
   return 0
 }
 
 install() {
-  PI="$1"
-  case "$PI" in
-    *@*) ;;
-    *) echo "Give the Pi as user@address, e.g.: bash $0 install emre@pihole2" >&2; return 1 ;;
-  esac
+  local pis='' days
+  if [ "$#" -lt 1 ]; then
+    echo "Give the Pi as user@address, e.g.: bash $0 install emre@pihole2 (and a standby Pi after it)" >&2
+    return 1
+  fi
+  for PI in "$@"; do
+    if ! valid_pi "$PI"; then
+      echo "Give the Pi as user@address, e.g.: bash $0 install emre@pihole2 (and a standby Pi after it) - not \"$PI\"" >&2
+      return 1
+    fi
+  done
   if [ "$(uname)" != Darwin ]; then
     echo "This part runs on your Mac." >&2
     return 1
@@ -157,31 +203,36 @@ install() {
   mkdir -p "$SUPPORT" "$HOME/.ssh" "$HOME/Library/LaunchAgents" "$(dirname "$LOG")"
   chmod 700 "$HOME/.ssh"
 
-  # 1. Its own key, which the Pi will let list and fetch frames, nothing else.
+  # 1. Its own key, which each Pi will let list and fetch frames, nothing else.
   if [ ! -f "$KEY" ]; then
     ssh-keygen -q -t ed25519 -N '' -C 'nhrc-timelapse (read-only frames)' -f "$KEY" || return 1
   fi
-  if ! pi list >/dev/null 2>&1; then
-    echo "Adding this Mac's key to the Pi, read-only (it may ask for your Pi password)..."
-    printf 'restrict,command="%s" %s\n' "$HELPER" "$(cat "$KEY.pub")" | "$SSH" "$PI" \
-      "test -x $HELPER || { echo 'First install $HELPER on the Pi - see camera/README.md' >&2; exit 3; }; umask 077; mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys" \
-      || return 1
-    if ! pi list >/dev/null 2>/tmp/nhrc-timelapse-key.err; then
-      echo "The key does not work yet: $(last_line /tmp/nhrc-timelapse-key.err)" >&2
-      return 1
+  for PI in "$@"; do
+    if ! pi list >/dev/null 2>&1; then
+      echo "Adding this Mac's key to $PI, read-only (it may ask for that Pi's password)..."
+      # Once: a line already there is not added again.
+      printf 'restrict,command="%s" %s\n' "$HELPER" "$(cat "$KEY.pub")" | "$SSH" "$PI" \
+        "test -x $HELPER || { echo 'First install $HELPER on the Pi - see camera/README.md' >&2; exit 3; }; umask 077; mkdir -p ~/.ssh && line=\$(cat) && { grep -qxF \"\$line\" ~/.ssh/authorized_keys 2>/dev/null || printf '%s\\n' \"\$line\" >> ~/.ssh/authorized_keys; }" \
+        || return 1
+      if ! pi list >/dev/null 2>/tmp/nhrc-timelapse-key.err; then
+        echo "The key does not work on $PI yet: $(last_line /tmp/nhrc-timelapse-key.err)" >&2
+        return 1
+      fi
     fi
-  fi
-  echo "The Pi answers: $(pi list | wc -l | tr -d ' ') days of frames there."
+    days=$(pi list | wc -l | tr -d ' ')
+    echo "$PI answers: $days day$([ "$days" = 1 ] || echo s) of frames there."
+  done
 
   # 2. This script, where the schedule can always read it.
   cp "$0" "$SCRIPT" && chmod 755 "$SCRIPT" || return 1
 
   # 3. A small app that runs it. macOS asks permission for iCloud Drive (and
   #    the local network) per app: this one is "NHRC Timelapse".
+  for PI in "$@"; do pis="$pis & \" \" & quoted form of \"$PI\""; done
   rm -rf "$APP"
   osacompile -o "$APP" \
     -e 'try' \
-    -e "do shell script \"/bin/bash \" & quoted form of \"$SCRIPT\" & \" run \" & quoted form of \"$PI\"" \
+    -e "do shell script \"/bin/bash \" & quoted form of \"$SCRIPT\" & \" run\"$pis" \
     -e 'end try' || return 1
 
   # 4. The schedule: every day at 21:30, or as soon as the Mac wakes after it.
@@ -232,15 +283,15 @@ uninstall() {
   rm -f "$PLIST"
   rm -rf "$SUPPORT"
   echo "Stopped. The frames in iCloud Drive stay; so does the key, ~/.ssh/nhrc_timelapse."
-  echo "To take the key off the Pi too, delete its line (ending 'nhrc-timelapse (read-only frames)') from ~/.ssh/authorized_keys there."
+  echo "To take the key off a Pi too, delete its line (ending 'nhrc-timelapse (read-only frames)') from ~/.ssh/authorized_keys there."
 }
 
 case "${1:-}" in
-  run) run "${2:?the Pi, as user@address}" ;;
-  install) install "${2:?the Pi, as user@address}" ;;
+  run) shift; [ "$#" -ge 1 ] || { echo "run needs the Pi, as user@address" >&2; exit 1; }; run "$@" ;;
+  install) shift; install "$@" ;;
   uninstall) uninstall ;;
   *)
-    echo "Usage: bash $0 install|run user@pi-address, or: bash $0 uninstall" >&2
+    echo "Usage: bash $0 install|run user@pi-address [user@standby-address], or: bash $0 uninstall" >&2
     exit 1
     ;;
 esac

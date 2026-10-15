@@ -18,6 +18,18 @@
  * which camera and role it came from, so the website can label a backup view
  * as one.
  *
+ * TWO PIS
+ * -------
+ * The same program runs on two Pis. The MAIN Pi (CAMERA_PI=main, the default)
+ * captures as above and checks in with the Worker every 5 minutes. A STANDBY
+ * Pi (CAMERA_PI=standby) checks in on the same 5 minutes, signed in to Ring
+ * with its own login, and touches the cameras only when the Worker has not
+ * heard from the main Pi for STANDBY_TAKEOVER_MINUTES (15). It then runs
+ * exactly the main Pi's timetable, and stops the moment the main Pi checks in
+ * again. When in doubt - the Worker cannot be reached, or answers in a way it
+ * does not understand - the standby keeps doing what it was doing, so the
+ * cameras are never woken by both Pis because of a hiccup.
+ *
  * WHY A LONG-RUNNING SERVICE AND NOT A CRON JOB
  * ---------------------------------------------
  * Ring refresh tokens rotate roughly hourly and expire shortly after use. The
@@ -44,6 +56,8 @@
  *   node camera/snapshot_service.js --once-backup  the same from the backup (it then shows on the
  *                                                  website until the next primary capture)
  *   node camera/snapshot_service.js --check        validate config, no Ring calls
+ *   node camera/snapshot_service.js --status       ask the Worker about both Pis (no Ring calls,
+ *                                                  nothing recorded)
  */
 
 'use strict';
@@ -111,6 +125,12 @@ const CONFIG = {
   },
 
   timeZone: process.env.CAMERA_TIMEZONE || 'America/New_York',
+
+  // Which Pi this is: 'main' (captures, the default) or 'standby' (takes over
+  // only when the main Pi has not checked in with the Worker for
+  // takeoverMinutes). Each Pi needs its own Ring login - see camera/README.md.
+  pi: String(process.env.CAMERA_PI || 'main').trim().toLowerCase(),
+  takeoverMinutes: Number(process.env.STANDBY_TAKEOVER_MINUTES || 15),
 
   // TIMELAPSE - off unless TIMELAPSE_EVERY_MINUTES or TIMELAPSE_TIMES is set.
   // Frames from the camera's live video - sharper than its 640x360 snapshots
@@ -251,6 +271,19 @@ function serviceProblems(cfg = CONFIG) {
     }
     if (cfg.cameraName && cfg.cameraName.trim().toLowerCase() === cfg.backupCameraName.trim().toLowerCase()) {
       problems.push('RING_CAMERA_NAME and RING_BACKUP_CAMERA_NAME name the same camera');
+    }
+  }
+  const pi = cfg.pi === undefined ? 'main' : cfg.pi;
+  if (pi !== 'main' && pi !== 'standby') {
+    problems.push(`CAMERA_PI must be "main" or "standby" (it is "${String(pi).slice(0, 20)}")`);
+  }
+  if (pi === 'standby') {
+    // The main Pi checks in every 5 minutes: under 10 a single late check-in
+    // could hand the cameras over, and over a day is no standby at all. (The
+    // main Pi has no use for it: a mistake there never stops its photos.)
+    const m = cfg.takeoverMinutes;
+    if (!(Number.isInteger(m) && m >= 10 && m <= 1440)) {
+      problems.push('STANDBY_TAKEOVER_MINUTES must be a whole number of minutes from 10 to 1440');
     }
   }
   return problems;
@@ -515,24 +548,61 @@ function secondsUntilNextSlot(now = new Date(), cfg = CONFIG) {
  * The capture loop: one capture per slot, then sleep until the next slot.
  * deps: now() -> Date, setTimer(fn, ms), cycle() -> Promise. Injected so the
  * tests can run whole days - and daylight-saving days - on a fake clock.
+ *
+ * For the two-Pi setup, optionally:
+ *   heartbeat()       the main Pi's check-in, started at every wake and never
+ *                     awaited: the cameras must not wait on it, or fail with it
+ *   gate() -> bool    the standby's question, awaited at every wake: capture
+ *                     this time? (false, or an error, means stand by). The
+ *                     slot is busy() meanwhile, as during its photos
+ *   wakeOffsetMs      how far past each slot boundary to wake (default 500 ms)
+ *   maxSleepSeconds   the longest sleep (default 30 minutes)
  */
 function createScheduler(cfg, deps) {
   // deps.cycle(role) captures and uploads from 'primary' or 'backup'.
-  // deps.hasPrimary / deps.hasBackup: whether each camera was found.
-  const hasPrimary = deps.hasPrimary !== false;
-  const hasBackup = !!deps.hasBackup;
+  // deps.hasPrimary / deps.hasBackup: whether each camera was found - a value,
+  // or a function for the standby, which signs in to Ring after it starts.
+  const hasPrimary = () => (typeof deps.hasPrimary === 'function' ? !!deps.hasPrimary() : deps.hasPrimary !== false);
+  const hasBackup = () => (typeof deps.hasBackup === 'function' ? !!deps.hasBackup() : !!deps.hasBackup);
   const backupCfg = backupConfig(cfg);
   const afterMisses = (cfg.backup && cfg.backup.afterMisses) || 2;
+  const wakeOffsetMs = Number.isFinite(deps.wakeOffsetMs) ? deps.wakeOffsetMs : 500;
+  const maxSleepSeconds = deps.maxSleepSeconds > 0 ? deps.maxSleepSeconds : MAX_SLEEP_SECONDS;
   let lastSlotKey = null, lastBackupSlotKey = null;
-  // Primary captures missed in a row. Without a primary camera at all, the
-  // backup runs on its timetable from the first slot.
-  let misses = hasPrimary ? 0 : afterMisses;
+  // Primary captures missed in a row; null until the first capturing wake.
+  // Without a primary camera at all, the backup runs on its timetable from
+  // the first slot.
+  let misses = null;
   let onBackup = false;
   // A slot's photos are being taken: the every-few-minutes timelapse waits.
   let busy = false;
 
   const tick = async () => {
-    const slot = captureSlot(deps.now(), cfg);
+    if (deps.heartbeat) {
+      try { Promise.resolve(deps.heartbeat()).catch(() => {}); } catch (e) { /* never stops a capture */ }
+    }
+    let capturing = true;
+    if (deps.gate) {
+      // The standby's question is part of the slot's work: a timelapse frame
+      // waits for it, as for the photos - it must know who is filming.
+      busy = true;
+      try {
+        capturing = (await deps.gate()) === true;
+      } catch (e) {
+        logError('standby check failed:', e.message);
+        capturing = false;
+      } finally {
+        busy = false;
+      }
+    }
+    if (!capturing) {
+      // Standing by. If this Pi takes over later it starts afresh, from the
+      // primary camera, exactly as the main Pi does after a restart.
+      misses = null;
+      onBackup = false;
+    }
+    const slot = capturing ? captureSlot(deps.now(), cfg) : null;
+    if (misses === null && capturing) misses = hasPrimary() ? 0 : afterMisses;
     if (slot && slot.key !== lastSlotKey) {
       // Before the capture: a failed cycle is not retried until the next
       // slot. captureWithRetry already retries within the cycle, and a slot
@@ -545,24 +615,34 @@ function createScheduler(cfg, deps) {
         busy = false;
       }
     }
-    // Anything that should follow the photos (the timelapse), after them so
-    // it can never delay one. Its failure is contained here: the timetable
-    // goes on regardless.
-    if (deps.afterSlot) {
+    // Anything that should follow the photos (the set-times timelapse), after
+    // them so it can never delay one. Its failure is contained here: the
+    // timetable goes on regardless.
+    if (capturing && deps.afterSlot) {
       try {
         await deps.afterSlot();
       } catch (e) {
         logError('after-slot task failed:', e.message);
       }
     }
-    // Half a second past the boundary, so the clock reads the new slot.
-    deps.setTimer(tick, secondsUntilNextSlot(deps.now(), cfg) * 1000 + 500);
+    // Half a second past the boundary, so the clock reads the new slot. (The
+    // standby wakes later in the slot, once the main Pi has checked in.) With
+    // check-ins (two Pis), it also wakes on every 5-minute mark of the clock in
+    // between: the main Pi checks in at :00, :05, :10 ... and the standby looks
+    // 30 s after each.
+    let sleepMs = secondsUntilNextSlot(deps.now(), cfg) * 1000;
+    if (deps.maxSleepSeconds > 0) {
+      const nowMs = deps.now().getTime(), markMs = maxSleepSeconds * 1000;
+      // To the boundary itself, to the millisecond: the offset never creeps.
+      sleepMs = Math.max(1000, Math.min(sleepMs - (nowMs % 1000), markMs - (nowMs % markMs)));
+    }
+    deps.setTimer(tick, sleepMs + wakeOffsetMs);
   };
 
   // One slot's photos: the primary, and the backup if the primary keeps missing.
   const photos = async () => {
     let answered = false;
-    if (hasPrimary) {
+    if (hasPrimary()) {
       try {
         await deps.cycle('primary');
         answered = true;
@@ -583,7 +663,7 @@ function createScheduler(cfg, deps) {
       misses += 1;
     }
 
-    if (!answered && hasBackup && misses >= afterMisses) {
+    if (!answered && hasBackup() && misses >= afterMisses) {
       if (!onBackup) {
         log(`Primary camera has missed ${misses} capture${misses === 1 ? '' : 's'} in a row; using the backup on its own timetable.`);
         onBackup = true;
@@ -694,6 +774,9 @@ async function uploadSnapshot(buffer, cfg = CONFIG, fetchImpl = globalThis.fetch
   if (meta.role === 'primary' || meta.role === 'backup') headers['X-Camera-Role'] = meta.role;
   const name = headerSafe(meta.name);
   if (name) headers['X-Camera-Name'] = name;
+  // And which Pi sent it: a photo from the standby must never count as a sign
+  // of life from the main Pi.
+  if (cfg.pi === 'main' || cfg.pi === 'standby') headers['X-Camera-Pi'] = cfg.pi;
   let res;
   try {
     res = await fetchImpl(cfg.uploadUrl, {
@@ -711,6 +794,386 @@ async function uploadSnapshot(buffer, cfg = CONFIG, fetchImpl = globalThis.fetch
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`upload failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+  }
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Two Pis: check-ins, and the standby
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// WHY THROUGH THE WORKER, NOT PI TO PI
+// What matters is whether photos reach the website, and the Worker is where
+// they arrive. A check-in there proves the main Pi's capture loop is running
+// AND that it can reach the Worker; a ping across the home network would prove
+// neither. It needs no open port on either Pi, and works wherever the standby
+// lives.
+//
+// WHY THE STANDBY MUST HAVE ITS OWN RING LOGIN
+// Ring rotates the refresh token every time it is used, so two Pis using one
+// login race each other and one of them is signed out (see "Why a service and
+// not a cron job" in README.md). ring-client-api keeps a device id inside the
+// token. Each Pi reports a one-way hash of its own, and the standby makes no
+// Ring call at all while its device id matches the main Pi's.
+
+const CHECK_IN_SECONDS = 5 * 60;           // both Pis check in this often
+const STANDBY_WAKE_OFFSET_MS = 30 * 1000;  // the standby looks 30 s into each slot, after the main Pi's check-in
+const RING_RETRY_MS = 60 * 60 * 1000;      // a standby that cannot sign in to Ring tries again hourly...
+const RING_CHECK_MS = 6 * 60 * 60 * 1000;  // ...and one that can proves it still can every 6 hours
+const RING_WAIT_MS = 60 * 1000;            // the longest the standby waits on a Ring sign-in or check
+const LOG_REPEAT_MS = 60 * 60 * 1000;      // an ongoing problem is logged hourly, not every 5 minutes
+
+const shortHash = (s) => require('crypto').createHash('sha256').update(String(s)).digest('hex').slice(0, 16);
+
+/**
+ * A one-way hash of the Ring device id kept inside a ring-client-api token,
+ * or '' when the token carries none. The token itself never leaves the Pi.
+ */
+function ringIdentity(token) {
+  if (!token) return '';
+  try {
+    const parsed = JSON.parse(Buffer.from(String(token), 'base64').toString('utf8'));
+    if (parsed && typeof parsed.hid === 'string' && parsed.hid) return shortHash('ring-device|' + parsed.hid);
+  } catch (e) { /* a raw token from an older ring-client-api: no device id */ }
+  return '';
+}
+
+/** A one-way hash naming this machine, so the Worker can tell two Pis apart. */
+function machineIdentity() {
+  let id = '';
+  for (const f of ['/etc/machine-id', '/var/lib/dbus/machine-id']) {
+    try { id = fs.readFileSync(f, 'utf8').trim(); } catch (e) { /* try the next */ }
+    if (id) break;
+  }
+  return shortHash('machine|' + os.hostname() + '|' + id);
+}
+
+/** "40 s", "12 min", "3 h 05 min", "2 days" - for log lines. */
+function fmtAgo(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  if (s < 90) return `${s} s`;
+  const min = Math.round(s / 60);
+  if (min < 90) return `${min} min`;
+  if (s < 48 * 3600) return `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, '0')} min`;
+  return `${Math.floor(s / 86400)} days`;
+}
+
+/**
+ * Checks in with the Worker and returns its answer, which describes both Pis.
+ * Bounded by a deadline: the standby waits for this before each slot.
+ */
+async function checkIn(body, cfg = CONFIG, fetchImpl = globalThis.fetch, timeoutMs = 20000) {
+  const url = new URL('/heartbeat', cfg.uploadUrl).href;
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
+  try {
+    let res;
+    try {
+      res = await fetchImpl(url, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${cfg.uploadSecret}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: ctrl ? ctrl.signal : undefined,
+      });
+    } catch (e) {
+      throw new Error(`check-in with ${hostOf(url)} failed: `
+        + (ctrl && ctrl.signal.aborted ? `no answer within ${Math.round(timeoutMs / 1000)} s` : describeCause(e)));
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      const hint = res.status === 404 || res.status === 405
+        ? ' - this Worker does not know check-ins yet: update it (camera/README.md)' : '';
+      throw new Error(`check-in failed: HTTP ${res.status} ${text.slice(0, 100)}${hint}`);
+    }
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* reported below */ }
+    if (!data || data.ok !== true) throw new Error('check-in failed: the Worker answered with something unexpected');
+    return data;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Should the standby capture? From the Worker's answer to its check-in: yes
+ * when the main Pi has been quiet for takeoverMinutes, or has never been
+ * heard from at all. An answer it cannot read is not a yes.
+ */
+function standbyDecision(reply, cfg = CONFIG) {
+  if (!reply || typeof reply !== 'object' || !('main' in reply)) {
+    return { capture: false, seen: undefined, reason: 'unreadable' };
+  }
+  const m = reply.main;
+  if (m === null || (m && typeof m === 'object' && m.lastSeenSecondsAgo === null)) {
+    return { capture: true, seen: null, reason: 'never' };
+  }
+  const seen = m && typeof m === 'object' && typeof m.lastSeenSecondsAgo === 'number' ? m.lastSeenSecondsAgo : NaN;
+  if (!Number.isFinite(seen) || seen < 0) return { capture: false, seen: undefined, reason: 'unreadable' };
+  // Known only by its photos - it has never checked in: older software, which
+  // uploads every 15 minutes and sometimes later. Its photos coming late is
+  // not the main Pi gone, so this standby never takes over from it.
+  if (m.state === null || m.state === undefined) return { capture: false, seen, reason: 'no-check-ins' };
+  return seen >= cfg.takeoverMinutes * 60
+    ? { capture: true, seen, reason: 'quiet' }
+    : { capture: false, seen, reason: 'alive' };
+}
+
+/** True when the other Pi signs in to Ring as this Pi's device. */
+function sameRingDevice(other, identity) {
+  return !!(other && identity && identity.ringId && other.ringId && other.ringId === identity.ringId);
+}
+
+const SAME_RING_MESSAGE = 'This Pi signs in to Ring as the same device as the main Pi: its token file was copied, '
+  + 'or the two SD cards are clones. A shared login signs one of the Pis out, so this Pi will make no Ring calls. '
+  + 'Sign in to Ring again on THIS Pi (camera/README.md, "Standby Pi"), then restart it.';
+
+/**
+ * The main Pi's check-in, at every wake of its capture loop - so a check-in
+ * also proves the loop is alive. The cameras never wait on it; problems are
+ * logged once an hour.
+ */
+function createMainCheckIn(cfg, deps) {
+  const identity = deps.identity || {};
+  let failing = false;
+  let lastFailLog = -Infinity, lastConflictLog = -Infinity, lastTwinLog = -Infinity;
+  return async function heartbeat() {
+    const t = deps.now().getTime();
+    let reply;
+    try {
+      reply = await deps.checkIn({ pi: 'main', state: 'capturing', ring: 'ok',
+        ringId: identity.ringId || '', instance: identity.instance || '' });
+    } catch (e) {
+      if (!failing || t - lastFailLog >= LOG_REPEAT_MS) {
+        lastFailLog = t;
+        // A Worker that predates check-ins refuses the standby's too, so
+        // nobody takes over then; otherwise a standby would, in 15 minutes.
+        logError(`${clause(e.message)}. The cameras carry on${/does not know check-ins/.test(e.message)
+          ? '' : '; if this goes on, a standby Pi will take over'}.`);
+      }
+      failing = true;
+      return;
+    }
+    if (failing) log('Check-ins with the Worker are working again.');
+    failing = false;
+    if (reply.conflict && t - lastConflictLog >= LOG_REPEAT_MS) {
+      lastConflictLog = t;
+      logError('Two different Pis have checked in as the MAIN Pi in the last 15 minutes. Unless this Pi was '
+        + 'just rebuilt or renamed, both are capturing: set CAMERA_PI=standby on the other one.');
+    }
+    if (sameRingDevice(reply.standby, identity) && t - lastTwinLog >= LOG_REPEAT_MS) {
+      lastTwinLog = t;
+      logError('The standby Pi signs in to Ring as the same device as this Pi, so it will not take over. '
+        + 'Sign in to Ring again on the standby Pi (camera/README.md, "Standby Pi").');
+    }
+  };
+}
+
+/**
+ * The standby's question at every wake: check in, and capture or not.
+ * deps: now(), checkIn(body) -> the Worker's answer, connect() (sign in to
+ * Ring and find the cameras), ringCheck() -> text (prove the sign-in still
+ * works, waking no camera), identity { ringId, instance }.
+ *
+ * The states it reports:
+ *   starting     not signed in to Ring yet - it signs in only once the Worker
+ *                has confirmed it does not share the main Pi's Ring device
+ *   standing-by  signed in and ready; the main Pi is checking in
+ *   capturing    the main Pi has gone quiet, so this Pi runs the cameras
+ *   blocked      same Ring device as the main Pi: no Ring calls at all
+ *   ring-failed  cannot sign in to Ring; trying again hourly
+ */
+function createStandby(cfg, deps) {
+  const identity = deps.identity || {};
+  let state = 'starting';
+  let ring = 'not-connected';
+  let connected = false;
+  let lastConnectAt = -Infinity, lastRingCheckAt = -Infinity;
+  let workerFailing = false, lastWorkerLog = -Infinity, lastConflictLog = -Infinity, lastOddLog = -Infinity;
+  // A Ring sign-in or check still in progress, and which sign-in is current:
+  // one that finishes after it has been superseded is let go, not adopted.
+  let connecting = null, checking = null, generation = 0;
+  const body = () => ({ pi: 'standby', state, ring, ringId: identity.ringId || '', instance: identity.instance || '' });
+  // Tell the Worker about a change straight away rather than at the next
+  // check-in, so /status is never a check behind.
+  const announce = () => { Promise.resolve().then(() => deps.checkIn(body())).catch(() => {}); };
+  const carryOn = () => (state === 'capturing' ? 'Still capturing' : 'Not capturing');
+  const signOut = () => { try { if (deps.disconnect) deps.disconnect(); } catch (e) { /* already gone */ } };
+  const ringWaitMs = deps.ringWaitMs > 0 ? deps.ringWaitMs : RING_WAIT_MS;
+
+  // Waits for a Ring call, but not for ever: ring-client-api retries a server
+  // it cannot reach indefinitely (a Pi-hole blocklist covering ring.com would
+  // do it), and a standby stuck waiting would stop checking in. A call that
+  // outlasts the wait carries on in the background.
+  async function within(promise, ms) {
+    let timer;
+    const late = new Promise(r => { timer = setTimeout(() => r(false), ms); });
+    try { return await Promise.race([promise.then(() => true), late]); } finally { clearTimeout(timer); }
+  }
+
+  async function gate() {
+    const t = deps.now().getTime();
+    let reply;
+    try {
+      reply = await deps.checkIn(body());
+    } catch (e) {
+      // No news is not news that the main Pi is down: carry on as before.
+      if (!workerFailing || t - lastWorkerLog >= LOG_REPEAT_MS) {
+        lastWorkerLog = t;
+        logError(`${clause(e.message)}. ${carryOn()} until the Worker answers.`);
+      }
+      workerFailing = true;
+      return state === 'capturing';
+    }
+    if (workerFailing) log('Check-ins with the Worker are working again.');
+    workerFailing = false;
+
+    // An answer it cannot read settles nothing - not even who the main Pi is,
+    // so no Ring call either.
+    const d = standbyDecision(reply, cfg);
+    if (d.reason === 'no-check-ins' && t - lastOddLog >= LOG_REPEAT_MS) {
+      lastOddLog = t;
+      logError('The main Pi sends photos but has never checked in with the Worker: it runs older software. '
+        + 'Update snapshot_service.js on the main Pi - until then this Pi will not take over.');
+    }
+    if (d.reason === 'unreadable') {
+      if (t - lastOddLog >= LOG_REPEAT_MS) {
+        lastOddLog = t;
+        logError(`The Worker's answer does not say when the main Pi last checked in. ${carryOn()} until it does.`);
+      }
+      return state === 'capturing';
+    }
+
+    if (sameRingDevice(reply.main, identity)) {
+      if (state !== 'blocked') {
+        logError(SAME_RING_MESSAGE);
+        state = 'blocked';
+        // Signed in already (the main Pi's id changed under it)? Sign out:
+        // even an idle session refreshes the shared login now and then.
+        generation++;
+        if (connected) signOut();
+        connected = false;
+        ring = 'not-connected';
+        lastConnectAt = -Infinity;
+        announce();
+      }
+      return false;
+    }
+    if (reply.conflict && t - lastConflictLog >= LOG_REPEAT_MS) {
+      lastConflictLog = t;
+      logError('Two different Pis have checked in as the STANDBY Pi in the last 15 minutes. Unless this Pi was '
+        + 'just rebuilt or renamed, check CAMERA_PI on both.');
+    }
+
+    // Signed in to Ring before it is needed - and still signed in. (Not
+    // re-proved when about to capture: the capture itself does that.)
+    const ringBefore = ring;
+    if (!connected && !connecting && t - lastConnectAt >= RING_RETRY_MS) {
+      lastConnectAt = t;
+      const mine = ++generation;
+      const attempt = Promise.resolve()
+        .then(() => deps.connect())
+        .then(() => {
+          if (mine !== generation) { signOut(); return; }      // superseded while it was signing in
+          connected = true;
+          ring = 'ok';
+          lastRingCheckAt = deps.now().getTime();
+        }, (e) => {
+          if (mine !== generation) return;
+          ring = 'failed';
+          logError(`Could not sign in to Ring: ${clause(describeCause(e))}. Trying again in an hour; until then this Pi cannot take over.`);
+        })
+        .finally(() => { if (connecting === attempt) connecting = null; });
+      connecting = attempt;
+      if (!(await within(attempt, ringWaitMs))) {
+        logError('Signing in to Ring is taking more than a minute - can this Pi reach api.ring.com and oauth.ring.com? '
+          + '(A Pi-hole blocklist can stop it.) Still trying in the background; until it succeeds this Pi cannot take over.');
+      }
+    }
+    if (connected && !checking && !d.capture && state !== 'capturing' && t - lastRingCheckAt >= RING_CHECK_MS) {
+      lastRingCheckAt = t;
+      const check = Promise.resolve()
+        .then(() => deps.ringCheck())
+        .then((cams) => {
+          ring = 'ok';
+          log(`Standing by; the Ring sign-in still works (${cams}).`);
+        }, (e) => {
+          ring = 'failed';
+          lastRingCheckAt = t - RING_CHECK_MS + RING_RETRY_MS;   // look again in an hour
+          logError(`Ring check failed: ${clause(describeCause(e))}. Checking again in an hour.`);
+        })
+        .finally(() => { if (checking === check) checking = null; });
+      checking = check;
+      if (!(await within(check, ringWaitMs))) logError('The Ring check is taking more than a minute; still waiting for it in the background.');
+    }
+
+    const before = state;
+    if (!connected) state = ring === 'failed' ? 'ring-failed' : 'starting';
+    else state = d.capture ? 'capturing' : 'standing-by';
+    if (state !== before) {
+      if (state === 'capturing') {
+        log(d.seen === null
+          ? 'The main Pi has never checked in with the Worker - this Pi is running the cameras.'
+          : `The main Pi has not checked in for ${fmtAgo(d.seen)} - this Pi is taking over the cameras.`);
+      } else if (state === 'standing-by') {
+        log(before === 'capturing'
+          ? `The main Pi is checking in again (${fmtAgo(d.seen)} ago) - this Pi is back to standing by.`
+          : d.reason === 'no-check-ins'
+            ? `Standing by: the main Pi's last photo came ${fmtAgo(d.seen)} ago, but it does not check in yet - this Pi will not take over until it does.`
+            : `Standing by: the main Pi checked in ${fmtAgo(d.seen)} ago. This Pi takes over if it is quiet for ${cfg.takeoverMinutes} min.`);
+      }
+    }
+    if (state !== before || ring !== ringBefore) announce();
+    return state === 'capturing';
+  }
+  return { gate, state: () => state, ring: () => ring };
+}
+
+/** A message without its closing full stop, to continue as a sentence. */
+function clause(s) {
+  return String(s == null ? '' : s).replace(/[.\s]+$/, '');
+}
+
+/** Proves the Ring sign-in works without waking a camera: the account's device list, and each camera's connection. */
+async function ringReadiness(api, cfg = CONFIG) {
+  const devices = await api.fetchRingDevices();
+  const cams = ((devices && devices.allCameras) || [])
+    .map(d => ({ name: d.description, connection: d.alerts && d.alerts.connection }));
+  const describe = (name) => {
+    if (!name) return null;
+    let c;
+    try { c = findCamera(cams, name); } catch (e) { return `"${name}" is ambiguous`; }
+    return c ? `"${c.name}" ${c.connection || 'status unknown'}` : `"${name}" is not on the account`;
+  };
+  const parts = [describe(cfg.cameraName), describe(cfg.backupCameraName)].filter(Boolean);
+  return parts.length ? parts.join(', ') : `${cams.length} camera${cams.length === 1 ? '' : 's'} on the account`;
+}
+
+/** --status: what the Worker knows about both Pis. Records nothing; makes no Ring call. */
+async function printStatus(cfg, identity, fetchImpl = globalThis.fetch) {
+  const reply = await checkIn({ pi: cfg.pi, probe: true, ringId: identity.ringId || '', instance: identity.instance || '' },
+    cfg, fetchImpl);
+  const about = (p) => (p
+    ? `checked in ${fmtAgo(p.lastSeenSecondsAgo)} ago`
+      + (p.state ? ` (${p.state}${p.ring && p.ring !== 'ok' ? `, Ring ${p.ring}` : ''})` : '')
+      + (p.conflict ? ' - TWO Pis have used this name in the last hour' : '')
+    : 'has never checked in');
+  log(`The Worker at ${hostOf(cfg.uploadUrl)} answered. This is the ${cfg.pi} Pi.`);
+  log(`  main Pi    : ${about(reply.main)}`);
+  log(`  standby Pi : ${about(reply.standby)}`);
+  log(`  photo      : ${reply.photo
+    ? `${fmtAgo(reply.photo.ageSeconds)} old, ${reply.photo.camera || 'unnamed camera'}, sent by the ${reply.photo.pi || 'main'} Pi`
+    : 'none yet'}`);
+  const other = cfg.pi === 'standby' ? reply.main : reply.standby;
+  if (sameRingDevice(other, identity)) {
+    logError(cfg.pi === 'standby' ? SAME_RING_MESSAGE
+      : 'This Pi and the standby Pi sign in to Ring as the same device: sign in to Ring again on the standby Pi.');
+    return false;
+  }
+  if (other && other.ringId && identity.ringId) log('  Ring login : separate from the other Pi\'s, as it must be.');
+  if (cfg.pi === 'standby') {
+    const d = standbyDecision(reply, cfg);
+    log(d.capture ? '  This standby would take over the cameras now.'
+      : `  This standby would stand by: it takes over after ${cfg.takeoverMinutes} min without a check-in from the main Pi.`);
   }
   return true;
 }
@@ -745,7 +1208,8 @@ async function connectRing(cfg = CONFIG) {
     // Likewise: no alarm/location mode polling. This account exists only to
     // pull frames from one shared camera.
     locationModePollingSeconds: 0,
-    controlCenterDisplayName: 'NHRC Boathouse Camera',
+    // How this Pi is listed in Ring Control Center > Authorized Client Devices.
+    controlCenterDisplayName: cfg.pi === 'standby' ? 'NHRC Boathouse Camera (standby)' : 'NHRC Boathouse Camera',
     // The timelapse's live video goes through ffmpeg; without a timelapse
     // the library never starts it.
     ...(timelapseOn(cfg) ? { ffmpegPath: cfg.timelapse.ffmpegPath } : {}),
@@ -1896,6 +2360,10 @@ async function readBattery(camera, timeoutMs = BATTERY_READ_TIMEOUT_MS, listDevi
  * timetable also setTimer(fn, ms), dockBusy(), backupInUse() and exit(code);
  * workRoot (resolveWorkRoot); for the tests exists(file), liveFrame(camera,
  * workDir), rssBytes(), openFiles(), strays() and shorter waits.
+ * On a standby Pi: standingBy() -> true while the main Pi films (no frame,
+ * no word); confirm() -> true only if the Worker still says the main Pi is
+ * away, asked just before each live view; quietSummary (no day summary for a
+ * day it never filmed); wakeDelayMs, how far into each slot it wakes.
  */
 function createTimelapse(cfg, deps) {
   const tl = cfg.timelapse;
@@ -2084,6 +2552,7 @@ function createTimelapse(cfg, deps) {
     failures: 0, restUntil: 0, counts: null, summarized: null, current: null, over: 0,
     battery: { level: null, signal: null, paused: false, unknownNoted: false },
     recordError: false, noMoreRestarts: false,
+    filmedOn: new Set(),   // the days this run tried to film (for a standby's summary)
   };
   const newCounts = () => ({ failed: 0, paused: 0, missed: 0 });
   const hhmmAt = (ms) => hhmm(localDateParts(new Date(ms), cfg).minutes);
@@ -2130,12 +2599,16 @@ function createTimelapse(cfg, deps) {
     }
   }
 
-  /** The day in one line: frames saved (from disk, by size), failed, paused, the battery, memory. */
+  /**
+   * The day in one line: frames saved (from disk, by size), failed, paused,
+   * the battery, memory. A standby that filmed nothing that day says nothing.
+   */
   function summarize(date) {
     iv.summarized = date;
     const dayDir = path.join(tl.dir, date);
     let files = [];
     try { files = fs.readdirSync(dayDir).filter((f) => /^\d{4}-\d\d-\d\d_\d{4}\.jpg$/.test(f)); } catch (e) { /* none */ }
+    if (deps.quietSummary && !files.length && !iv.filmedOn.has(date)) return;
     const bySize = new Map();
     for (const f of files) {
       let size = null;
@@ -2217,11 +2690,23 @@ function createTimelapse(cfg, deps) {
 
   async function intervalCapture(slot) {
     const label = `Timelapse ${slot.date} ${slot.label}`;
-    // A frame due with a dock photo waits for it: the website's photo first.
+    // A frame due with a dock photo waits for it: the website's photo first
+    // (and on a standby Pi, its check with the Worker).
     const waitUntil = Date.now() + (deps.dockWaitMs !== undefined ? deps.dockWaitMs : DOCK_WAIT_MS);
     while (deps.dockBusy && deps.dockBusy() && Date.now() < waitUntil) await pause(deps.dockPollMs || DOCK_POLL_MS);
+    // A standby Pi films only while it has taken over from the main Pi; while
+    // the main Pi films, there is nothing to do here - and nothing to say.
+    if (deps.standingBy && deps.standingBy()) return;
     if (busy) { log(`${label}: skipped - another capture is still running.`); iv.counts.missed++; return; }
-    const reason = await pauseReason();
+    let reason = await pauseReason();
+    // The standby asks the Worker once more just before waking the camera: a
+    // main Pi that has just come back must not be filmed over (two live views
+    // of one battery camera). No answer is not a yes.
+    if (!reason && deps.confirm) {
+      let go = false;
+      try { go = (await deps.confirm()) === true; } catch (e) { go = false; }
+      if (!go) reason = { key: 'unconfirmed', text: 'the Worker does not confirm that the main Pi is still away (it may be back)' };
+    }
     if ((reason && reason.key) !== (iv.pause && iv.pause.key)) {
       if (reason) (reason.problem ? logError : log)(`Timelapse paused: ${reason.text}.`);
       else log(`Timelapse resumed at ${slot.label}.`);
@@ -2229,6 +2714,7 @@ function createTimelapse(cfg, deps) {
     iv.pause = reason;
     if (reason) { iv.counts.paused++; return; }
     iv.started.add(slot.label);
+    iv.filmedOn.add(slot.date);
     note(`${slot.date} ${slot.label} start`);
     iv.current = slot;
     let r = null;
@@ -2344,6 +2830,60 @@ function sameCamera(a, b) {
   return !!a.name && a.name === b.name;
 }
 
+/**
+ * The timelapse, set up for this Pi once its cameras are known. hooks:
+ * camera() and backup() -> the camera objects (or null), api() -> the Ring
+ * session, scheduler() -> the dock photos' loop, and for the standby
+ * standingBy(), confirm() and wakeDelayMs, how far into each slot it films
+ * (see createTimelapse).
+ */
+function setUpTimelapse(hooks) {
+  if (!fs.existsSync(CONFIG.timelapse.ffmpegPath)) {
+    logError(`Timelapse: ffmpeg is not installed at ${CONFIG.timelapse.ffmpegPath} - `
+      + `${intervalOn(CONFIG) ? 'no frames' : 'frames will be 640x360 snapshots'} until it is `
+      + '(sudo apt install -y --no-install-recommends ffmpeg).');
+  }
+  const work = resolveWorkRoot(CONFIG.timelapse);
+  if (work.note) logError(`Timelapse: ${work.note}; recording in ${work.dir} instead.`);
+  const swept = sweepWorkRoot(work.dir);
+  if (swept) log(`Timelapse: removed ${swept} recording${swept === 1 ? '' : 's'} left behind by an earlier run.`);
+  const timelapse = createTimelapse(CONFIG, {
+    camera: hooks.camera,
+    now: () => new Date(),
+    workRoot: work,
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    // The every-few-minutes timetable waits for the dock photos, and pauses
+    // while the website needs this camera as its backup.
+    dockBusy: () => { const t = hooks.scheduler(); return !!(t && t.busy()); },
+    backupInUse: () => { const t = hooks.scheduler(); return !!(t && t.onBackup() && sameCamera(hooks.camera(), hooks.backup())); },
+    exit: (code) => process.exit(code),
+    // For the battery level, when the camera's health report has none.
+    listDevices: () => { const a = hooks.api(); return a ? a.fetchRingDevices() : null; },
+    standingBy: hooks.standingBy,
+    confirm: hooks.confirm,
+    quietSummary: !!hooks.standingBy,
+    wakeDelayMs: hooks.wakeDelayMs,
+  });
+  log(`Timelapse: ${describeTimelapse(CONFIG)}; recorded in ${work.dir}`
+    + `${work.inMemory === true ? ' (in memory)' : work.inMemory === false ? ' (on the SD card)' : ''}`
+    + `${hooks.standingBy ? '; on this standby Pi only while it has taken over' : ''}. `
+    + `Test it now with: sudo kill -USR2 ${process.pid}`);
+  if (intervalOn(CONFIG)) {
+    // Stopped (systemctl stop/restart) during a capture: noted, so the
+    // capture is not taken for one that brought the service down. Then the
+    // signal does what it always did.
+    for (const sig of ['SIGTERM', 'SIGINT']) {
+      const onStop = () => {
+        process.removeListener(sig, onStop);
+        try { timelapse.noteStopping(); } catch (e) { /* best effort */ }
+        process.kill(process.pid, sig);
+      };
+      process.on(sig, onStop);
+    }
+  }
+  return timelapse;
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -2383,9 +2923,13 @@ async function main() {
     tlProblems.forEach(p => console.error('  - ' + p));
   }
   const backupCfg = backupConfig(CONFIG);
+  const isStandby = CONFIG.pi === 'standby';
   if (args.includes('--check')) {
     log(tlProblems.length ? 'The dock photos\' configuration is valid; the timelapse\'s is not (see above).'
       : 'Configuration looks valid.');
+    log(`  this Pi      : ${isStandby
+      ? `the STANDBY - runs the cameras only when the main Pi has not checked in for ${CONFIG.takeoverMinutes} min`
+      : 'the MAIN Pi - runs the cameras, and checks in with the Worker every 5 min'}`);
     log(`  primary      : ${CONFIG.cameraName ? `"${CONFIG.cameraName}"` : '(the only camera on the account)'} — `
       + describeTimetable(CONFIG));
     log(`  backup       : ${CONFIG.backupCameraName
@@ -2395,7 +2939,8 @@ async function main() {
     log(`  token file   : ${CONFIG.tokenFile} (${readToken() ? 'present' : 'MISSING'})`);
     log(`  upload to    : ${CONFIG.uploadUrl}`);
     log(`  timelapse    : ${tlProblems.length ? 'OFF - its settings have problems (above)' : timelapseOn(CONFIG)
-      ? `${describeTimelapse(CONFIG)}; ffmpeg ${fs.existsSync(CONFIG.timelapse.ffmpegPath) ? 'found' : 'MISSING'}`
+      ? `${describeTimelapse(CONFIG)}${isStandby ? ', while this standby has taken over' : ''}; `
+        + `ffmpeg ${fs.existsSync(CONFIG.timelapse.ffmpegPath) ? 'found' : 'MISSING'}`
       : 'off'}`);
     if (!tlProblems.length && timelapseOn(CONFIG)) log(`  recordings   : ${describeWorkRoot(CONFIG.timelapse)}`);
     if (tlProblems.length) process.exitCode = 1;
@@ -2405,6 +2950,23 @@ async function main() {
     timelapseOff = 'its settings have problems: see the journal from the service\'s start';
     CONFIG.timelapse.times = [];
     CONFIG.timelapse.everyMinutes = 0;
+  }
+
+  const identity = { ringId: ringIdentity(readToken()), instance: machineIdentity() };
+  if (args.includes('--status')) {
+    process.exit((await printStatus(CONFIG, identity)) ? 0 : 1);
+  }
+  const once = args.includes('--once') || args.includes('--once-backup');
+  if (isStandby && once) {
+    // Before ANY Ring call: make sure this Pi is not signing in as the main
+    // Pi's Ring device, which would sign one of them out.
+    const reply = await checkIn({ pi: 'standby', probe: true, ringId: identity.ringId, instance: identity.instance })
+      .catch((e) => { throw new Error(`${e.message} - cannot confirm this Pi has its own Ring login, so not signing in to Ring.`); });
+    if (sameRingDevice(reply.main, identity)) throw new Error(SAME_RING_MESSAGE);
+  }
+  if (isStandby && !once) {
+    await runStandby(identity, backupCfg, (t) => { timelapse = t; });
+    return;
   }
 
   const api = await connectRing();
@@ -2430,6 +2992,7 @@ async function main() {
   }
 
   log('Starting. Captures on the slot boundaries, from the window start.');
+  log('This is the MAIN Pi. It checks in with the Worker every 5 min, so a standby Pi knows it is running.');
 
   // The timelapse, if configured. A problem with it is logged and never stops
   // the dock photos.
@@ -2444,45 +3007,7 @@ async function main() {
     if (!camera) {
       logError(`Timelapse: no camera matching "${CONFIG.timelapse.cameraName}" - no timelapse frames until this is fixed.`);
     }
-    if (!fs.existsSync(CONFIG.timelapse.ffmpegPath)) {
-      logError(`Timelapse: ffmpeg is not installed at ${CONFIG.timelapse.ffmpegPath} - `
-        + `${intervalOn(CONFIG) ? 'no frames' : 'frames will be 640x360 snapshots'} until it is `
-        + '(sudo apt install -y --no-install-recommends ffmpeg).');
-    }
-    const work = resolveWorkRoot(CONFIG.timelapse);
-    if (work.note) logError(`Timelapse: ${work.note}; recording in ${work.dir} instead.`);
-    const swept = sweepWorkRoot(work.dir);
-    if (swept) log(`Timelapse: removed ${swept} recording${swept === 1 ? '' : 's'} left behind by an earlier run.`);
-    const filmsBackup = sameCamera(camera, backup);
-    timelapse = createTimelapse(CONFIG, {
-      camera: () => camera,
-      now: () => new Date(),
-      workRoot: work,
-      setTimer: (fn, ms) => setTimeout(fn, ms),
-      // The every-few-minutes timetable waits for the dock photos, and pauses
-      // while the website needs this camera as its backup.
-      dockBusy: () => !!(tick && tick.busy()),
-      backupInUse: () => !!(filmsBackup && tick && tick.onBackup()),
-      exit: (code) => process.exit(code),
-      // For the battery level, when the camera's health report has none.
-      listDevices: () => api.fetchRingDevices(),
-    });
-    log(`Timelapse: ${describeTimelapse(CONFIG)}; recorded in ${work.dir}`
-      + `${work.inMemory === true ? ' (in memory)' : work.inMemory === false ? ' (on the SD card)' : ''}. `
-      + `Test it now with: sudo kill -USR2 ${process.pid}`);
-    if (intervalOn(CONFIG)) {
-      // Stopped (systemctl stop/restart) during a capture: noted, so the
-      // capture is not taken for one that brought the service down. Then the
-      // signal does what it always did.
-      for (const sig of ['SIGTERM', 'SIGINT']) {
-        const onStop = () => {
-          process.removeListener(sig, onStop);
-          try { timelapse.noteStopping(); } catch (e) { /* best effort */ }
-          process.kill(process.pid, sig);
-        };
-        process.on(sig, onStop);
-      }
-    }
+    timelapse = setUpTimelapse({ camera: () => camera, backup: () => backup, api: () => api, scheduler: () => tick });
   }
 
   // setTimeout that reschedules itself, not setInterval: the next wake-up is
@@ -2497,10 +3022,104 @@ async function main() {
       ? runCycle(backup, backupCfg, new Date(), globalThis.fetch, 'backup')
       : runCycle(primary, CONFIG, new Date(), globalThis.fetch, 'primary'),
     afterSlot: timelapse && !intervalOn(CONFIG) ? () => timelapse.maybeCapture() : undefined,
+    heartbeat: createMainCheckIn(CONFIG, {
+      now: () => new Date(), identity, checkIn: (body) => checkIn(body, CONFIG),
+    }),
+    maxSleepSeconds: CHECK_IN_SECONDS,
   });
   await tick();
   // The every-few-minutes timelapse runs on its own clock from here, after
   // the first dock photo.
+  if (timelapse && intervalOn(CONFIG)) {
+    timelapse.intervalTick().catch((e) => logError(`Timelapse: ${e.message}`));
+  }
+}
+
+/**
+ * The standby Pi: the main Pi's capture loop, behind the standby's question
+ * at every wake. It signs in to Ring only after the Worker has answered (so it
+ * can never share the main Pi's Ring device), keeps that sign-in warm, and
+ * runs the cameras - the timelapse included - only while the main Pi is quiet.
+ */
+async function runStandby(identity, backupCfg, onTimelapse = () => {}) {
+  log(`This is the STANDBY Pi. It checks in with the Worker every 5 min, and runs the cameras only `
+    + `if the main Pi has not checked in for ${CONFIG.takeoverMinutes} min.`);
+  let api = null;
+  let cams = { primary: null, backup: null, timelapse: null };
+  let tick = null;
+  const drop = (a) => { try { if (a && typeof a.disconnect === 'function') a.disconnect(); } catch (e) { /* gone */ } };
+  const standby = createStandby(CONFIG, {
+    now: () => new Date(),
+    identity,
+    checkIn: (body) => checkIn(body, CONFIG),
+    connect: async () => {
+      drop(api);
+      api = null;
+      const a = await connectRing();
+      let found;
+      try {
+        found = await pickCameras(a);
+      } catch (e) {
+        drop(a);          // a failed sign-in cannot be retried on the same instance
+        throw e;
+      }
+      // A problem with the timelapse's camera never keeps the dock photos from
+      // being taken over - as on the main Pi.
+      found.timelapse = null;
+      if (timelapseOn(CONFIG)) {
+        try {
+          found.timelapse = findCamera(await a.getCameras(), CONFIG.timelapse.cameraName);
+        } catch (e) {
+          logError(`Timelapse: ${e.message}`);
+        }
+      }
+      api = a;
+      cams = found;
+      if (cams.primary) log(`Primary camera: "${cams.primary.name}" — ${describeTimetable(CONFIG)}`);
+      if (cams.backup) {
+        log(`Backup camera: "${cams.backup.name}" — only after ${CONFIG.backup.afterMisses} missed primary captures `
+          + `in a row; then ${describeTimetable(backupCfg)}`);
+      }
+      if (timelapseOn(CONFIG) && !cams.timelapse) {
+        logError(`Timelapse: no camera matching "${CONFIG.timelapse.cameraName}" - no timelapse frames from this Pi until this is fixed.`);
+      }
+    },
+    ringCheck: () => ringReadiness(api, CONFIG),
+    disconnect: () => { drop(api); api = null; cams = { primary: null, backup: null, timelapse: null }; },
+  });
+
+  // The timelapse films here only while this Pi has taken over - and asks the
+  // Worker again just before each live view, so a main Pi that has just come
+  // back is not filmed over. Each frame comes after the slot's check and
+  // photos (30 s into the slot), as the main Pi's come after its photos.
+  let timelapse = null;
+  if (timelapseOn(CONFIG)) {
+    timelapse = setUpTimelapse({
+      camera: () => cams.timelapse, backup: () => cams.backup, api: () => api, scheduler: () => tick,
+      wakeDelayMs: STANDBY_WAKE_OFFSET_MS + INTERVAL_WAKE_MS,
+      standingBy: () => standby.state() !== 'capturing',
+      confirm: async () => {
+        const reply = await checkIn({ pi: 'standby', probe: true, ringId: identity.ringId, instance: identity.instance }, CONFIG);
+        return standbyDecision(reply, CONFIG).capture && !sameRingDevice(reply.main, identity);
+      },
+    });
+    onTimelapse(timelapse);
+  }
+
+  tick = createScheduler(CONFIG, {
+    now: () => new Date(),
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    hasPrimary: () => !!cams.primary,
+    hasBackup: () => !!cams.backup,
+    gate: standby.gate,
+    wakeOffsetMs: STANDBY_WAKE_OFFSET_MS,
+    maxSleepSeconds: CHECK_IN_SECONDS,
+    cycle: (role) => role === 'backup'
+      ? runCycle(cams.backup, backupCfg, new Date(), globalThis.fetch, 'backup')
+      : runCycle(cams.primary, CONFIG, new Date(), globalThis.fetch, 'primary'),
+    afterSlot: timelapse && !intervalOn(CONFIG) ? () => timelapse.maybeCapture() : undefined,
+  });
+  await tick();
   if (timelapse && intervalOn(CONFIG)) {
     timelapse.intervalTick().catch((e) => logError(`Timelapse: ${e.message}`));
   }
@@ -2525,6 +3144,10 @@ module.exports = {
   TIMELAPSE_WINDOW_MINUTES, CAPTURE_TIMEOUT_MS, MAX_KEYFRAMES_TRIED, LIVE_MEMORY_NEED_MB,
   TARGET_SETTLE_MS, CLIP_MAX_MB, CLIP_MIN_MB, WORK_KEEP_FREE_MB, FAILURES_BEFORE_REST, REST_MS, UNFINISHED_BEFORE_STOP,
   BATTERY_RESUME_POINTS, MAX_OPEN_FILES, INTERVAL_WAKE_MS, DOCK_WAIT_MS, FFMPEG_FINISH_MS, RECORDER_EXIT_MS,
+  // Two Pis
+  CHECK_IN_SECONDS, STANDBY_WAKE_OFFSET_MS, RING_RETRY_MS, RING_CHECK_MS, RING_WAIT_MS, LOG_REPEAT_MS,
+  ringIdentity, machineIdentity, fmtAgo, checkIn, standbyDecision, sameRingDevice,
+  createMainCheckIn, createStandby, ringReadiness, printStatus, runStandby, setUpTimelapse,
 };
 
 if (require.main === module) {

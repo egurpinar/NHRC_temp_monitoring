@@ -1,0 +1,69 @@
+# /etc/systemd/system/nhrc-camera.service
+#
+# The same file on the main Pi and on the standby Pi: /opt/nhrc-camera/env
+# says which one each is (CAMERA_PI). Install with
+#   sudo curl -fsSL -o /etc/systemd/system/nhrc-camera.service \
+#     https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/nhrc-camera.service
+# See camera/README.md.
+
+[Unit]
+Description=NHRC boathouse camera snapshots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nhrccam
+Group=nhrccam
+WorkingDirectory=/opt/nhrc-camera
+EnvironmentFile=/opt/nhrc-camera/env
+ExecStart=/usr/local/bin/node /opt/nhrc-camera/snapshot_service.js
+Restart=always
+RestartSec=60
+
+# IPv6 is disabled at the router (so all DNS goes through Pi-hole), but DNS
+# still returns AAAA records for Cloudflare. Without this, every upload first
+# attempts an unroutable IPv6 address and waits for it to fail before falling
+# back. Harmless once; wasteful on every upload for months.
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first
+
+# This box also serves DNS. Cap memory so a leak here can never take Pi-hole
+# down with it - systemd kills this service instead of the OOM killer choosing.
+# 200M sits comfortably above the ~80-120M the service actually uses (including
+# startup spikes) while leaving headroom on a 427M Pi Zero W. Set it too low and
+# systemd kills the service on every start, producing a restart loop.
+MemoryMax=200M
+
+# Pi-hole first: this service yields the processor to it, and if memory ever
+# ran out the kernel would stop this service, never Pi-hole.
+Nice=10
+CPUWeight=20
+OOMScoreAdjust=500
+
+# The timelapse records in memory (TIMELAPSE_WORK_DIR=/run/nhrc-camera), not
+# on the SD card; systemd makes the folder, only this service can read it, and
+# it is emptied whenever the service stops.
+RuntimeDirectory=nhrc-camera
+RuntimeDirectoryMode=0700
+
+# --- Containment -----------------------------------------------------------
+# This process runs a large third-party dependency tree on a machine that
+# serves DNS for the whole network. Limit what a compromise could reach.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+# Netlink: the timelapse's live video lists the Pi's network addresses with
+# it (without root it cannot change anything through it).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=true
+LockPersonality=true
+# The only writable path it needs is its own state directory.
+ReadWritePaths=/opt/nhrc-camera
+
+[Install]
+WantedBy=multi-user.target
