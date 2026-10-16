@@ -27,12 +27,19 @@ RestartSec=60
 # back. Harmless once; wasteful on every upload for months.
 Environment=NODE_OPTIONS=--dns-result-order=ipv4first
 
-# This box also serves DNS. Cap memory so a leak here can never take Pi-hole
-# down with it - systemd kills this service instead of the OOM killer choosing.
-# 200M sits comfortably above the ~80-120M the service actually uses (including
-# startup spikes) while leaving headroom on a 427M Pi Zero W. Set it too low and
-# systemd kills the service on every start, producing a restart loop.
-MemoryMax=200M
+# A hard cap on the service's memory - only where the kernel enforces one.
+# Raspberry Pi OS ships with the kernel's memory controller off (checked on
+# both Pis in October 2026: /sys/fs/cgroup/cgroup.controllers lists
+# "cpu io pids", no "memory"), and then systemd accepts this line but cannot
+# apply it. What keeps Pi-hole safe there is OOMScoreAdjust and Nice below,
+# and the service's own limits: it restarts itself above TIMELAPSE_MAX_RSS_MB
+# (160M; it uses 75-95M) and stops a live view when the Pi runs short.
+# Should the controller ever be on, the cap counts everything the service
+# runs: Node (up to 160M), ffmpeg during a live view (up to ~90M) and the
+# recording held in memory (up to 32M) - hence 300M, not the 200M from before
+# the timelapse, which a live view could exceed (the service would be killed
+# mid-capture). Set it too low and systemd kills the service on every start.
+MemoryMax=300M
 
 # Pi-hole first: this service yields the processor to it, and if memory ever
 # ran out the kernel would stop this service, never Pi-hole.

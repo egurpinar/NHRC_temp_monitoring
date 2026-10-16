@@ -245,9 +245,8 @@ Then open the same URL in a browser — you should see the river.
 
 The systemd unit is [`nhrc-camera.service`](nhrc-camera.service) in this
 folder - the same file on both Pis. Its comments explain each setting: the
-IPv4-first DNS order, the 200 MB memory cap that protects Pi-hole, and the
-containment that keeps a compromised dependency away from the rest of a
-machine serving DNS.
+IPv4-first DNS order, what keeps Pi-hole first, and the containment that keeps
+a compromised dependency away from the rest of a machine serving DNS.
 
 ```bash
 sudo curl -fsSL -o /etc/systemd/system/nhrc-camera.service https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/nhrc-camera.service
@@ -432,11 +431,14 @@ so after a minute, and the standby keeps checking in.
 ### Pi-hole first, on the standby too
 
 The standby serves the house's second DNS, and gets the main Pi's protections:
-the unit file (section 6) caps the service at 200 MB, gives Pi-hole the
-processor first, and has the kernel stop this service - never Pi-hole - if
-memory ever ran out; a live view starts only with 80 MB to spare and stops
-below 40 MB. Standing by, the service sleeps between check-ins: one small
-HTTPS request every 5 minutes, no camera, no video.
+if memory ever ran out the kernel would stop this service, never Pi-hole
+(`OOMScoreAdjust=500`); Pi-hole gets the processor first (`Nice=10`,
+`CPUWeight=20`); and the service keeps its own limits - it restarts itself if
+it grows past 160 MB (`TIMELAPSE_MAX_RSS_MB`; it uses 75-95 MB), and a live
+view starts only with 80 MB to spare and stops below 40 MB. (The unit's
+`MemoryMax` is not one of them on Raspberry Pi OS: see "Supply chain".)
+Standing by, the service sleeps between check-ins: one small HTTPS request
+every 5 minutes, no camera, no video.
 
 The heavy moment is the install (`npm install`, section 3): do it when nobody
 needs the internet much, and check `free -m` first. If the standby slows down
@@ -511,14 +513,16 @@ sudo -u nhrccam bash -c 'set -a; . /opt/nhrc-camera/env; /usr/local/bin/node /op
 
 - **Start it**, with the unit file (section 6), and see that it stands by and
   that the protections are in place (`Nice=10`, `CPUWeight=20`,
-  `OOMScoreAdjust=500`, `AF_NETLINK`, `nhrc-camera`, `MemoryMax=209715200`):
+  `OOMScoreAdjust=500`, `AF_NETLINK`, `nhrc-camera`, and `500` from the last
+  line):
 
 ```bash
 sudo curl -fsSL -o /etc/systemd/system/nhrc-camera.service https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/nhrc-camera.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now nhrc-camera
 journalctl -u nhrc-camera -n 20 --no-pager
-systemctl show nhrc-camera -p Nice -p CPUWeight -p OOMScoreAdjust -p RestrictAddressFamilies -p RuntimeDirectory -p MemoryMax
+systemctl show nhrc-camera -p Nice -p CPUWeight -p OOMScoreAdjust -p RestrictAddressFamilies -p RuntimeDirectory
+cat /proc/$(systemctl show -p MainPID --value nhrc-camera)/oom_score_adj
 ```
 
 The journal says `This is the STANDBY Pi` and `Standing by: the main Pi
@@ -713,7 +717,8 @@ as the live view lasted, and ffmpeg used up to 86 MB. So:
   deleted as soon as its frame is saved.
 - **Pi-hole gets the processor first** (`Nice=10`, `CPUWeight=20` below), and
   if memory ever ran out the kernel would stop this service, never Pi-hole
-  (`OOMScoreAdjust=500`). The service's `MemoryMax` stays as it was.
+  (`OOMScoreAdjust=500`). (The unit's `MemoryMax` is not enforced on
+  Raspberry Pi OS - see "Supply chain".)
 - **Light work while the video arrives.** The video is recorded as it comes,
   without decoding, then the sharpest keyframes are decoded one at a time,
   single-threaded. (In the first test, decoding as the video arrived, the
@@ -804,7 +809,7 @@ Check that the protections are in place - `Nice=10`, `CPUWeight=20`,
 directory, and `500` from the last line:
 
 ```bash
-systemctl show nhrc-camera -p Nice -p CPUWeight -p OOMScoreAdjust -p RestrictAddressFamilies -p RuntimeDirectory -p MemoryMax
+systemctl show nhrc-camera -p Nice -p CPUWeight -p OOMScoreAdjust -p RestrictAddressFamilies -p RuntimeDirectory
 cat /proc/$(systemctl show -p MainPID --value nhrc-camera)/oom_score_adj
 ```
 
@@ -1138,8 +1143,19 @@ DNS. Mitigations:
   read-only filesystem apart from one directory. The timelapse adds
   `AF_NETLINK`, which the live video uses to list the Pi's network addresses;
   without root privileges it cannot change the network through it.
-- **`MemoryMax=200M`** — a runaway process gets killed rather than triggering
-  the OOM killer, which might otherwise choose Pi-hole.
+- **Pi-hole first, whatever happens here.** If memory ever ran out, the
+  kernel would stop this service, never Pi-hole (`OOMScoreAdjust=500`); the
+  service restarts itself if it grows past `TIMELAPSE_MAX_RSS_MB` (160 MB),
+  and stops a live view when the Pi runs short of memory.
+- **`MemoryMax` is not enforced on Raspberry Pi OS.** The unit sets a hard cap,
+  but Raspberry Pi OS ships with the kernel's memory controller off, and then
+  systemd accepts the setting without applying it. Both Pis were checked in
+  October 2026: `cat /sys/fs/cgroup/cgroup.controllers` lists `cpu io pids`,
+  no `memory`, and `systemctl show nhrc-camera -p MemoryCurrent` says
+  `[not set]`. Turning the controller on means changing the Pi's boot settings,
+  and the protections above do not need it. If it is ever on, install the
+  current unit file first: its 300M allows for ffmpeg and the recording held in
+  memory during a live view, which the 200M of the first version did not.
 
 Pin versions and update deliberately rather than automatically.
 
@@ -1193,7 +1209,7 @@ TEST_SHARD=1/3 node camera/test_snapshot_service.js
 TEST_ONLY='battery' node camera/test_snapshot_service.js
 ```
 
-287 tests covering config validation, the timezone-aware windows, the capture
+288 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including
 both daylight-saving days and day-long outages), camera selection, atomic token
 persistence and file permissions, upload auth and retry behaviour, the Worker

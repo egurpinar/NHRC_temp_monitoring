@@ -5066,7 +5066,8 @@ test('the README\'s standby section matches the code: the timetable it runs, wha
   assert.ok(sec.includes('sudo curl -fsSL -o /etc/systemd/system/nhrc-camera.service https://raw.githubusercontent.com/egurpinar/NHRC_temp_monitoring/main/camera/nhrc-camera.service'));
   assert.ok(!/timelapse\.conf/.test(sec), 'no drop-in on the standby: the unit file has those settings');
   const unit = fs.readFileSync(path.join(__dirname, 'nhrc-camera.service'), 'utf8');
-  assert.ok(/\nMemoryMax=200M\n/.test(unit) && sec.includes(`MemoryMax=${200 * 1048576}`), 'what systemctl shows for the cap');
+  assert.ok(sec.includes('cat /proc/$(systemctl show -p MainPID --value nhrc-camera)/oom_score_adj'), 'the protection that does apply, checked');
+  assert.ok(!/MemoryMax=\d/.test(sec), 'no cap promised that Raspberry Pi OS does not enforce');
   // Every command block is paste-safe: top level, one command a line, no heredoc.
   for (const [, block] of sec.matchAll(/```bash\n([\s\S]*?)```/g)) {
     for (const line of block.split('\n').filter(Boolean)) {
@@ -5410,7 +5411,7 @@ test('the systemd unit in the repo keeps its protections, and is the one the REA
   const unit = fs.readFileSync(path.join(__dirname, 'nhrc-camera.service'), 'utf8');
   for (const line of ['User=nhrccam', 'EnvironmentFile=/opt/nhrc-camera/env',
                       'ExecStart=/usr/local/bin/node /opt/nhrc-camera/snapshot_service.js', 'Restart=always',
-                      'Environment=NODE_OPTIONS=--dns-result-order=ipv4first', 'MemoryMax=200M',
+                      'Environment=NODE_OPTIONS=--dns-result-order=ipv4first', 'MemoryMax=300M',
                       'NoNewPrivileges=true', 'PrivateTmp=true', 'PrivateDevices=true', 'ProtectSystem=strict', 'ProtectHome=true',
                       'ProtectKernelTunables=true', 'ProtectKernelModules=true', 'ProtectControlGroups=true',
                       'RestrictNamespaces=true', 'LockPersonality=true',
@@ -5427,6 +5428,20 @@ test('the systemd unit in the repo keeps its protections, and is the one the REA
   const readme = fs.readFileSync(path.join(__dirname, 'README.md'), 'utf8');
   assert.ok(readme.includes('main/camera/nhrc-camera.service'), 'the README installs the file from the repo');
   assert.ok(!/^\[Service\]$/m.test(readme), 'no second, drifting copy of the unit inside the README');
+});
+
+test('the memory cap, where a kernel enforces one, fits what a live view uses - and the README says Raspberry Pi OS does not enforce it', () => {
+  const unit = fs.readFileSync(path.join(__dirname, 'nhrc-camera.service'), 'utf8');
+  const cap = Number(/\nMemoryMax=(\d+)M\n/.exec(unit)[1]);
+  // Node up to the size at which it restarts itself, ffmpeg (86 MB at most in the October tests), the recording in memory.
+  const need = S.CONFIG.timelapse.maxRssMb + 90 + S.CLIP_MAX_MB;
+  assert.ok(cap >= need, `${cap}M must hold ${need}M, or a live view would get the service killed mid-capture`);
+  assert.ok(cap <= 320, 'and still leave a 427 MB Pi room for Pi-hole');
+  assert.ok(/cgroup\.controllers/.test(unit), 'the unit says how to tell whether it applies');
+  const md = fs.readFileSync(path.join(__dirname, 'README.md'), 'utf8');
+  const sec = md.slice(md.indexOf('### Supply chain'), md.indexOf('### What this does NOT protect against'));
+  assert.ok(/`MemoryMax` is not enforced on Raspberry Pi OS/.test(sec) && sec.includes('cat /sys/fs/cgroup/cgroup.controllers'), sec);
+  assert.ok(!/200 MB memory cap|caps the service at 200 MB/.test(md), 'no cap claimed that does not apply');
 });
 
 test('a check-in never carries the token or the secret in its body', async () => {
