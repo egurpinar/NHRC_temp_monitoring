@@ -66,9 +66,11 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid var(-
 .wind-badge .arrow-shaft{stroke:#0b3a4a;stroke-width:3;stroke-linecap:round;}
 .wind-badge b{display:block;font-size:.85rem;}
 .wind-badge span{color:#4a5d78;}
-.map-buttons{display:flex;gap:6px;}
-.map-btn{background:#fff;color:#0d1f3c;border:1px solid rgba(0,0,0,.25);border-radius:8px;padding:6px 10px;font:600 .75rem var(--fsans);cursor:pointer;}
-.map-btn:hover{background:#f0f3f7;}
+.map-tools{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;}
+.map-tools:empty{display:none;}
+/* The hazards' pictures: smaller with the whole lake in view, full size close in. Still centred on the spot. */
+.hz-mid .leaflet-marker-icon.hz-icon{width:24px!important;height:24px!important;margin-left:-12px!important;margin-top:-12px!important;}
+.hz-far .leaflet-marker-icon.hz-icon{width:20px!important;height:20px!important;margin-left:-10px!important;margin-top:-10px!important;}
 .map-popup strong{display:block;font-size:.9rem;margin-bottom:2px;}
 .map-popup p{margin:4px 0 0;font-size:.8rem;line-height:1.45;}
 .map-popup .popup-wind{color:#0b3a4a;font-weight:600;}
@@ -90,8 +92,12 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid var(-
 /* What the colours mean */
 .legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:14px;font-size:.75rem;color:var(--muted);}
 .legend span{display:inline-flex;align-items:center;gap:6px;}
+#hazard-key{display:contents;}
+.hz-key img{width:18px;height:18px;display:block;}
 .sw{width:14px;height:14px;border-radius:3px;display:inline-block;border:1px solid rgba(var(--ink),.25);}
 .dot{width:12px;height:12px;border-radius:50%;display:inline-block;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.35);}
+/* The hazards' pictures on the map: a keyboard can reach them too. */
+.leaflet-marker-icon.hz-icon:focus-visible{outline:3px solid var(--focus);outline-offset:1px;border-radius:50%;}
 </style>
 </head>
 <body>
@@ -106,6 +112,7 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid var(-
     <div class="map-wrap">
       <div id="hazard-map" role="region" aria-label="Map of Lake Housatonic with the lanes, hazards and the wind"></div>
     </div>
+    <div id="map-tools" class="map-tools"></div>
     <p id="map-status" class="status" role="status"></p>
 
     <div class="wind-panel">
@@ -127,15 +134,17 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid var(-
     <div class="legend" aria-label="What the colours mean">
       <span><i class="sw" style="background:rgba(15,157,88,.45);border-color:#0F9D58"></i>Upstream lane</span>
       <span><i class="sw" style="background:rgba(230,81,0,.45);border-color:#E65100"></i>Downstream lane</span>
-      <span><i class="dot" style="background:#E65100"></i>Do not row / danger</span>
-      <span><i class="dot" style="background:#FFD600"></i>Caution</span>
-      <span><i class="sw" style="background:rgba(255,214,0,.45);border-color:#FFD600"></i>Swim area, ski course</span>
+      <span><i class="dot" style="background:#E65100"></i>Orange: do not row / danger</span>
+      <span><i class="dot" style="background:#FFD600"></i>Yellow: caution</span>
+      <span id="hazard-key"></span>
       <span><i class="dot" style="background:#f0b429;border-color:#0d1f3c"></i>Boathouse dock</span>
     </div>
 
     <div class="note-text">
-      The lanes and hazards are the Safety Committee's Google map, copied <span id="map-copied">recently</span>;
-      tap any of them for its note. The wind is one forecast for the whole lake, at the boathouse dock, now and
+      The lanes and hazards are the Safety Committee's Google map, copied <span id="map-copied">recently</span>,
+      drawn exactly where the committee placed them; tap any of them for its note. The photos are the State of
+      Connecticut's, taken in spring 2023 before the leaves came out, so the banks show: 3-inch detail,
+      accurate to about 4 inches. The wind is one forecast for the whole lake, at the boathouse dock, now and
       for the next 48 hours: the banks shelter some stretches, and gusts vary. Headwind, crosswind and tailwind
       are worked out from the direction of each stretch of the lanes.
       <a href="https://open-meteo.com/">Weather data by Open-Meteo.com</a>.

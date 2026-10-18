@@ -28,12 +28,23 @@
     + '&current=temperature_2m,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m'
     + '&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m'
     + '&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=America%2FNew_York&timeformat=unixtime&forecast_days=3';
+  // The map opens on the State of Connecticut's aerial photos from spring 2023:
+  // 3-inch pixels, tested to about 4 inches against 179 surveyed points, and
+  // taken before the leaves came out, so the banks show. No key, no limits on
+  // use. If the state's server cannot be reached, the USGS photos (1 m pixels,
+  // summer, 2017-2021) stand in, under the same "Satellite" button.
   const TILES = {
+    aerial: { name: 'Satellite', url: 'https://cteco.uconn.edu/ctraster/rest/services/images/Ortho_2023_tiled/ImageServer/tile/{z}/{y}/{x}',
+      options: { maxZoom: 20, maxNativeZoom: 20, attribution: 'Photos: <a href="https://maps.cteco.uconn.edu/data/flight2023/">CT State GIS Office</a> 2023' } },
+    aerialBackup: { name: 'Satellite', url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}',
+      options: { maxZoom: 20, maxNativeZoom: 16, attribution: 'Photos: <a href="https://www.usgs.gov/programs/national-geospatial-program/national-map">USGS The National Map</a>' } },
     map: { name: 'Map', url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-      options: { maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' } },
-    aerial: { name: 'Aerial', url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}',
-      options: { maxZoom: 19, maxNativeZoom: 16, attribution: 'Imagery: <a href="https://www.usgs.gov/programs/national-geospatial-program/national-map">USGS The National Map</a>' } },
+      options: { maxZoom: 20, maxNativeZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' } },
   };
+  /** State photos that fail before any has loaded: the server is down, use the USGS photos. */
+  const PHOTO_FAILS = 3;
+  /** Popups narrow enough to fit a phone's map with room to spare. */
+  const POPUP = { maxWidth: 240, autoPanPadding: [12, 12] };
 
   // ── Numbers and words ──────────────────────────────────────────────────────
   const num = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -199,14 +210,101 @@
     return null;
   }
 
+  // ── Hazard pictures ────────────────────────────────────────────────────────
+  // What a hazard is comes from the committee's own name for it, so a hazard
+  // added on the Google map gets its picture without anyone doing anything.
+  // First match wins: "Sandbar and Exposed Pipe" is a pipe, "Tree in the
+  // Water and Potential Shallow Shoreline" a tree. Anything else gets "!".
+  const KINDS = [
+    ['stop', /\bdo not (row|pass|go)\b|\bno (rowing|entry)\b|\bstop\b|\bpower ?lines?\b|\bdam\b|\bkeep out\b/i],
+    ['pipe', /\bpipes?\b/i],
+    ['tree', /\btrees?\b|\blogs?\b|\bbranch(es)?\b|\bstumps?\b|\bsnags?\b|\bdebris\b/i],
+    ['boulder', /\bboulders?\b|\brocks?\b|\bstones?\b/i],
+    ['sandbar', /\bsand ?bars?\b/i],
+    ['shallow', /\bshallows?\b|\bshoals?\b|\blow water\b/i],
+    ['swim', /\bswim(ming)?\b|\bbeach\b/i],
+    ['ski', /\bski(ing)?\b/i],
+  ];
+  const KIND_WORDS = { stop: 'Do not row beyond', pipe: 'Pipe', shallow: 'Shallow water', sandbar: 'Sandbar', boulder: 'Boulder',
+    tree: 'Tree in the water', swim: 'Swim area', ski: 'Water ski course', other: 'Other hazard' };
+  const KIND_ORDER = ['stop', 'pipe', 'shallow', 'sandbar', 'boulder', 'tree', 'swim', 'ski', 'other'];
+  function hazardKind(name) {
+    const n = String(name || '');
+    for (const [kind, re] of KINDS) if (re.test(n)) return kind;
+    return 'other';
+  }
+
+  // The pictures: drawn for this map, 24 x 24, in the colour that reads best
+  // on the hazard's own colour (white on orange, dark on yellow).
+  const WAVE = (y) => `<path d="M3.5 ${y}c1.4-1.3 2.8-1.3 4.2 0s2.8 1.3 4.2 0 2.8-1.3 4.2 0 2.8 1.3 4.2 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>`;
+  const GLYPHS = {
+    tree: '<circle cx="12" cy="7.6" r="4.4"/><circle cx="8.2" cy="10.4" r="3.5"/><circle cx="15.8" cy="10.4" r="3.5"/><rect x="10.9" y="10.5" width="2.2" height="6.8" rx=".6"/>' + WAVE(20),
+    boulder: '<path d="M4.6 17.6l1.9-6.1 3.8-3.4 4.5.3 3.6 3.5 1.2 5.7z"/>' + WAVE(20.4),
+    sandbar: '<path d="M2.8 16.4c3-4.4 6.1-6.2 9.2-6.2s6.2 1.8 9.2 6.2z"/>' + WAVE(19.6),
+    shallow: WAVE(7.6) + WAVE(11.6) + '<path d="M3 21v-2.2c2.4-2.2 4.9-2.6 7.4-1.3s5 1.6 7.4.3c1.2-.6 2.2-.9 3.2-.9V21z"/>',
+    pipe: '<rect x="3" y="9.6" width="18" height="5" rx="1"/><rect x="6.6" y="7.9" width="2.4" height="8.4" rx=".6"/><rect x="15" y="7.9" width="2.4" height="8.4" rx=".6"/>' + WAVE(20.2),
+    stop: '<rect x="4.8" y="9.8" width="14.4" height="4.4" rx="1.2"/>',
+    swim: '<circle cx="16.8" cy="7.4" r="2.3"/><path d="M4.6 13.2l4.8-3.6 3.6 2.2 3.6-1.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' + WAVE(16.8) + WAVE(20.4),
+    ski: '<path d="M3 12.4h16.6l-2.7 4.5H6.3z"/><path d="M8.6 12.4l2.2-3.5h3.9l1.4 3.5z"/>' + WAVE(20.2),
+    other: '<rect x="10.75" y="4.6" width="2.5" height="9.8" rx="1.25"/><circle cx="12" cy="18.4" r="1.75"/>',
+  };
+  const SAFE_COLOR = /^#[0-9a-fA-F]{6}$/;
+  /** White on dark colours, dark on light ones. */
+  function glyphColor(hex) {
+    const v = parseInt(hex.slice(1), 16);
+    return 0.299 * ((v >> 16) & 255) + 0.587 * ((v >> 8) & 255) + 0.114 * (v & 255) > 150 ? '#3a2c00' : '#ffffff';
+  }
+  /**
+   * A hazard's picture as SVG text: its colour in a white ring, the picture
+   * inside. Only this file's own shapes and a checked "#RRGGBB" colour go in,
+   * never a name or a description; it is shown as an image, which cannot run
+   * anything.
+   */
+  function iconSvg(kind, color) {
+    const fill = SAFE_COLOR.test(String(color)) ? color : '#E65100';
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30" width="30" height="30">'
+      + '<circle cx="15" cy="15" r="14" fill="#000000" fill-opacity="0.4"/>'
+      + `<circle cx="15" cy="15" r="12.6" fill="${fill}" stroke="#ffffff" stroke-width="2"/>`
+      + `<g transform="translate(4.2 4.2) scale(.9)" color="${glyphColor(fill)}" fill="currentColor">${GLYPHS[kind] || GLYPHS.other}</g></svg>`;
+  }
+  const iconUrl = (kind, color) => 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(iconSvg(kind, color));
+
+  /** The middle of an area (its centroid), [lat, lon]: where its picture goes. */
+  function areaMiddle(ring) {
+    const p = (ring || []).slice();
+    if (p.length > 1 && p[0][0] === p[p.length - 1][0] && p[0][1] === p[p.length - 1][1]) p.pop();
+    if (!p.length) return null;
+    const [la0, lo0] = p[0];                      // relative to the first corner: no rounding loss
+    let a = 0, cx = 0, cy = 0;
+    for (let i = 0; i < p.length; i++) {
+      const y0 = p[i][0] - la0, x0 = p[i][1] - lo0, j = (i + 1) % p.length, y1 = p[j][0] - la0, x1 = p[j][1] - lo0;
+      const c = x0 * y1 - x1 * y0;
+      a += c; cx += (x0 + x1) * c; cy += (y0 + y1) * c;
+    }
+    if (Math.abs(a) < 1e-14) return [p.reduce((s, q) => s + q[0], 0) / p.length, p.reduce((s, q) => s + q[1], 0) / p.length];
+    return [la0 + cy / (3 * a), lo0 + cx / (3 * a)];
+  }
+
+  /** A hazard's marker: its picture, centred exactly on the spot, above the wind; a button for the keyboard. */
+  function hazardMarker(L, map, f, at) {
+    const kind = hazardKind(f.name);
+    const icon = L.icon({ iconUrl: iconUrl(kind, f.color), iconSize: [30, 30], iconAnchor: [15, 15], popupAnchor: [0, -13], className: 'hz-icon' });
+    return L.marker(at, { icon, title: String(f.name || KIND_WORDS[kind]), alt: String(f.name || KIND_WORDS[kind]), keyboard: true, riseOnHover: true,
+      pane: map.getPane && map.getPane('hazards') ? 'hazards' : undefined });
+  }
+
   /**
    * Draws the club's map with Leaflet `L` on `map`: lanes and areas, then
-   * hazards on top. Returns { lanes, bounds, count }. Names and descriptions
-   * are only ever set as text, never as markup.
+   * hazards on top, each with its picture. Returns { lanes, bounds, count,
+   * kinds }: `kinds` is one { kind, color } for each sort of hazard on the
+   * map, for the key. Names and descriptions are only ever set as text,
+   * never as markup. Every corner is drawn where the committee put it
+   * (no smoothing).
    */
   function drawHazards(L, map, data, popupFor) {
     const lanes = [];
     const pts = [];
+    const seenKinds = new Map();
     const group = L.layerGroup();
     const ordered = (data.folders || []).slice().sort((a, b) => {
       const pa = (a.features || []).some((f) => f.type === 'point') ? 1 : 0;
@@ -220,29 +318,38 @@
       const points = (folder.features || []).filter((f) => f.type === 'point');
       for (const f of polys.concat(points)) {
         let layer = null;
+        let picture = null;                             // where this hazard's picture goes, if it has one
         if (f.type === 'polygon' && Array.isArray(f.coords) && f.coords.length >= 4) {
           layer = L.polygon(f.coords, { color: f.color, weight: Math.max(1.5, f.weight || 1), fillColor: f.fillColor,
-            fillOpacity: num(f.fillOpacity) ? f.fillOpacity : 0.3, stroke: f.outline !== false });
+            fillOpacity: num(f.fillOpacity) ? f.fillOpacity : 0.3, stroke: f.outline !== false, smoothFactor: 0 });
           const lane = direction ? { name: f.name, direction, edge: laneEdge(f.coords) } : null;
           if (lane && lane.edge.length > 1) lanes.push(lane);
-          layer.bindPopup(() => popupFor(f, lane));
+          layer.bindPopup(() => popupFor(f, lane), POPUP);
           f.coords.forEach((c) => pts.push(c));
+          if (!direction) picture = areaMiddle(f.coords);   // a swim area, the ski course: its picture in the middle
         } else if (f.type === 'line' && Array.isArray(f.coords) && f.coords.length >= 2) {
-          layer = L.polyline(f.coords, { color: f.color, weight: Math.max(2, f.weight || 2) });
-          layer.bindPopup(() => popupFor(f, null));
+          layer = L.polyline(f.coords, { color: f.color, weight: Math.max(2, f.weight || 2), smoothFactor: 0 });
+          layer.bindPopup(() => popupFor(f, null), POPUP);
           f.coords.forEach((c) => pts.push(c));
-        } else if (f.type === 'point' && Array.isArray(f.coords)) {
-          // In their own pane, above the moving wind, so they stay clear to see and tap.
-          layer = L.circleMarker(f.coords, { radius: 8, color: '#ffffff', weight: 2, fillColor: f.color, fillOpacity: 1,
-            pane: map.getPane && map.getPane('hazards') ? 'hazards' : undefined });
-          layer.bindPopup(() => popupFor(f, null));
+        } else if (f.type === 'point' && Array.isArray(f.coords) && num(f.coords[0]) && num(f.coords[1])) {
+          picture = f.coords;
           pts.push(f.coords);
         }
         if (layer) { layer.addTo(group); count++; }
+        if (picture) {
+          // In their own pane, above the moving wind, so they stay clear to see and tap.
+          const marker = hazardMarker(L, map, f, picture);
+          marker.bindPopup(() => popupFor(f, null), POPUP);
+          marker.addTo(group);
+          if (!layer) count++;
+          const kind = hazardKind(f.name);
+          if (!seenKinds.has(kind)) seenKinds.set(kind, SAFE_COLOR.test(String(f.color)) ? f.color : '#E65100');
+        }
       }
     }
     group.addTo(map);
-    return { lanes, bounds: pts.length ? L.latLngBounds(pts) : null, count };
+    const kinds = KIND_ORDER.filter((k) => seenKinds.has(k)).map((k) => ({ kind: k, color: seenKinds.get(k) }));
+    return { lanes, bounds: pts.length ? L.latLngBounds(pts) : null, count, kinds };
   }
 
   // ── The moving wind ────────────────────────────────────────────────────────
@@ -382,8 +489,8 @@
   function init(env) {
     const doc = env.document, win = env.window, L = env.L;
     const $ = (id) => doc.getElementById(id);
-    const state = { slots: [], index: 0, lanes: [], fetchedAt: 0, tried: false, map: null, wind: null, badge: null, base: 'map',
-      tabVisible: doc.visibilityState !== 'hidden', onScreen: true };
+    const state = { slots: [], index: 0, lanes: [], fetchedAt: 0, tried: false, map: null, wind: null, badge: null, base: 'aerial',
+      photos: 'state', tabVisible: doc.visibilityState !== 'hidden', onScreen: true };
     // The streaks move only while someone can see them: the tab open and the map on screen.
     const seen = () => { if (state.wind) state.wind.setVisible(state.tabVisible && state.onScreen); };
 
@@ -490,14 +597,37 @@
       return { state, forecast, timer };
     }
     // The page scrolls past the map: the wheel does not zoom it (the buttons do).
-    const map = L.map(mapBox, { zoomSnap: 0.5, scrollWheelZoom: false });
+    // The lake runs from top left to bottom right, so the map's own controls
+    // sit top right, over land; the other buttons are below the map.
+    const map = L.map(mapBox, { zoomSnap: 0.5, scrollWheelZoom: false, zoomControl: false });
     state.map = map;
-    map.fitBounds(LAKE_BOUNDS);
+    const FIT = { paddingTopLeft: [20, 20], paddingBottomRight: [20, 34] };   // clear of the credits line
+    map.fitBounds(LAKE_BOUNDS, FIT);
     map.createPane('hazards');
     map.getPane('hazards').style.zIndex = '620';
-    const base = { map: L.tileLayer(TILES.map.url, TILES.map.options), aerial: L.tileLayer(TILES.aerial.url, TILES.aerial.options) };
-    base.map.addTo(map);
-    L.control.layers({ [TILES.map.name]: base.map, [TILES.aerial.name]: base.aerial }, null, { position: 'topleft', collapsed: false }).addTo(map);
+    // The photos first; the street map one tap away. The photos sit in a group,
+    // so the USGS ones can take their place if the state's server is down.
+    const photos = L.tileLayer(TILES.aerial.url, TILES.aerial.options);
+    const base = { aerial: L.layerGroup([photos]), map: L.tileLayer(TILES.map.url, TILES.map.options) };
+    let photosLoaded = 0, photosFailed = 0;
+    photos.on('tileload', () => { photosLoaded++; });
+    photos.on('tileerror', () => {
+      photosFailed++;
+      if (photosLoaded || photosFailed !== PHOTO_FAILS) return;
+      base.aerial.removeLayer(photos);
+      base.aerial.addLayer(L.tileLayer(TILES.aerialBackup.url, TILES.aerialBackup.options));
+      state.photos = 'usgs';
+    });
+    base.aerial.addTo(map);
+
+    // The pictures shrink when the whole lake is in view, so they do not pile up.
+    const iconScale = () => {
+      const z = map.getZoom(), cl = mapBox.classList;
+      if (!cl) return;
+      cl.toggle('hz-far', z < 14);
+      cl.toggle('hz-mid', z >= 14 && z < 15.5);
+    };
+    map.on('zoomend', iconScale);
 
     // The moving wind lives in its own map pane, above the lanes (400) and
     // below the hazards (620) and popups (700). The pane moves when the map
@@ -510,28 +640,31 @@
     map.on('move zoomend viewreset resize', place);
     const streakColor = () => (state.base === 'aerial' ? 'rgba(255,255,255,.85)' : 'rgba(11,58,74,.6)');
     state.wind.setColor(streakColor());
-    map.on('baselayerchange', (e) => { state.base = e.layer === base.aerial ? 'aerial' : 'map'; state.wind.setColor(streakColor()); });
 
     const badge = L.control({ position: 'topright' });
     badge.onAdd = () => { const d = L.DomUtil.create('div', 'wind-badge'); d.setAttribute('aria-hidden', 'true'); return d; };
     badge.addTo(map);
     state.badge = badge.getContainer ? badge.getContainer() : null;
+    L.control.zoom({ position: 'topright' }).addTo(map);
 
     const dock = L.circleMarker([DOCK.lat, DOCK.lon], { radius: 9, color: '#0d1f3c', weight: 3, fillColor: '#f0b429', fillOpacity: 1, pane: 'hazards' });
-    dock.bindPopup(() => el(doc, 'strong', '', 'NHRC boathouse dock')).addTo(map);
+    dock.bindPopup(() => el(doc, 'strong', '', 'NHRC boathouse dock'), POPUP).addTo(map);
 
-    const views = L.control({ position: 'bottomleft' });
-    views.onAdd = () => {
-      const d = L.DomUtil.create('div', 'map-buttons');
-      const b1 = el(doc, 'button', 'map-btn', 'Boathouse'); b1.type = 'button';
-      const b2 = el(doc, 'button', 'map-btn', 'Whole lake'); b2.type = 'button';
-      b1.addEventListener('click', () => map.setView([DOCK.lat, DOCK.lon], 16));
-      b2.addEventListener('click', () => map.fitBounds(state.bounds || LAKE_BOUNDS, { padding: [20, 20] }));
-      d.appendChild(b1); d.appendChild(b2);
-      if (L.DomEvent) { L.DomEvent.disableClickPropagation(d); L.DomEvent.disableScrollPropagation(d); }
-      return d;
-    };
-    views.addTo(map);
+    // Below the map: the two views, and photos or street map.
+    const tools = $('map-tools');
+    if (tools) {
+      const button = (text, onClick) => { const b = el(doc, 'button', 'rb', text); b.type = 'button'; b.addEventListener('click', onClick); tools.appendChild(b); return b; };
+      button('Boathouse', () => map.setView([DOCK.lat, DOCK.lon], 16));
+      button('Whole lake', () => map.fitBounds(state.bounds || LAKE_BOUNDS, FIT));
+      const swap = button('Street map', () => {
+        const toMap = state.base === 'aerial';
+        map.removeLayer(toMap ? base.aerial : base.map);
+        (toMap ? base.map : base.aerial).addTo(map);
+        state.base = toMap ? 'map' : 'aerial';
+        swap.textContent = toMap ? 'Satellite' : 'Street map';
+        state.wind.setColor(streakColor());
+      });
+    }
 
     const sized = () => { map.invalidateSize(); state.wind.resize(); place(); };
     if (win.ResizeObserver) new win.ResizeObserver(sized).observe(mapBox);
@@ -542,6 +675,7 @@
     state.wind.resize();
     place();
     seen();
+    iconScale();
     state.wind.start();
 
     const drawn = loadMapData().then((data) => {
@@ -549,16 +683,32 @@
       const out = drawHazards(L, map, data, popupFor);
       state.lanes = out.lanes;
       state.bounds = out.bounds;
-      if (out.bounds) map.fitBounds(out.bounds, { padding: [20, 20] });
+      if (out.bounds) map.fitBounds(out.bounds, FIT);
       const copied = $('map-copied');
       if (copied && data.copied) copied.textContent = data.copied;
+      // The key: one picture for each sort of hazard on the map, as it looks there.
+      const key = $('hazard-key');
+      if (key) {
+        key.textContent = '';
+        for (const k of out.kinds) {
+          const item = el(doc, 'span', 'hz-key');
+          const img = el(doc, 'img');
+          img.src = iconUrl(k.kind, k.color);
+          img.alt = '';
+          img.width = 18; img.height = 18;
+          item.appendChild(img);
+          item.appendChild(el(doc, 'span', '', KIND_WORDS[k.kind]));
+          key.appendChild(item);
+        }
+      }
       showSlot();
     });
     return { state, forecast, drawn, timer, map };
   }
 
   const api = {
-    DOCK, LAKE_BOUNDS, TZ, HOURS_AHEAD, FORECAST_URL, MAP_DATA_URL, TILES, REFRESH_MS,
+    DOCK, LAKE_BOUNDS, TZ, HOURS_AHEAD, FORECAST_URL, MAP_DATA_URL, TILES, PHOTO_FAILS, POPUP, REFRESH_MS,
+    hazardKind, KIND_WORDS, KIND_ORDER, GLYPHS, glyphColor, iconSvg, iconUrl, areaMiddle,
     compass, bearing, distance, angleBetween, windOnBoat, laneEdge, windShares, mostlyText, slotLabel,
     forecastSlots, windText, conditionsText, arrowRotation, isCalm, courseText, laneText, laneDirection,
     drawHazards, createWindLayer, arrowSvg, init,

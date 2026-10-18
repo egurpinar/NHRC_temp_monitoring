@@ -49,6 +49,11 @@ function fakeElement(tag, doc) {
     addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); },
     dispatch(t, ev = {}) { (this.listeners[t] || []).forEach((f) => f(ev)); },
     getBoundingClientRect: () => ({ width: 400, height: 300, left: 0, top: 0 }),
+    classes: new Set(),
+    get classList() {
+      const s = this.classes;
+      return { toggle: (c, on) => { if (on === undefined ? !s.has(c) : on) s.add(c); else s.delete(c); }, contains: (c) => s.has(c) };
+    },
     getContext() { return doc.ctx; },
     click() { this.dispatch('click'); },
   };
@@ -66,7 +71,7 @@ function fakeEnv(opts = {}) {
   };
   const calls = [];
   doc.ctx = new Proxy({}, { get: (o, k) => (k in o ? o[k] : (...a) => calls.push([k, ...a])), set: (o, k, v) => { o[k] = v; return true; } });
-  for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-course', 'wind-status', 'wind-now', 'map-copied']) {
+  for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-course', 'wind-status', 'wind-now', 'map-copied', 'hazard-key', 'map-tools']) {
     if (opts.withoutMapBox && id === 'hazard-map') continue;
     doc.byId[id] = fakeElement(id === 'wind-time' ? 'input' : 'div', doc);
   }
@@ -96,16 +101,19 @@ function fakeLeaflet(doc) {
   const made = { layers: [], controls: [], tiles: [], panes: {}, groups: [], maps: [] };
   const layer = (kind, coords, o) => ({
     kind, coords, o: o || {}, popup: null,
-    bindPopup(fn) { this.popup = fn; return this; },
+    bindPopup(fn, po) { this.popup = fn; this.popupOptions = po; return this; },
     addTo(t) { (t.items || (t.items = [])).push(this); made.layers.push(this); return this; },
   });
   const L = {
     made,
     map(el, o) {
       const m = {
-        el, o, views: [], handlers: {}, items: [],
-        fitBounds(b) { this.views.push(['fit', b]); return this; },
+        el, o, views: [], handlers: {}, items: [], zoom: 13, removed: [],
+        fitBounds(b, fo) { this.views.push(['fit', b]); this.fitOptions = fo; return this; },
         setView(c, z) { this.views.push(['view', c, z]); return this; },
+        getZoom() { return this.zoom; },
+        removeLayer(x) { this.removed.push(x); if (x) x.onMap = false; return this; },
+        fire(t) { (this.handlers[t] || []).forEach((f) => f({})); },
         createPane(n) { made.panes[n] = Object.assign(doc.createElement('div'), { style: {} }); return made.panes[n]; },
         containerPointToLayerPoint(p) { return { x: p[0] - 7, y: p[1] - 3 }; },
         getPane(n) { return made.panes[n]; },
@@ -115,18 +123,34 @@ function fakeLeaflet(doc) {
       made.maps.push(m);
       return m;
     },
-    tileLayer(url, o) { const t = { url, o, addTo(m) { made.tiles.push(this); return this; } }; return t; },
+    tileLayer(url, o) {
+      const t = { url, o, handlers: {}, addTo(m) { made.tiles.push(this); return this; },
+        on(type, f) { (this.handlers[type] = this.handlers[type] || []).push(f); return this; },
+        fire(type) { (this.handlers[type] || []).forEach((f) => f({})); } };
+      made.tileLayers = (made.tileLayers || []).concat(t);
+      return t;
+    },
     control: Object.assign((o) => {
       const c = { o, container: null, addTo(m) { this.container = this.onAdd(m); made.controls.push(this); return this; }, getContainer() { return this.container; } };
       return c;
-    }, { layers: (base, over, o) => ({ base, o, addTo() { made.controls.push(this); return this; } }) }),
+    }, { layers: (base, over, o) => ({ base, o, addTo() { made.controls.push(this); return this; } }),
+      zoom: (o) => ({ zoom: true, o, addTo() { made.controls.push(this); return this; } }) }),
     DomUtil: { create: (t, cls) => { const e = doc.createElement(t); e.className = cls; return e; },
       setPosition: (e, pt) => { e.position = pt; } },
     DomEvent: { disableClickPropagation() {}, disableScrollPropagation() {} },
-    layerGroup() { const g = { items: [], addTo(m) { made.groups.push(this); return this; } }; return g; },
+    layerGroup(list) {
+      const g = { items: (list || []).slice(), onMap: false,
+        addTo(m) { this.onMap = true; made.groups.push(this); return this; },
+        addLayer(x) { this.items.push(x); return this; },
+        removeLayer(x) { this.items = this.items.filter((y) => y !== x); return this; },
+        hasLayer(x) { return this.items.includes(x); } };
+      return g;
+    },
     polygon: (c, o) => layer('polygon', c, o),
     polyline: (c, o) => layer('polyline', c, o),
     circleMarker: (c, o) => layer('circle', c, o),
+    marker: (c, o) => layer('marker', c, o),
+    icon: (o) => ({ iconOptions: o }),
     latLngBounds: (pts) => ({ pts }),
   };
   return L;
@@ -309,19 +333,18 @@ test('the forecast is for the boathouse dock, in mph and °F, with times the pag
 // ═════════════════════════════════════════════════════════════════════════════
 section('4. The page, with stand-ins for the browser and Leaflet');
 
-test('the map: the lanes and areas, then the hazards on top, in the Google map\'s colours', async () => {
+test('the map: the lanes and areas, then the hazards on top with their pictures, in the Google map\'s colours', async () => {
   const p = await started();
   const L = p.leaflet.made;
-  const polys = L.layers.filter((x) => x.kind === 'polygon'), dots = L.layers.filter((x) => x.kind === 'circle');
+  const polys = L.layers.filter((x) => x.kind === 'polygon'), pics = L.layers.filter((x) => x.kind === 'marker');
   assert.strictEqual(polys.length, 9);
-  assert.strictEqual(dots.length, 10, 'nine hazards and the dock');
+  assert.strictEqual(pics.length, 12, 'nine hazards, and a picture in each swim area and on the ski course');
   assert.ok(polys.filter((x) => x.o.color === '#E65100').length === 3 && polys.filter((x) => x.o.color === '#0F9D58').length === 3);
-  const firstDot = L.layers.indexOf(dots[0]), lastPoly = L.layers.lastIndexOf(polys[polys.length - 1]);
-  assert.ok(firstDot > lastPoly || dots[0].o.pane === 'hazards', 'hazards are drawn above the lanes');
-  assert.ok(dots.every((d) => d.o.pane === 'hazards'), 'in their own pane, above the moving wind');
+  assert.ok(pics.every((d) => d.o.pane === 'hazards'), 'in their own pane, above the lanes and the moving wind');
   assert.strictEqual(L.panes.hazards.style.zIndex, '620');
-  const dock = dots.find((d) => d.coords[0] === W.DOCK.lat);
+  const dock = L.layers.find((d) => d.kind === 'circle' && d.coords[0] === W.DOCK.lat);
   assert.deepStrictEqual(dock.coords, [41.36854, -73.14781]);
+  assert.strictEqual(dock.o.pane, 'hazards');
   assert.deepStrictEqual(p.run.map.views.slice(-1)[0][0], 'fit', 'the whole lake, once its outline is in');
   assert.strictEqual(p.$('map-copied').textContent, MAP_DATA.copied);
 });
@@ -360,7 +383,7 @@ test('the slider moves through the hours; "Now" comes back; the moving wind foll
 test('popups say the committee\'s words as text - and a lane\'s says the wind it has at that hour', async () => {
   const p = await started();
   const L = p.leaflet.made;
-  const boulder = L.layers.find((x) => x.kind === 'circle' && x.coords[0] === 41.3687371);
+  const boulder = L.layers.find((x) => x.kind === 'marker' && x.coords[0] === 41.3687371);
   const box = boulder.popup();
   assert.strictEqual(box.children[0].textContent, 'Boulder');
   assert.strictEqual(box.children[1].textContent, 'There is a boulder in this area and it is shallow.');
@@ -375,10 +398,199 @@ test('markup in the map\'s text stays text', async () => {
   evil.folders[2].features[1].name = '<img src=x onerror=alert(1)>';
   evil.folders[2].features[1].description = '<script>alert(1)</script>';
   const p = await started({ answers: { map: { ok: true, body: evil } } });
-  const dot = p.leaflet.made.layers.find((x) => x.kind === 'circle' && x.coords[0] === 41.3687371);
+  const dot = p.leaflet.made.layers.find((x) => x.kind === 'marker' && x.coords[0] === 41.3687371);
   const box = dot.popup();
   assert.strictEqual(box.children[0].textContent, '<img src=x onerror=alert(1)>');
+  assert.strictEqual(dot.o.title, '<img src=x onerror=alert(1)>', 'the name as plain text for the tooltip');
+  const svg = decodeURIComponent(dot.o.icon.iconOptions.iconUrl.split(',')[1]);
+  assert.ok(!svg.includes('<img') && !svg.includes('onerror'), 'and never in the picture');
   assert.deepStrictEqual(p.document.innerHTMLWrites, []);
+});
+
+// ── The photos, and the hazards' pictures ────────────────────────────────────
+
+function insidePolygon([lat, lon], ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [yi, xi] = ring[i], [yj, xj] = ring[j];
+    if ((yi > lat) !== (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+const photoGroup = (made) => made.groups.find((g) => g.items.some((t) => t.url === W.TILES.aerial.url || t.url === W.TILES.aerialBackup.url));
+
+test('the map opens on the state\'s 2023 photos, the street map one tap away; the streaks are white on the photos', async () => {
+  const p = await started();
+  const L = p.leaflet.made;
+  const sat = photoGroup(L);
+  assert.ok(sat && sat.onMap, 'the photos are on the map from the start');
+  assert.strictEqual(sat.items[0].url, 'https://cteco.uconn.edu/ctraster/rest/services/images/Ortho_2023_tiled/ImageServer/tile/{z}/{y}/{x}');
+  const street = L.tileLayers.find((t) => t.url === W.TILES.map.url);
+  assert.ok(!L.tiles.includes(street), 'the street map waits until it is asked for');
+  assert.deepStrictEqual([W.TILES.aerial.options.maxNativeZoom, W.TILES.aerial.options.maxZoom], [20, 20], 'every bit of the 3-inch detail');
+  assert.strictEqual(W.TILES.map.options.maxNativeZoom, 19, 'the street map, enlarged past its last level, not blank');
+  assert.strictEqual(p.run.state.wind.state.color, 'rgba(255,255,255,.85)', 'white streaks on the photos');
+  const swap = p.$('map-tools').children[2];
+  swap.click();
+  assert.deepStrictEqual([p.run.state.base, swap.textContent, sat.onMap, L.tiles.includes(street)], ['map', 'Satellite', false, true], 'the street map');
+  assert.strictEqual(p.run.state.wind.state.color, 'rgba(11,58,74,.6)', 'dark streaks on the street map');
+  swap.click();
+  assert.deepStrictEqual([p.run.state.base, swap.textContent, sat.onMap], ['aerial', 'Street map', true], 'and back to the photos');
+  assert.ok(p.run.map.removed.includes(street));
+  assert.strictEqual(p.run.state.wind.state.color, 'rgba(255,255,255,.85)');
+});
+
+test('the map\'s own controls sit top right, over land: the lake runs from top left to bottom right', async () => {
+  const p = await started();
+  assert.strictEqual(p.run.map.o.zoomControl, false, 'not Leaflet\'s top-left default');
+  const zoom = p.leaflet.made.controls.find((c) => c.zoom);
+  assert.strictEqual(zoom.o.position, 'topright');
+  const badge = p.leaflet.made.controls.find((c) => c.container && c.container.className === 'wind-badge');
+  assert.strictEqual(badge.o.position, 'topright');
+  assert.ok(p.leaflet.made.controls.indexOf(badge) < p.leaflet.made.controls.indexOf(zoom), 'the wind first, the zoom under it');
+  assert.ok(!p.leaflet.made.controls.some((c) => c.base), 'no layer menu on the map: the switch is below it');
+});
+
+test('the pictures shrink with the whole lake in view, and are full size close in', async () => {
+  const p = await started();
+  const box = p.$('hazard-map'), m = p.run.map;
+  const at = (z) => { m.zoom = z; m.fire('zoomend'); return [box.classList.contains('hz-far'), box.classList.contains('hz-mid')]; };
+  assert.deepStrictEqual([box.classList.contains('hz-far'), box.classList.contains('hz-mid')], [true, false], 'the whole lake when it opens');
+  assert.deepStrictEqual(at(13.5), [true, false]);
+  assert.deepStrictEqual(at(14), [false, true]);
+  assert.deepStrictEqual(at(15), [false, true]);
+  assert.deepStrictEqual(at(15.5), [false, false], 'full size');
+  assert.deepStrictEqual(at(19), [false, false]);
+  assert.deepStrictEqual(at(12), [true, false]);
+  // Shrunk or not, each picture stays centred on its spot.
+  for (const [cls, px] of [['hz-mid', 24], ['hz-far', 20]]) {
+    const rule = HTML.match(new RegExp(`\\.${cls} \\.leaflet-marker-icon\\.hz-icon\\{([^}]*)\\}`))[1];
+    assert.ok(rule.includes(`width:${px}px!important`) && rule.includes(`height:${px}px!important`), cls);
+    assert.ok(rule.includes(`margin-left:-${px / 2}px!important`) && rule.includes(`margin-top:-${px / 2}px!important`), `${cls}: centred`);
+  }
+});
+
+test('if the state\'s photos cannot be reached, the USGS photos take their place under the same button', async () => {
+  const p = await started();
+  const sat = photoGroup(p.leaflet.made);
+  const photos = sat.items[0];
+  photos.fire('tileerror'); photos.fire('tileerror');
+  assert.strictEqual(sat.items[0], photos, 'two failures: still the state\'s');
+  photos.fire('tileerror');
+  assert.deepStrictEqual(sat.items.map((t) => t.url), [W.TILES.aerialBackup.url], 'three, and none loaded: the USGS photos');
+  assert.strictEqual(p.run.state.photos, 'usgs');
+  photos.fire('tileerror');
+  assert.strictEqual(sat.items.length, 1, 'swapped once, not again and again');
+  // Photos that have loaded: a few failed tiles later are not a server that is down.
+  const q = await started();
+  const sat2 = photoGroup(q.leaflet.made);
+  const ph2 = sat2.items[0];
+  ph2.fire('tileload');
+  for (let i = 0; i < 10; i++) ph2.fire('tileerror');
+  assert.deepStrictEqual([sat2.items[0], q.run.state.photos], [ph2, 'state']);
+});
+
+test('each hazard\'s picture comes from the committee\'s own name for it', () => {
+  const cases = {
+    'Tree in the Water': 'tree', Boulder: 'boulder', Sandbar: 'sandbar', 'Shallow Area': 'shallow',
+    'Sandbar and Exposed Pipe': 'pipe', 'Do not Row Beyond This Point!': 'stop',
+    'Tree in the Water and Potential Shallow Shoreline': 'tree', 'State Park Swim Area': 'swim', 'Swim Area': 'swim',
+    'Water Ski Course': 'ski',
+    // what a new hazard might be called
+    'Fallen log': 'tree', 'Rocks below the surface': 'boulder', 'Power lines': 'stop', 'Stay clear of the dam': 'stop',
+    Shoal: 'shallow', 'Old pipes': 'pipe', Beach: 'swim', 'No swimming': 'swim', Skiing: 'ski', 'Sand bar': 'sandbar',
+    // and what must not fool it
+    "Skipper's mooring": 'other', 'Damaged dock': 'other', Treeline: 'other', 'Bar and grill': 'other', '': 'other',
+  };
+  for (const [name, kind] of Object.entries(cases)) assert.strictEqual(W.hazardKind(name), kind, name);
+  assert.strictEqual(W.hazardKind(null), 'other');
+  for (const k of W.KIND_ORDER) assert.ok(W.GLYPHS[k] && W.KIND_WORDS[k], k);
+});
+
+test('the pictures: the hazard\'s own colour, white on orange and dark on yellow, centred exactly on the spot', async () => {
+  const p = await started();
+  const pics = p.leaflet.made.layers.filter((x) => x.kind === 'marker');
+  const points = MAP_DATA.folders.flatMap((f) => f.features).filter((f) => f.type === 'point');
+  assert.strictEqual(points.length, 9);
+  for (const f of points) {
+    const m = pics.find((x) => x.coords[0] === f.coords[0] && x.coords[1] === f.coords[1]);
+    assert.ok(m, f.name);
+    const io = m.o.icon.iconOptions;
+    assert.deepStrictEqual([io.iconSize, io.iconAnchor], [[30, 30], [15, 15]], `${f.name}: the middle of the picture is the spot`);
+    const svg = decodeURIComponent(io.iconUrl.split(',')[1]);
+    assert.ok(io.iconUrl.startsWith('data:image/svg+xml;charset=utf-8,'), 'an image: nothing in it can run');
+    assert.ok(svg.includes(`fill="${f.color}"`), f.name);
+    assert.ok(svg.includes(W.GLYPHS[W.hazardKind(f.name)]), `${f.name}: its picture`);
+    assert.ok(svg.includes(`color="${f.color === '#FFD600' ? '#3a2c00' : '#ffffff'}"`), `${f.name}: readable on its colour`);
+    assert.deepStrictEqual([m.o.title, m.o.alt, m.o.keyboard], [f.name, f.name, true], `${f.name}: named, and reachable by keyboard`);
+  }
+  assert.strictEqual(W.glyphColor('#0F9D58'), '#ffffff');
+  assert.strictEqual(W.glyphColor('#FFFFFF'), '#3a2c00');
+});
+
+test('the swim areas and the ski course have their picture in the middle; the lanes have none', async () => {
+  const p = await started();
+  const pics = p.leaflet.made.layers.filter((x) => x.kind === 'marker');
+  const areas = MAP_DATA.folders.flatMap((f) => f.features).filter((f) => f.type === 'polygon' && /Swim|Ski/.test(f.name));
+  assert.strictEqual(areas.length, 3);
+  for (const a of areas) {
+    const mid = W.areaMiddle(a.coords);
+    assert.ok(insidePolygon(mid, a.coords), `${a.name}: its middle is inside it`);
+    const m = pics.find((x) => x.coords[0] === mid[0] && x.coords[1] === mid[1]);
+    assert.ok(m, a.name);
+    assert.strictEqual(m.popup().children[0].textContent, a.name, 'its picture opens the area\'s note');
+  }
+  assert.strictEqual(pics.length, 9 + areas.length, 'the nine hazards and the three areas: none for the lanes');
+  // The middle, worked out: a square, a triangle, a line, nothing.
+  assert.deepStrictEqual(W.areaMiddle([[0, 0], [0, 2], [2, 2], [2, 0], [0, 0]]), [1, 1]);
+  const t = W.areaMiddle([[41.3, -73.1], [41.3, -73.0], [41.4, -73.1]]);
+  assert.ok(Math.abs(t[0] - (41.3 + 41.3 + 41.4) / 3) < 1e-12 && Math.abs(t[1] - (-73.1 - 73.0 - 73.1) / 3) < 1e-12, String(t));
+  assert.deepStrictEqual(W.areaMiddle([[1, 1], [2, 2], [3, 3], [1, 1]]), [2, 2]);
+  assert.strictEqual(W.areaMiddle([]), null);
+});
+
+test('the key: one picture for each sort of hazard on the map, as it looks there, in a steady order', async () => {
+  const p = await started();
+  const key = p.$('hazard-key');
+  assert.deepStrictEqual(key.children.map((c) => c.children[1].textContent),
+    ['Do not row beyond', 'Pipe', 'Shallow water', 'Sandbar', 'Boulder', 'Tree in the water', 'Swim area', 'Water ski course']);
+  const img = key.children[0].children[0];
+  assert.deepStrictEqual([img.tagName, img.alt, img.width, img.height], ['IMG', '', 18, 18], 'the words beside it say what it is');
+  assert.ok(decodeURIComponent(img.src).includes('fill="#E65100"') && decodeURIComponent(img.src).includes(W.GLYPHS.stop));
+  assert.ok(decodeURIComponent(key.children[5].children[0].src).includes('fill="#FFD600"'), 'the trees are yellow, as on the map');
+  assert.deepStrictEqual(p.document.innerHTMLWrites, []);
+  // A sort of hazard in two colours is in the key once, as it first appears on the map.
+  const two = JSON.parse(JSON.stringify(MAP_DATA));
+  two.folders[2].features.unshift({ name: 'Fallen tree', description: '', type: 'point', coords: [41.36, -73.14], color: '#E65100' });
+  const q = await started({ answers: { map: { ok: true, body: two } } });
+  const trees = q.$('hazard-key').children.filter((c) => c.children[1].textContent === 'Tree in the water');
+  assert.strictEqual(trees.length, 1);
+  assert.ok(decodeURIComponent(trees[0].children[0].src).includes('fill="#E65100"'));
+});
+
+test('a name or colour can never get into a picture as markup', () => {
+  const svg = W.iconSvg('tree', '#FFD600"/><script>alert(1)</script>');
+  assert.ok(!/script/i.test(svg), 'a colour that is not plain #RRGGBB is not used');
+  assert.ok(svg.includes('fill="#E65100"'));
+  assert.ok(W.iconSvg('no such kind', '#123456').includes(W.GLYPHS.other));
+  assert.ok(W.iconSvg('tree', 'red').includes('fill="#E65100"') && W.iconSvg('tree', null).includes('fill="#E65100"'));
+});
+
+test('every popup fits a phone\'s map: no wider than 240 px, kept clear of the edges', async () => {
+  const p = await started();
+  const withPopups = p.leaflet.made.layers.filter((x) => x.popup);
+  assert.strictEqual(withPopups.length, 9 + 12 + 1, 'the lanes and areas, the pictures, the dock');
+  for (const x of withPopups) assert.deepStrictEqual(x.popupOptions, { maxWidth: 240, autoPanPadding: [12, 12] }, x.kind);
+});
+
+test('every corner is drawn where the committee put it: the lanes are not smoothed', async () => {
+  const p = await started();
+  const polys = p.leaflet.made.layers.filter((x) => x.kind === 'polygon');
+  assert.ok(polys.every((x) => x.o.smoothFactor === 0));
+  const up1 = MAP_DATA.folders[1].features[0];
+  const drawn = polys.find((x) => x.popup().children[0].textContent === up1.name);
+  assert.deepStrictEqual(drawn.coords, up1.coords, 'the very same coordinates, to seven decimals');
 });
 
 test('the moving wind: streaks for most, still arrows for anyone who asked for less motion', async () => {
@@ -438,9 +650,11 @@ test('the streaks stop when the tab is hidden or the map scrolled away - and sta
 
 test('"Whole lake" works even before the map\'s outline has arrived; "Boathouse" zooms to the dock', async () => {
   const p = await started({ answers: { map: { ok: false } } });
-  const buttons = p.leaflet.made.controls.find((c) => c.container && c.container.className === 'map-buttons').container.children;
+  const buttons = p.$('map-tools').children;
+  assert.deepStrictEqual(buttons.map((b) => [b.tagName, b.type, b.textContent]), [['BUTTON', 'button', 'Boathouse'], ['BUTTON', 'button', 'Whole lake'], ['BUTTON', 'button', 'Street map']]);
   buttons[1].click();
   assert.deepStrictEqual(p.run.map.views.slice(-1)[0], ['fit', W.LAKE_BOUNDS]);
+  assert.deepStrictEqual(p.run.map.fitOptions, { paddingTopLeft: [20, 20], paddingBottomRight: [20, 34] }, 'the lake\'s far end clear of the credits line');
   buttons[0].click();
   assert.deepStrictEqual(p.run.map.views.slice(-1)[0], ['view', [W.DOCK.lat, W.DOCK.lon], 16]);
 });
@@ -529,8 +743,11 @@ test('a trial: kept out of search engines, says it is a trial, and links back', 
 test('the credits the data asks for: Open-Meteo by name with a link; map tiles credited on the map', () => {
   assert.ok(HTML.includes('<a href="https://open-meteo.com/">Weather data by Open-Meteo.com</a>'));
   assert.ok(/OpenStreetMap<\/a> contributors/.test(W.TILES.map.options.attribution));
-  assert.ok(/USGS The National Map/.test(W.TILES.aerial.options.attribution));
+  assert.ok(/CT State GIS Office/.test(W.TILES.aerial.options.attribution) && /maps\.cteco\.uconn\.edu\/data\/flight2023\//.test(W.TILES.aerial.options.attribution),
+    'the state asks to be acknowledged: by name, with the link it gives');
+  assert.ok(/USGS The National Map/.test(W.TILES.aerialBackup.options.attribution));
   assert.ok(/Safety Committee's Google map/.test(HTML));
+  assert.ok(/State of\s+Connecticut's, taken in spring 2023/.test(HTML), 'the page says whose photos, and when');
 });
 
 test('Leaflet is pinned to the exact files, by hash; no keys anywhere', () => {
@@ -542,7 +759,7 @@ test('Leaflet is pinned to the exact files, by hash; no keys anywhere', () => {
 });
 
 test('every element the script looks for is on the page', () => {
-  for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-course', 'wind-status', 'wind-now', 'map-copied']) {
+  for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-course', 'wind-status', 'wind-now', 'map-copied', 'hazard-key']) {
     assert.ok(HTML.includes(`id="${id}"`), id);
   }
   assert.ok(HTML.indexOf('leaflet.js') < HTML.indexOf('wind-map.js'), 'Leaflet first');

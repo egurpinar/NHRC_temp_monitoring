@@ -27,7 +27,7 @@ status using the site's own functions and compares against the email output.
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
 | `hazard_map.js` | Copies the Safety Committee's Google map (lanes, hazards, swim areas) into `trial/hazard-map.json` for the map with the wind |
 | `test_hazard_map.js` | Its tests (17): the real map's KML, colours, the committee's words as plain text, and never replacing a good copy with an error page |
-| `test_trial_map.js` | The trial map page (37 tests): the wind in words, headwind/crosswind/tailwind on the lanes, the 48 hours, the page run with stand-ins for the browser and Leaflet |
+| `test_trial_map.js` | The trial map page (48 tests): the wind in words, headwind/crosswind/tailwind on the lanes, the 48 hours, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet |
 | `fixtures/hazard_map.kml` | The Google map as exported in October 2026 |
 
 ## The hazard map with the wind (trial)
@@ -45,6 +45,17 @@ node scripts/hazard_map.js /tmp/hazard_map.kml trial/hazard-map.json
 
 The script refuses anything that is not the club's map (no lanes or no
 hazards), so a Google error page never replaces a good copy.
+
+The map opens on the State of Connecticut's aerial photos from spring 2023
+(CT State GIS Office, served by CT ECO): 3-inch pixels, tested to about 4
+inches against surveyed points, taken before the leaves came out, free to
+use, no key. If the state's server does not answer, the USGS photos stand in
+by themselves. A button below the map switches to the street map.
+
+Each hazard gets a picture from its name on the Google map: tree, boulder,
+sandbar, shallow water, pipe, "do not row beyond", swim area, ski course, or
+"!" for anything else. A new hazard named in the usual words gets the right
+picture with nothing to do; the colour stays the committee's.
 
 ## Rowing season
 
