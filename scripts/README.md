@@ -25,6 +25,26 @@ status using the site's own functions and compares against the email output.
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
 | `refresh_checkout.sh` | After the wait, pulls the readings made while the job slept |
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
+| `hazard_map.js` | Copies the Safety Committee's Google map (lanes, hazards, swim areas) into `trial/hazard-map.json` for the map with the wind |
+| `test_hazard_map.js` | Its tests (17): the real map's KML, colours, the committee's words as plain text, and never replacing a good copy with an error page |
+| `test_trial_map.js` | The trial map page (37 tests): the wind in words, headwind/crosswind/tailwind on the lanes, the 48 hours, the page run with stand-ins for the browser and Leaflet |
+| `fixtures/hazard_map.kml` | The Google map as exported in October 2026 |
+
+## The hazard map with the wind (trial)
+
+`roworno.com/trial/` shows the club's hazard map with the wind on it, for
+review before it replaces the Google map on the main page. A Google My Map
+cannot show live data, so the page draws the same map itself from
+`trial/hazard-map.json` - a copy of the Google map. The committee keeps
+editing the map in Google; after a change, refresh the copy:
+
+```bash
+curl -fsSL -o /tmp/hazard_map.kml 'https://www.google.com/maps/d/kml?mid=1dNR4qbbp2I8oIZK2ZMMKCNkksLDCXIk&forcekml=1'
+node scripts/hazard_map.js /tmp/hazard_map.kml trial/hazard-map.json
+```
+
+The script refuses anything that is not the club's map (no lanes or no
+hazards), so a Google error page never replaces a good copy.
 
 ## Rowing season
 

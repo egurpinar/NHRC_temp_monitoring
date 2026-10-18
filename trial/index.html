@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<!-- A trial for review: not linked from roworno.com, and kept out of search engines. -->
+<meta name="robots" content="noindex, nofollow"/>
+<title>Trial: hazard map with wind - NHRC</title>
+<link rel="icon" type="image/png" sizes="32x32" href="../favicon-32.png"/>
+<link rel="apple-touch-icon" sizes="180x180" href="../apple-touch-icon.png"/>
+<meta name="color-scheme" content="dark light"/>
+<script>
+// Light or dark, as on roworno.com: the visitor's own choice there, otherwise the device's setting.
+(function () {
+  var t = null;
+  try { t = localStorage.getItem('nhrc-theme'); } catch (e) { /* storage blocked */ }
+  if (t !== 'light' && t !== 'dark') {
+    t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+<style>
+/* The site's colours (index.html), both themes. */
+:root{
+  --navy:#0d1f3c;--navy2:#162d52;--navy3:#1e3d6e;--gold:#f0b429;
+  --white:#f4f7fb;--muted:#9baec7;--border:rgba(240,180,41,0.2);--ink:255,255,255;
+  --rb-border:rgba(122,147,180,.3);--focus:#ffd166;--bad:#f49494;
+  color-scheme:dark;--fsans:'Helvetica Neue',Helvetica,Arial,sans-serif;
+}
+:root[data-theme="light"]{
+  --navy:#f2f5f9;--navy2:#ffffff;--navy3:#edf1f6;--gold:#8a5c00;
+  --white:#0d1f3c;--muted:#4a5d78;--border:rgba(138,92,0,.28);--ink:13,31,60;
+  --rb-border:rgba(74,93,120,.45);--focus:#1a5c96;--bad:#b42318;
+  color-scheme:light;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--navy);color:var(--white);font-family:var(--fsans);font-size:16px;min-height:100vh;}
+#app{max-width:900px;margin:0 auto;padding:20px 16px 48px;}
+a{color:var(--gold);}
+a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid var(--focus);outline-offset:2px;}
+
+.trial-bar{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;
+  padding:10px 14px;margin-bottom:16px;border:1px dashed var(--gold);border-radius:12px;font-size:.78rem;color:var(--muted);}
+.trial-bar strong{color:var(--gold);letter-spacing:.08em;text-transform:uppercase;font-size:.7rem;}
+
+.river-card{background:var(--navy2);border:1px solid var(--border);border-radius:14px;padding:18px 16px;margin-bottom:16px;}
+.section-label{font-size:.63rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);margin-bottom:10px;}
+.note-text{font-size:.72rem;color:var(--muted);margin-top:12px;line-height:1.6;padding-top:10px;border-top:1px solid rgba(var(--ink),.06);}
+.status{font-size:.78rem;color:var(--bad);margin-top:8px;}
+.status:empty{display:none;}
+
+/* The map */
+.map-wrap{position:relative;border-radius:10px;overflow:hidden;border:1px solid rgba(var(--ink),.08);}
+#hazard-map{height:min(62vh,560px);min-height:340px;background:var(--navy3);}
+/* In its own map pane (z 450): above the lanes, below the hazards and popups. */
+.wind-canvas{position:absolute;left:0;top:0;pointer-events:none;}
+.leaflet-container{font-family:var(--fsans);}
+.wind-badge{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.94);color:#0d1f3c;
+  border-radius:10px;padding:6px 10px 6px 6px;box-shadow:0 1px 4px rgba(0,0,0,.3);font-size:.78rem;line-height:1.3;max-width:220px;}
+.wind-badge svg{width:38px;height:38px;flex:0 0 38px;}
+.wind-badge .arrow-ring{fill:none;stroke:#c9d3df;stroke-width:2;}
+.wind-badge .arrow-head{fill:#0b3a4a;}
+.wind-badge .arrow-shaft{stroke:#0b3a4a;stroke-width:3;stroke-linecap:round;}
+.wind-badge b{display:block;font-size:.85rem;}
+.wind-badge span{color:#4a5d78;}
+.map-buttons{display:flex;gap:6px;}
+.map-btn{background:#fff;color:#0d1f3c;border:1px solid rgba(0,0,0,.25);border-radius:8px;padding:6px 10px;font:600 .75rem var(--fsans);cursor:pointer;}
+.map-btn:hover{background:#f0f3f7;}
+.map-popup strong{display:block;font-size:.9rem;margin-bottom:2px;}
+.map-popup p{margin:4px 0 0;font-size:.8rem;line-height:1.45;}
+.map-popup .popup-wind{color:#0b3a4a;font-weight:600;}
+
+/* The wind, in words, and the hour */
+.wind-panel{margin-top:14px;}
+.wind-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;}
+#wind-time-label{font-weight:700;color:var(--gold);min-width:4.5em;}
+#wind-line{font-size:1.05rem;font-weight:700;}
+#wind-conditions{font-size:.82rem;color:var(--muted);margin-top:4px;}
+#wind-course{font-size:.85rem;margin-top:8px;line-height:1.5;}
+#wind-course:empty,#wind-conditions:empty{display:none;}
+.slider-row{display:flex;align-items:center;gap:10px;margin-top:12px;}
+.slider-row input[type=range]{flex:1;accent-color:var(--gold);min-height:32px;}
+.rb{padding:6px 12px;border-radius:7px;border:1px solid var(--rb-border);background:transparent;font:.75rem var(--fsans);cursor:pointer;color:var(--muted);white-space:nowrap;}
+.rb:hover{border-color:var(--gold);color:var(--gold);}
+.slider-ends{display:flex;justify-content:space-between;font-size:.68rem;color:var(--muted);margin-top:2px;}
+
+/* What the colours mean */
+.legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:14px;font-size:.75rem;color:var(--muted);}
+.legend span{display:inline-flex;align-items:center;gap:6px;}
+.sw{width:14px;height:14px;border-radius:3px;display:inline-block;border:1px solid rgba(var(--ink),.25);}
+.dot{width:12px;height:12px;border-radius:50%;display:inline-block;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.35);}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="trial-bar">
+    <span><strong>Trial</strong>&nbsp; The hazard map with the wind, for review before it goes on roworno.com.</span>
+    <a href="../">Back to roworno.com</a>
+  </div>
+
+  <div class="river-card">
+    <div class="section-label">River Navigation &amp; Safety Map, with the wind</div>
+    <div class="map-wrap">
+      <div id="hazard-map" role="region" aria-label="Map of Lake Housatonic with the lanes, hazards and the wind"></div>
+    </div>
+    <p id="map-status" class="status" role="status"></p>
+
+    <div class="wind-panel">
+      <div class="wind-row" aria-live="polite">
+        <span id="wind-time-label">Now</span>
+        <span id="wind-line">Loading the wind&hellip;</span>
+      </div>
+      <div id="wind-conditions"></div>
+      <div id="wind-course"></div>
+      <div class="slider-row">
+        <label for="wind-time" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);">Hour</label>
+        <input type="range" id="wind-time" min="0" max="0" value="0" step="1" disabled/>
+        <button type="button" class="rb" id="wind-now">Now</button>
+      </div>
+      <div class="slider-ends"><span>Now</span><span>48 hours ahead</span></div>
+      <p id="wind-status" class="status" role="status"></p>
+    </div>
+
+    <div class="legend" aria-label="What the colours mean">
+      <span><i class="sw" style="background:rgba(15,157,88,.45);border-color:#0F9D58"></i>Upstream lane</span>
+      <span><i class="sw" style="background:rgba(230,81,0,.45);border-color:#E65100"></i>Downstream lane</span>
+      <span><i class="dot" style="background:#E65100"></i>Do not row / danger</span>
+      <span><i class="dot" style="background:#FFD600"></i>Caution</span>
+      <span><i class="sw" style="background:rgba(255,214,0,.45);border-color:#FFD600"></i>Swim area, ski course</span>
+      <span><i class="dot" style="background:#f0b429;border-color:#0d1f3c"></i>Boathouse dock</span>
+    </div>
+
+    <div class="note-text">
+      The lanes and hazards are the Safety Committee's Google map, copied <span id="map-copied">recently</span>;
+      tap any of them for its note. The wind is one forecast for the whole lake, at the boathouse dock, now and
+      for the next 48 hours: the banks shelter some stretches, and gusts vary. Headwind, crosswind and tailwind
+      are worked out from the direction of each stretch of the lanes.
+      <a href="https://open-meteo.com/">Weather data by Open-Meteo.com</a>.
+    </div>
+  </div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="wind-map.js"></script>
+</body>
+</html>
