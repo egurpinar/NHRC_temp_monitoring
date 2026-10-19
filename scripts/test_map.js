@@ -52,6 +52,7 @@ function fakeElement(tag, doc) {
     addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); },
     dispatch(t, ev = {}) { (this.listeners[t] || []).forEach((f) => f(ev)); },
     getBoundingClientRect: () => ({ width: 400, height: 300, left: 0, top: 0 }),
+    clientWidth: 400, clientHeight: 300,
     classes: new Set(),
     get classList() {
       const s = this.classes;
@@ -758,13 +759,28 @@ test('on the photos the streaks get a dark edge, so they stay clear on bright pa
   assert.strictEqual(p.run.state.wind.state.halo, false, 'not on the street map');
 });
 
-test('a map with no size yet waits to show the whole lake - it used to open zoomed right in on the woods', async () => {
+test('a map with no size yet waits to show the whole lake - and shows it once it has one, however Leaflet measures', async () => {
+  // roworno.com shows its cards only once the first reading is in, so the map
+  // often starts in a box of 0 x 0. Leaflet as it really is: getSize() keeps
+  // what it first measured, and invalidateSize() does nothing before the map
+  // has a view - asking it early left the map blank on the live page.
   const env = fakeEnv();
   let resized = null;
   env.window.ResizeObserver = function (cb) { resized = cb; this.observe = () => {}; };
-  const realMap = env.leaflet.map;
   let size = { x: 0, y: 0 };
-  env.leaflet.map = (...a) => { const m = realMap(...a); m.getSize = () => size; return m; };
+  const box = env.document.byId['hazard-map'];
+  Object.defineProperty(box, 'clientWidth', { get: () => size.x });
+  Object.defineProperty(box, 'clientHeight', { get: () => size.y });
+  const realMap = env.leaflet.map;
+  env.leaflet.map = (...a) => {
+    const m = realMap(...a);
+    let measured = null, stale = false;
+    m.getSize = () => { if (!measured || stale) { measured = { x: size.x, y: size.y }; stale = false; } return measured; };
+    m.invalidateSize = () => { if (m.views.length) stale = true; return m; };
+    const fit = m.fitBounds.bind(m);
+    m.fitBounds = (b, o) => { const z = m.getSize(); m.fittedAt = [z.x, z.y]; return fit(b, o); };
+    return m;
+  };
   const realNow = Date.now;
   Date.now = () => NOW;
   let run;
@@ -774,6 +790,7 @@ test('a map with no size yet waits to show the whole lake - it used to open zoom
   size = { x: 400, y: 300 };
   resized([]);
   assert.deepStrictEqual(run.map.views.map((v) => v[0]), ['fit'], 'the whole lake, once it has a size');
+  assert.deepStrictEqual(run.map.fittedAt, [400, 300], 'fitted to the size it has now, not a remembered 0 x 0');
   assert.notStrictEqual(run.map.views[0][1], W.LAKE_BOUNDS, 'the map\'s own outline, which has arrived');
   resized([]);
   assert.strictEqual(run.map.views.length, 1, 'and only once: a later resize keeps where you are');

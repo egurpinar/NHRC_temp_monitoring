@@ -688,12 +688,15 @@
     const map = L.map(mapBox, { zoomSnap: 0.5, scrollWheelZoom: false, zoomControl: false });
     state.map = map;
     const FIT = { paddingTopLeft: [20, 20], paddingBottomRight: [20, 34] };   // clear of the credits line
-    // The whole lake in view. A map with no size yet (a tab opened in the background,
-    // a page still laying out) would zoom all the way in on the middle of the lake -
-    // the woods by the river - so it waits until the map has a size.
+    // The whole lake in view. A map with no size yet would zoom all the way in on
+    // the middle of the lake - the woods by the river - so it waits until it has
+    // one. On roworno.com it often has none at first: the page shows its cards
+    // only once the first water reading is in, and a tab opened in the background
+    // has no layout. The size asked is the box's own: asked before the map has a
+    // view, Leaflet keeps the 0 x 0 it measured - even after invalidateSize() -
+    // and the map stays blank (October 2026).
     const fitLake = () => {
-      const size = map.getSize ? map.getSize() : null;
-      if (size && !(size.x > 0 && size.y > 0)) { state.fitPending = true; return; }
+      if (!(mapBox.clientWidth > 0 && mapBox.clientHeight > 0)) { state.fitPending = true; return; }
       state.fitPending = false;
       map.fitBounds(state.bounds || LAKE_BOUNDS, FIT);
     };
