@@ -54,19 +54,8 @@ function fakeElement(tag, doc) {
       const s = this.classes;
       return { toggle: (c, on) => { if (on === undefined ? !s.has(c) : on) s.add(c); else s.delete(c); }, contains: (c) => s.has(c) };
     },
-    // The wind's canvas records into doc.ctx; any other canvas (the water mask) gets its own.
-    getContext() {
-      if (this.className === 'wind-canvas') return doc.ctx;
-      if (!this._ctx) {
-        const rec = [];
-        const base = { calls: rec };
-        // A picture of the water to read back, when a test asks for one: every other pixel.
-        if (doc.maskAlpha) base.getImageData = (x, y, w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let i = 3; i < d.length; i += 8) d[i] = 255; return { data: d }; };
-        this._ctx = new Proxy(base, { get: (o, k) => (k in o ? o[k] : (...a) => rec.push([k, ...a])), set: (o, k, v) => { o[k] = v; return true; } });
-        doc.extraContexts.push(this._ctx);
-      }
-      return this._ctx;
-    },
+    // The wind's canvas records into doc.ctx; no other canvas is drawn on.
+    getContext() { return this.className === 'wind-canvas' ? doc.ctx : null; },
     click() { this.dispatch('click'); },
   };
   return e;
@@ -74,7 +63,7 @@ function fakeElement(tag, doc) {
 
 function fakeEnv(opts = {}) {
   const doc = {
-    innerHTMLWrites: [], listeners: {}, visibilityState: 'visible', readyState: 'complete', byId: {}, extraContexts: [], maskAlpha: !!opts.maskAlpha,
+    innerHTMLWrites: [], listeners: {}, visibilityState: 'visible', readyState: 'complete', byId: {},
     ctx: null,
     createElement: (t) => fakeElement(t, doc),
     createElementNS: (ns, t) => fakeElement(t, doc),
@@ -619,24 +608,56 @@ test('the boathouse is the NHRC logo, centred on the dock the club gave, above e
   assert.ok(/<img class="key-logo" src="\.\.\/NHRC_logo\.svg" alt=""\/>NHRC boathouse dock/.test(HTML), 'the key shows the logo too');
 });
 
-test('streaks live on the water once the map knows where it is - not over roofs and trees', () => {
-  const env = fakeEnv();
-  const box = env.document.createElement('div');
-  const w = W.createWindLayer(box, env, null);
-  w.resize();                                             // 400 x 300, the stand-in's size
-  w.set(12, 315, 13);
-  // Water: the left half of the box, in a mask at half resolution.
-  const mw = 200, mh = 150, data = new Uint8Array(mw * mh);
-  for (let y = 0; y < mh; y++) for (let x = 0; x < mw / 2; x++) data[y * mw + x] = 255;
-  w.setWater({ data, w: mw, h: mh, scale: 0.5 });
-  assert.ok(Math.abs(w.state.water.share - 0.5) < 0.01, 'half the box is water');
-  assert.ok(w.state.parts.length >= 12, 'streaks on the water');
-  assert.ok(w.state.parts.every((q) => q.x < 200), 'every streak starts on the water');
-  assert.deepStrictEqual([w.onWater(50, 50), w.onWater(350, 50), w.onWater(-5, 10), w.onWater(10, 400)], [true, false, false, false]);
-  const n = w.state.parts.length;
-  w.setWater(null);
-  assert.ok(w.state.parts.length > n * 0, 'without water the whole box again');
-  assert.ok(w.onWater(350, 50), 'everywhere');
+test('the streaks cover the whole map, not only the course: when it opens, once the lanes arrive, after a drag, and as they drift', async () => {
+  // The same "random" every run, so this cannot pass or fail by luck.
+  const realRandom = Math.random, realNow = Date.now;
+  let seed = 11;
+  Math.random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  try {
+    const env = fakeEnv();
+    const realMap = env.leaflet.map;
+    env.leaflet.map = (...a) => { const m = realMap(...a); m.getSize = () => ({ x: 400, y: 300 }); return m; };
+    Date.now = () => NOW;
+    let run;
+    try { run = W.init(env); await run.forecast; await run.drawn; } finally { Date.now = realNow; }
+    const w = run.state.wind;
+    assert.ok(run.state.lanes.length > 0, 'the lanes have arrived');
+    // Streaks in each quarter of the 400 x 300 map, and near each of its edges.
+    const spread = () => {
+      const q = new Set(w.state.parts.map((p) => (p.x < 200 ? 0 : 1) + (p.y < 150 ? 0 : 2)));
+      const xs = w.state.parts.map((p) => p.x), ys = w.state.parts.map((p) => p.y);
+      return q.size === 4 && Math.min(...xs) < 100 && Math.max(...xs) > 300 && Math.min(...ys) < 75 && Math.max(...ys) > 225;
+    };
+    assert.strictEqual(w.state.parts.length, 67, 'one for every 1800 square pixels of map');
+    assert.ok(spread(), 'all over the map');
+    Object.values(run.map.handlers).flat().forEach((f) => f({}));     // dragged and zoomed
+    assert.ok(spread(), 'still all over it after a drag');
+    for (let t = 1000; t < 31000; t += 100) env.frames.shift()(t);   // half a minute of drifting
+    assert.strictEqual(w.state.parts.length, 67);
+    assert.ok(spread(), 'and as they drift and are born again');
+    assert.ok(w.state.parts.every((p) => p.x >= -50 && p.x <= 450 && p.y >= -50 && p.y <= 350), 'none lost far off the map');
+  } finally {
+    Math.random = realRandom;
+  }
+});
+
+test('less motion asked for: still arrows over the whole map, one every 80 px', async () => {
+  const r = await started({ reduceMotion: true });
+  const before = r.calls.length;
+  r.run.state.wind.setColor('rgba(255,255,255,.85)', false);       // draws them again
+  const calls = r.calls.slice(before);
+  assert.strictEqual(calls.filter((c) => c[0] === 'stroke').length, 20, '5 across and 4 down a 400 x 300 map');
+  // Each arrow's shaft: from its tail (the first of its three moveTo) to its head (the lineTo after it).
+  const centres = [];
+  calls.forEach((c, i) => {
+    if (c[0] !== 'beginPath') return;
+    const tail = calls[i + 1], head = calls[i + 2];
+    centres.push([Math.round((tail[1] + head[1]) / 2), Math.round((tail[2] + head[2]) / 2)]);
+  });
+  const want = [];
+  for (const y of [40, 120, 200, 280]) for (const x of [40, 120, 200, 280, 360]) want.push([x, y]);
+  assert.deepStrictEqual(centres, want, 'a grid over the whole map');
+  assert.strictEqual(W.ARROW_STEP, 80);
 });
 
 test('gusts show: when they are well above the wind, some streaks ride them - faster and longer', () => {
@@ -672,28 +693,6 @@ test('on the photos the streaks get a dark edge, so they stay clear on bright pa
   assert.strictEqual(p.run.state.wind.state.halo, false, 'not on the street map');
 });
 
-test('the water is worked out from the lanes and areas, widened for the river around them, at the zoom in view', async () => {
-  const p = await started();
-  const m = p.run.map;
-  m.getSize = () => ({ x: 400, y: 300 });
-  m.latLngToContainerPoint = (ll) => ({ x: (ll[1] + 73.16) * 6000, y: (41.38 - ll[0]) * 6000 });
-  p.run.state.waterMask();                                // the mask's own canvas, first time round
-  assert.strictEqual(p.run.state.wind.state.water, null, 'no picture of the water to read: streaks everywhere');
-  const ctx = p.document.extraContexts[0];
-  ctx.getImageData = (x, y, w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let i = 3; i < d.length; i += 8) d[i] = 255; return { data: d }; };
-  p.run.state.waterMask();
-  const water = p.run.state.wind.state.water;
-  assert.deepStrictEqual([water.w, water.h, water.scale], [200, 150, 0.5]);
-  assert.deepStrictEqual([water.data[0], water.data[1], water.data[2]], [255, 0, 255], 'the alpha of each pixel, in order');
-  assert.ok(Math.abs(water.share - 0.5) < 0.05);
-  const mPerPx = 156543.03392 * Math.cos(W.DOCK.lat * Math.PI / 180) / Math.pow(2, 13);
-  assert.ok(Math.abs(ctx.lineWidth - Math.max(6, 50 / mPerPx)) < 1e-9, 'about 25 m to spare');
-  assert.ok(p.run.state.rungs.length > 100, 'the water between the lanes too');
-  const fills = ctx.calls.filter((c) => c[0] === 'fill').length / 2;   // drawn twice, one per call above
-  assert.strictEqual(fills, 9, 'every lane and area drawn into it');
-  assert.ok(ctx.calls.some((c) => c[0] === 'setTransform' && c[1] === 0.5), 'at half resolution');
-});
-
 test('a map with no size yet waits to show the whole lake - it used to open zoomed right in on the woods', async () => {
   const env = fakeEnv();
   let resized = null;
@@ -713,35 +712,6 @@ test('a map with no size yet waits to show the whole lake - it used to open zoom
   assert.notStrictEqual(run.map.views[0][1], W.LAKE_BOUNDS, 'the map\'s own outline, which has arrived');
   resized([]);
   assert.strictEqual(run.map.views.length, 1, 'and only once: a later resize keeps where you are');
-});
-
-test('the open water between the lanes: a line from each downstream corner to the nearest point of the upstream lanes', () => {
-  const down = MAP_DATA.folders[0].features.map((f) => f.coords), up = MAP_DATA.folders[1].features.map((f) => f.coords);
-  const rungs = W.rungsBetween(down, up);
-  assert.strictEqual(rungs.length, down.reduce((n, r) => n + r.length, 0), 'one from every corner');
-  const lengths = rungs.map(([a, b]) => W.distance(a, b));
-  assert.ok(Math.max(...lengths) < 260, `never across the land: longest ${Math.round(Math.max(...lengths))} m`);
-  const sorted = lengths.slice().sort((x, y) => x - y);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  assert.ok(median > 20 && median < 120, `the middle of the river: ${Math.round(median)} m`);
-  // A square lane and a lane 100 m east of it: the rung lands on the nearer side.
-  const r = W.rungsBetween([[[0, 0], [0, 0.001], [0.001, 0.001], [0, 0]]], [[[0, 0.003], [0.001, 0.003]]]);
-  assert.strictEqual(r.length, 4);
-  assert.ok(Math.abs(r[1][1][1] - 0.003) < 1e-12 && Math.abs(r[1][1][0] - 0) < 1e-12, JSON.stringify(r[1]));
-  assert.deepStrictEqual(W.rungsBetween(down, []), [], 'no upstream lanes: none');
-});
-
-test('the streaks are on the water as soon as the lanes arrive - not only after the map is moved', async () => {
-  const env = fakeEnv({ maskAlpha: true });
-  const realMap = env.leaflet.map;
-  env.leaflet.map = (...a) => { const m = realMap(...a); m.getSize = () => ({ x: 400, y: 300 }); return m; };
-  const realNow = Date.now;
-  Date.now = () => NOW;
-  let run;
-  try { run = W.init(env); await run.forecast; await run.drawn; } finally { Date.now = realNow; }
-  const water = run.state.wind.state.water;
-  assert.ok(water && water.w === 200 && water.h === 150, 'the water, worked out once the lanes were drawn');
-  assert.ok(run.state.wind.state.parts.every((q) => run.state.wind.onWater(q.x, q.y)), 'every streak on it');
 });
 
 test('every corner is drawn where the committee put it: the lanes are not smoothed', async () => {

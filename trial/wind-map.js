@@ -47,6 +47,8 @@
   const PHOTO_FAILS = 3;
   /** Popups narrow enough to fit a phone's map with room to spare. */
   const POPUP = { maxWidth: 240, autoPanPadding: [12, 12] };
+  /** The still arrows (less motion asked for): one every this many pixels, all over the map. */
+  const ARROW_STEP = 80;
 
   // ── Numbers and words ──────────────────────────────────────────────────────
   const num = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -287,35 +289,6 @@
     return [la0 + cy / (3 * a), lo0 + cx / (3 * a)];
   }
 
-  /**
-   * Lines across the river: from each corner of the downstream lanes to the
-   * nearest point of the upstream lanes. With the lanes themselves they cover
-   * the water the club rows on - the lanes and the open water between them -
-   * without spilling onto the banks. [[lat, lon], [lat, lon]] pairs.
-   */
-  function rungsBetween(downRings, upRings) {
-    const k = Math.cos(DOCK.lat * Math.PI / 180);
-    const xy = (p) => [p[1] * k, p[0]];
-    const segs = [];
-    for (const r of upRings) for (let i = 1; i < r.length; i++) segs.push([r[i - 1], r[i]]);
-    if (!segs.length) return [];
-    const out = [];
-    for (const ring of downRings) {
-      for (const v of ring) {
-        const [px, py] = xy(v);
-        let best = null, bestD = Infinity;
-        for (const [a, b] of segs) {
-          const [ax, ay] = xy(a), [bx, by] = xy(b), dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy || 1;
-          const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l2));
-          const qx = ax + t * dx, qy = ay + t * dy, d = (px - qx) ** 2 + (py - qy) ** 2;
-          if (d < bestD) { bestD = d; best = [qy, qx / k]; }
-        }
-        out.push([v, best]);
-      }
-    }
-    return out;
-  }
-
   /** A hazard's marker: its picture, centred exactly on the spot, above the wind; a button for the keyboard. */
   function hazardMarker(L, map, f, at) {
     const kind = hazardKind(f.name);
@@ -336,8 +309,6 @@
     const lanes = [];
     const pts = [];
     const seenKinds = new Map();
-    const rings = [];                                   // every area's corners, for the water the streaks live on
-    const laneRings = { downstream: [], upstream: [] };
     const group = L.layerGroup();
     const ordered = (data.folders || []).slice().sort((a, b) => {
       const pa = (a.features || []).some((f) => f.type === 'point') ? 1 : 0;
@@ -357,10 +328,8 @@
             fillOpacity: num(f.fillOpacity) ? f.fillOpacity : 0.3, stroke: f.outline !== false, smoothFactor: 0 });
           const lane = direction ? { name: f.name, direction, edge: laneEdge(f.coords) } : null;
           if (lane && lane.edge.length > 1) lanes.push(lane);
-          if (direction) laneRings[direction].push(f.coords);
           layer.bindPopup(() => popupFor(f, lane), POPUP);
           f.coords.forEach((c) => pts.push(c));
-          rings.push(f.coords);
           if (!direction) picture = areaMiddle(f.coords);   // a swim area, the ski course: its picture in the middle
         } else if (f.type === 'line' && Array.isArray(f.coords) && f.coords.length >= 2) {
           layer = L.polyline(f.coords, { color: f.color, weight: Math.max(2, f.weight || 2), smoothFactor: 0 });
@@ -384,21 +353,16 @@
     }
     group.addTo(map);
     const kinds = KIND_ORDER.filter((k) => seenKinds.has(k)).map((k) => ({ kind: k, color: seenKinds.get(k) }));
-    return { lanes, bounds: pts.length ? L.latLngBounds(pts) : null, count, kinds, polys: rings,
-      rungs: rungsBetween(laneRings.downstream, laneRings.upstream) };
+    return { lanes, bounds: pts.length ? L.latLngBounds(pts) : null, count, kinds };
   }
 
   // ── The moving wind ────────────────────────────────────────────────────────
 
   /**
-   * Streaks drifting downwind - or, for anyone who has asked their device for
-   * less motion, still arrows. The wind is one forecast for the whole lake, so
-   * every streak moves the same way. Gusts show as some streaks running faster
-   * and longer.
-   *
-   * Once the map knows where the water is (setWater), streaks are born and
-   * live only on the river around the lanes, where they matter, instead of
-   * over every roof and tree.
+   * Streaks drifting downwind across the whole map - or, for anyone who has
+   * asked their device for less motion, still arrows all over it. The wind is
+   * one forecast for the whole lake, so every streak moves the same way. Gusts
+   * show as some streaks running faster and longer.
    *
    * `container` gives the size (the map's box); the canvas itself goes into
    * `parent` - on the page a map pane between the lanes and the hazards, so
@@ -412,20 +376,11 @@
     (parent || container).appendChild(canvas);
     const reduce = !!(win.matchMedia && win.matchMedia('(prefers-reduced-motion: reduce)').matches);
     const st = { ctx: null, W: 0, H: 0, parts: [], speed: 0, gust: 0, to: 0, color: 'rgba(11,58,74,.6)', halo: false,
-      water: null, raf: null, last: 0, on: false, visible: true };
+      raf: null, last: 0, on: false, visible: true };
 
-    /** On the water? Everywhere, until the map has said where the water is. */
-    function onWater(x, y) {
-      const w = st.water;
-      if (!w) return true;
-      const ix = Math.floor(x * w.scale), iy = Math.floor(y * w.scale);
-      if (ix < 0 || iy < 0 || ix >= w.w || iy >= w.h) return false;
-      return w.data[iy * w.w + ix] > 0;
-    }
-    /** How many streaks: by the area they can live in, not the whole box. */
+    /** How many streaks: one for every 1800 square pixels of map, 40 to 350. */
     function count() {
-      const area = st.water ? st.water.share * st.W * st.H : st.W * st.H;
-      return st.water ? Math.max(12, Math.min(260, Math.round(area / 420))) : Math.max(40, Math.min(350, Math.round(area / 1800)));
+      return Math.max(40, Math.min(350, Math.round(st.W * st.H / 1800)));
     }
     function resize() {
       const r = container.getBoundingClientRect(), d = win.devicePixelRatio || 1;
@@ -447,8 +402,7 @@
     }
     function newParticle(anyAge) {
       const max = 1.5 + Math.random() * 2;
-      let x = Math.random() * st.W, y = Math.random() * st.H;
-      for (let i = 0; i < 24 && !onWater(x, y); i++) { x = Math.random() * st.W; y = Math.random() * st.H; }
+      const x = Math.random() * st.W, y = Math.random() * st.H;
       const gusty = Math.random() < gustShare();
       return { x, y, age: anyAge ? Math.random() * max : 0, max,
         k: gusty ? Math.min(3, st.gust / st.speed) * (0.95 + Math.random() * 0.1) : 0.85 + Math.random() * 0.3, gusty };
@@ -464,10 +418,9 @@
       if (!st.speed) return;
       const vx = Math.sin(st.to), vy = -Math.cos(st.to), L = Math.min(34, 10 + st.speed);
       c.lineCap = 'round';
-      const step = st.water ? 45 : 90;          // closer together on the water, so the river is not left bare
+      const step = ARROW_STEP;
       for (let y = step / 2; y < st.H; y += step) {
         for (let x = step / 2; x < st.W; x += step) {
-          if (!onWater(x, y)) continue;
           const ex = x + vx * L / 2, ey = y + vy * L / 2;
           stroke(c, () => {
             c.beginPath();
@@ -490,7 +443,7 @@
         const step = pxs * p.k * dt;
         p.x += vx * step; p.y += vy * step; p.age += dt;
         const life = p.age / p.max;
-        if (life >= 1 || p.x < -50 || p.y < -50 || p.x > st.W + 50 || p.y > st.H + 50 || !onWater(p.x, p.y)) {
+        if (life >= 1 || p.x < -50 || p.y < -50 || p.x > st.W + 50 || p.y > st.H + 50) {
           Object.assign(p, newParticle(false)); continue;
         }
         const t = p.gusty ? tail * 1.5 : tail;
@@ -513,7 +466,7 @@
       st.raf = win.requestAnimationFrame(frame);
     }
     return {
-      canvas, reduce, state: st, resize, onWater,
+      canvas, reduce, state: st, resize,
       /** The wind to show: mph, the direction it comes from (null for none), and the gusts. */
       set(speed, from, gust) {
         const before = gustShare();
@@ -526,22 +479,6 @@
       },
       /** Streak colour; `halo` puts a dark edge under them (on the photos). */
       setColor(color, halo) { st.color = color; st.halo = !!halo; draw(0); },
-      /**
-       * Where the water is: { data, w, h, scale } - one value per pixel of a
-       * mask the size of the canvas times `scale`, above 0 on the water - or
-       * null for everywhere. `share` (worked out here) is how much of the
-       * box is water.
-       */
-      setWater(water) {
-        if (water && water.data && water.w > 0 && water.h > 0) {
-          let on = 0;
-          for (let i = 0; i < water.data.length; i += 7) if (water.data[i] > 0) on++;
-          st.water = { data: water.data, w: water.w, h: water.h, scale: water.scale || 1, share: on / Math.ceil(water.data.length / 7) };
-        } else {
-          st.water = null;
-        }
-        reseed();
-      },
       start() { st.on = true; run(); },
       stop() { st.on = false; if (st.raf) { win.cancelAnimationFrame(st.raf); st.raf = null; } },
       /** Off screen or a hidden tab: no drawing, no battery. */
@@ -776,47 +713,7 @@
       });
     }
 
-    // Where the water is, for the streaks: the lanes and areas and the open water
-    // between them (rungsBetween), with about 25 m to spare, at any zoom.
-    const maskCanvas = doc.createElement('canvas');
-    function waterMask() {
-      if (!state.polys || !state.polys.length || !map.getSize) return;
-      const size = map.getSize();
-      if (!size || !(size.x > 0) || !(size.y > 0)) return;
-      const scale = 0.5;                                   // half resolution is plenty for a mask
-      const w = Math.max(1, Math.round(size.x * scale)), h = Math.max(1, Math.round(size.y * scale));
-      maskCanvas.width = w; maskCanvas.height = h;
-      const c = maskCanvas.getContext && maskCanvas.getContext('2d');
-      if (!c) return;
-      c.setTransform(scale, 0, 0, scale, 0, 0);
-      c.clearRect(0, 0, size.x, size.y);
-      const mPerPx = 156543.03392 * Math.cos(DOCK.lat * Math.PI / 180) / Math.pow(2, map.getZoom());
-      c.lineWidth = Math.max(6, 50 / mPerPx); c.lineJoin = 'round'; c.lineCap = 'round';
-      c.strokeStyle = '#000'; c.fillStyle = '#000';
-      for (const ring of state.polys) {
-        c.beginPath();
-        ring.forEach((ll, i) => { const pt = map.latLngToContainerPoint(ll); if (i) c.lineTo(pt.x, pt.y); else c.moveTo(pt.x, pt.y); });
-        c.closePath(); c.fill(); c.stroke();
-      }
-      c.beginPath();
-      for (const [a, b] of state.rungs || []) {
-        const pa = map.latLngToContainerPoint(a), pb = map.latLngToContainerPoint(b);
-        c.moveTo(pa.x, pa.y); c.lineTo(pb.x, pb.y);
-      }
-      c.stroke();
-      const img = c.getImageData ? c.getImageData(0, 0, w, h) : null;
-      if (!img || !img.data) { state.wind.setWater(null); return; }
-      const alpha = new Uint8Array(w * h);
-      for (let i = 0; i < w * h; i++) alpha[i] = img.data[i * 4 + 3];
-      state.wind.setWater({ data: alpha, w, h, scale });
-    }
-    // While the map is dragged, a few times a second; once it stops, at once.
-    let maskTimer = null;
-    map.on('move', () => { if (!maskTimer && win.setTimeout) maskTimer = win.setTimeout(() => { maskTimer = null; waterMask(); }, 150); });
-    map.on('moveend zoomend viewreset resize', waterMask);
-    state.waterMask = waterMask;
-
-    const sized = () => { map.invalidateSize(); if (state.fitPending) fitLake(); state.wind.resize(); place(); waterMask(); };
+    const sized = () => { map.invalidateSize(); if (state.fitPending) fitLake(); state.wind.resize(); place(); };
     if (win.ResizeObserver) new win.ResizeObserver(sized).observe(mapBox);
     else win.addEventListener('resize', sized);
     if (win.IntersectionObserver) {
@@ -833,10 +730,7 @@
       const out = drawHazards(L, map, data, popupFor);
       state.lanes = out.lanes;
       state.bounds = out.bounds;
-      state.polys = out.polys;
-      state.rungs = out.rungs;
       if (out.bounds) fitLake();
-      waterMask();
       const copied = $('map-copied');
       if (copied && data.copied) copied.textContent = data.copied;
       // The key: one picture for each sort of hazard on the map, as it looks there.
@@ -861,7 +755,7 @@
 
   const api = {
     DOCK, LOGO_URL, LAKE_BOUNDS, TZ, HOURS_AHEAD, FORECAST_URL, MAP_DATA_URL, TILES, PHOTO_FAILS, POPUP, REFRESH_MS,
-    hazardKind, KIND_WORDS, KIND_ORDER, GLYPHS, glyphColor, iconSvg, iconUrl, areaMiddle, rungsBetween,
+    hazardKind, KIND_WORDS, KIND_ORDER, GLYPHS, glyphColor, iconSvg, iconUrl, areaMiddle, ARROW_STEP,
     compass, bearing, distance, angleBetween, windOnBoat, laneEdge, windShares, mostlyText, slotLabel,
     forecastSlots, windText, conditionsText, arrowRotation, isCalm, courseText, laneText, laneDirection,
     drawHazards, createWindLayer, arrowSvg, init,

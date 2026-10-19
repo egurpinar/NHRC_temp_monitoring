@@ -19,7 +19,7 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (222 tests): the email, and the website's script run against a fake network and clock |
+| `test_daily_email.js` | Test suite (236 tests): the email, and the website's script run against a fake network and clock |
 | `test_site_theme.js` | The website's light and dark themes (20 tests): contrast of every colour where it is used (WCAG AA), dark kept as the original design, the switch, the device default, the charts |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
@@ -27,7 +27,7 @@ status using the site's own functions and compares against the email output.
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
 | `hazard_map.js` | Copies the Safety Committee's Google map (lanes, hazards, swim areas) into `trial/hazard-map.json` for the map with the wind |
 | `test_hazard_map.js` | Its tests (17): the real map's KML, colours, the committee's words as plain text, and never replacing a good copy with an error page |
-| `test_trial_map.js` | The trial map page (56 tests): the wind in words, headwind/crosswind/tailwind on the lanes, the 48 hours, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet |
+| `test_trial_map.js` | The trial map page (54 tests): the wind in words, headwind/crosswind/tailwind on the lanes, the 48 hours, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet |
 | `fixtures/hazard_map.kml` | The Google map as exported in October 2026 |
 
 ## The hazard map with the wind (trial)
@@ -58,8 +58,8 @@ sandbar, shallow water, pipe, "do not row beyond", swim area, ski course, or
 picture with nothing to do; the colour stays the committee's.
 
 The dock is marked with the club's logo (`NHRC_logo.svg`, the site's own
-file). The wind's streaks drift only over the water the club rows on - the
-lanes and the open water between them - and gusts show as some streaks
+file). The wind's streaks drift across the whole map (still arrows for
+anyone whose device asks for less motion), and gusts show as some streaks
 running faster and longer.
 
 ## Rowing season
