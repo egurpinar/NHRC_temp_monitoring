@@ -54,7 +54,19 @@ function fakeElement(tag, doc) {
       const s = this.classes;
       return { toggle: (c, on) => { if (on === undefined ? !s.has(c) : on) s.add(c); else s.delete(c); }, contains: (c) => s.has(c) };
     },
-    getContext() { return doc.ctx; },
+    // The wind's canvas records into doc.ctx; any other canvas (the water mask) gets its own.
+    getContext() {
+      if (this.className === 'wind-canvas') return doc.ctx;
+      if (!this._ctx) {
+        const rec = [];
+        const base = { calls: rec };
+        // A picture of the water to read back, when a test asks for one: every other pixel.
+        if (doc.maskAlpha) base.getImageData = (x, y, w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let i = 3; i < d.length; i += 8) d[i] = 255; return { data: d }; };
+        this._ctx = new Proxy(base, { get: (o, k) => (k in o ? o[k] : (...a) => rec.push([k, ...a])), set: (o, k, v) => { o[k] = v; return true; } });
+        doc.extraContexts.push(this._ctx);
+      }
+      return this._ctx;
+    },
     click() { this.dispatch('click'); },
   };
   return e;
@@ -62,7 +74,7 @@ function fakeElement(tag, doc) {
 
 function fakeEnv(opts = {}) {
   const doc = {
-    innerHTMLWrites: [], listeners: {}, visibilityState: 'visible', readyState: 'complete', byId: {},
+    innerHTMLWrites: [], listeners: {}, visibilityState: 'visible', readyState: 'complete', byId: {}, extraContexts: [], maskAlpha: !!opts.maskAlpha,
     ctx: null,
     createElement: (t) => fakeElement(t, doc),
     createElementNS: (ns, t) => fakeElement(t, doc),
@@ -116,6 +128,7 @@ function fakeLeaflet(doc) {
         fire(t) { (this.handlers[t] || []).forEach((f) => f({})); },
         createPane(n) { made.panes[n] = Object.assign(doc.createElement('div'), { style: {} }); return made.panes[n]; },
         containerPointToLayerPoint(p) { return { x: p[0] - 7, y: p[1] - 3 }; },
+        latLngToContainerPoint(ll) { return { x: (ll[1] + 73.16) * 6000, y: (41.38 - ll[0]) * 6000 }; },
         getPane(n) { return made.panes[n]; },
         on(t, f) { (this.handlers[t] = this.handlers[t] || []).push(f); return this; },
         invalidateSize() {},
@@ -322,7 +335,7 @@ test('a forecast that is empty, broken or all in the past gives nothing to show 
 test('the forecast is for the boathouse dock, in mph and °F, with times the page can trust', () => {
   const u = new URL(W.FORECAST_URL);
   assert.strictEqual(u.hostname, 'api.open-meteo.com');
-  assert.deepStrictEqual([u.searchParams.get('latitude'), u.searchParams.get('longitude')], ['41.36854', '-73.14781']);
+  assert.deepStrictEqual([u.searchParams.get('latitude'), u.searchParams.get('longitude')], ['41.3685422', '-73.1478128'], 'the dock the club gave');
   assert.strictEqual(u.searchParams.get('wind_speed_unit'), 'mph');
   assert.strictEqual(u.searchParams.get('temperature_unit'), 'fahrenheit');
   assert.strictEqual(u.searchParams.get('timeformat'), 'unixtime', 'instants, not local clock strings read as UTC');
@@ -333,17 +346,20 @@ test('the forecast is for the boathouse dock, in mph and °F, with times the pag
 // ═════════════════════════════════════════════════════════════════════════════
 section('4. The page, with stand-ins for the browser and Leaflet');
 
+const hazardPictures = (made) => made.layers.filter((x) => x.kind === 'marker' && x.o.icon.iconOptions.className === 'hz-icon');
+const dockMarker = (made) => made.layers.find((x) => x.kind === 'marker' && x.o.icon.iconOptions.className === 'dock-icon');
+
 test('the map: the lanes and areas, then the hazards on top with their pictures, in the Google map\'s colours', async () => {
   const p = await started();
   const L = p.leaflet.made;
-  const polys = L.layers.filter((x) => x.kind === 'polygon'), pics = L.layers.filter((x) => x.kind === 'marker');
+  const polys = L.layers.filter((x) => x.kind === 'polygon'), pics = hazardPictures(L);
   assert.strictEqual(polys.length, 9);
   assert.strictEqual(pics.length, 12, 'nine hazards, and a picture in each swim area and on the ski course');
   assert.ok(polys.filter((x) => x.o.color === '#E65100').length === 3 && polys.filter((x) => x.o.color === '#0F9D58').length === 3);
   assert.ok(pics.every((d) => d.o.pane === 'hazards'), 'in their own pane, above the lanes and the moving wind');
   assert.strictEqual(L.panes.hazards.style.zIndex, '620');
-  const dock = L.layers.find((d) => d.kind === 'circle' && d.coords[0] === W.DOCK.lat);
-  assert.deepStrictEqual(dock.coords, [41.36854, -73.14781]);
+  const dock = dockMarker(L);
+  assert.deepStrictEqual(dock.coords, [41.3685422, -73.1478128]);
   assert.strictEqual(dock.o.pane, 'hazards');
   assert.deepStrictEqual(p.run.map.views.slice(-1)[0][0], 'fit', 'the whole lake, once its outline is in');
   assert.strictEqual(p.$('map-copied').textContent, MAP_DATA.copied);
@@ -531,7 +547,7 @@ test('the pictures: the hazard\'s own colour, white on orange and dark on yellow
 
 test('the swim areas and the ski course have their picture in the middle; the lanes have none', async () => {
   const p = await started();
-  const pics = p.leaflet.made.layers.filter((x) => x.kind === 'marker');
+  const pics = hazardPictures(p.leaflet.made);
   const areas = MAP_DATA.folders.flatMap((f) => f.features).filter((f) => f.type === 'polygon' && /Swim|Ski/.test(f.name));
   assert.strictEqual(areas.length, 3);
   for (const a of areas) {
@@ -582,6 +598,150 @@ test('every popup fits a phone\'s map: no wider than 240 px, kept clear of the e
   const withPopups = p.leaflet.made.layers.filter((x) => x.popup);
   assert.strictEqual(withPopups.length, 9 + 12 + 1, 'the lanes and areas, the pictures, the dock');
   for (const x of withPopups) assert.deepStrictEqual(x.popupOptions, { maxWidth: 240, autoPanPadding: [12, 12] }, x.kind);
+});
+
+test('the boathouse is the NHRC logo, centred on the dock the club gave, above every hazard picture', async () => {
+  const p = await started();
+  const dock = dockMarker(p.leaflet.made);
+  const io = dock.o.icon.iconOptions;
+  assert.strictEqual(io.iconUrl, '../NHRC_logo.svg', 'the site\'s own logo file');
+  assert.deepStrictEqual([io.iconSize, io.iconAnchor], [[58, 58], [29, 29]], 'its middle is the dock');
+  assert.deepStrictEqual([dock.o.title, dock.o.alt, dock.o.keyboard, dock.o.zIndexOffset, dock.o.pane],
+    ['NHRC boathouse dock', 'NHRC boathouse dock', true, 1000, 'hazards']);
+  assert.strictEqual(dock.popup().textContent, 'NHRC boathouse dock');
+  assert.deepStrictEqual([W.DOCK.lat, W.DOCK.lon], [41.3685422, -73.1478128]);
+  assert.ok(fs.existsSync(path.join(ROOT, 'NHRC_logo.svg')), 'the file is there, one level up from trial/');
+  // Shrunk with the lake in view, still centred and still bigger than the hazards.
+  for (const [cls, px] of [['hz-mid', 48], ['hz-far', 38]]) {
+    const rule = HTML.match(new RegExp(`\\.${cls} \\.leaflet-marker-icon\\.dock-icon\\{([^}]*)\\}`))[1];
+    assert.ok(rule.includes(`width:${px}px!important`) && rule.includes(`margin-left:-${px / 2}px!important`) && rule.includes(`margin-top:-${px / 2}px!important`), cls);
+  }
+  assert.ok(/<img class="key-logo" src="\.\.\/NHRC_logo\.svg" alt=""\/>NHRC boathouse dock/.test(HTML), 'the key shows the logo too');
+});
+
+test('streaks live on the water once the map knows where it is - not over roofs and trees', () => {
+  const env = fakeEnv();
+  const box = env.document.createElement('div');
+  const w = W.createWindLayer(box, env, null);
+  w.resize();                                             // 400 x 300, the stand-in's size
+  w.set(12, 315, 13);
+  // Water: the left half of the box, in a mask at half resolution.
+  const mw = 200, mh = 150, data = new Uint8Array(mw * mh);
+  for (let y = 0; y < mh; y++) for (let x = 0; x < mw / 2; x++) data[y * mw + x] = 255;
+  w.setWater({ data, w: mw, h: mh, scale: 0.5 });
+  assert.ok(Math.abs(w.state.water.share - 0.5) < 0.01, 'half the box is water');
+  assert.ok(w.state.parts.length >= 12, 'streaks on the water');
+  assert.ok(w.state.parts.every((q) => q.x < 200), 'every streak starts on the water');
+  assert.deepStrictEqual([w.onWater(50, 50), w.onWater(350, 50), w.onWater(-5, 10), w.onWater(10, 400)], [true, false, false, false]);
+  const n = w.state.parts.length;
+  w.setWater(null);
+  assert.ok(w.state.parts.length > n * 0, 'without water the whole box again');
+  assert.ok(w.onWater(350, 50), 'everywhere');
+});
+
+test('gusts show: when they are well above the wind, some streaks ride them - faster and longer', () => {
+  const env = fakeEnv();
+  const w = W.createWindLayer(env.document.createElement('div'), env, null);
+  w.resize();
+  w.set(10, 315, 20);
+  const gusty = w.state.parts.filter((q) => q.gusty);
+  assert.ok(gusty.length > 0 && gusty.length < w.state.parts.length, `${gusty.length} of ${w.state.parts.length}`);
+  assert.ok(gusty.every((q) => q.k >= 1.9 && q.k <= 2.1), 'at the gust speed');
+  assert.ok(w.state.parts.filter((q) => !q.gusty).every((q) => q.k >= 0.85 && q.k <= 1.15), 'the rest at the wind');
+  w.set(10, 315, 11);
+  assert.strictEqual(w.state.parts.filter((q) => q.gusty).length, 0, 'gusts barely above the wind: none');
+  w.set(10, 315, null);
+  assert.strictEqual(w.state.parts.filter((q) => q.gusty).length, 0, 'no gust figure: none');
+});
+
+test('on the photos the streaks get a dark edge, so they stay clear on bright patches', async () => {
+  const strokes = (halo) => {
+    const env = fakeEnv({ reduceMotion: true });         // still arrows: the same drawing every time
+    const w = W.createWindLayer(env.document.createElement('div'), env, null);
+    w.resize(); w.set(12, 315, 12);
+    const before = env.calls.length;
+    w.setColor('rgba(255,255,255,.85)', halo);
+    return env.calls.slice(before).filter((c) => c[0] === 'stroke').length;
+  };
+  const plain = strokes(false), edged = strokes(true);
+  assert.ok(plain > 0);
+  assert.strictEqual(edged, plain * 2, 'a dark stroke under each white one');
+  const p = await started();
+  assert.strictEqual(p.run.state.wind.state.halo, true, 'on the photos when the map opens');
+  p.$('map-tools').children[2].click();
+  assert.strictEqual(p.run.state.wind.state.halo, false, 'not on the street map');
+});
+
+test('the water is worked out from the lanes and areas, widened for the river around them, at the zoom in view', async () => {
+  const p = await started();
+  const m = p.run.map;
+  m.getSize = () => ({ x: 400, y: 300 });
+  m.latLngToContainerPoint = (ll) => ({ x: (ll[1] + 73.16) * 6000, y: (41.38 - ll[0]) * 6000 });
+  p.run.state.waterMask();                                // the mask's own canvas, first time round
+  assert.strictEqual(p.run.state.wind.state.water, null, 'no picture of the water to read: streaks everywhere');
+  const ctx = p.document.extraContexts[0];
+  ctx.getImageData = (x, y, w, h) => { const d = new Uint8ClampedArray(w * h * 4); for (let i = 3; i < d.length; i += 8) d[i] = 255; return { data: d }; };
+  p.run.state.waterMask();
+  const water = p.run.state.wind.state.water;
+  assert.deepStrictEqual([water.w, water.h, water.scale], [200, 150, 0.5]);
+  assert.deepStrictEqual([water.data[0], water.data[1], water.data[2]], [255, 0, 255], 'the alpha of each pixel, in order');
+  assert.ok(Math.abs(water.share - 0.5) < 0.05);
+  const mPerPx = 156543.03392 * Math.cos(W.DOCK.lat * Math.PI / 180) / Math.pow(2, 13);
+  assert.ok(Math.abs(ctx.lineWidth - Math.max(6, 50 / mPerPx)) < 1e-9, 'about 25 m to spare');
+  assert.ok(p.run.state.rungs.length > 100, 'the water between the lanes too');
+  const fills = ctx.calls.filter((c) => c[0] === 'fill').length / 2;   // drawn twice, one per call above
+  assert.strictEqual(fills, 9, 'every lane and area drawn into it');
+  assert.ok(ctx.calls.some((c) => c[0] === 'setTransform' && c[1] === 0.5), 'at half resolution');
+});
+
+test('a map with no size yet waits to show the whole lake - it used to open zoomed right in on the woods', async () => {
+  const env = fakeEnv();
+  let resized = null;
+  env.window.ResizeObserver = function (cb) { resized = cb; this.observe = () => {}; };
+  const realMap = env.leaflet.map;
+  let size = { x: 0, y: 0 };
+  env.leaflet.map = (...a) => { const m = realMap(...a); m.getSize = () => size; return m; };
+  const realNow = Date.now;
+  Date.now = () => NOW;
+  let run;
+  try { run = W.init(env); await run.forecast; await run.drawn; } finally { Date.now = realNow; }
+  assert.deepStrictEqual(run.map.views, [], 'no fit while the map has no size');
+  assert.strictEqual(run.state.fitPending, true);
+  size = { x: 400, y: 300 };
+  resized([]);
+  assert.deepStrictEqual(run.map.views.map((v) => v[0]), ['fit'], 'the whole lake, once it has a size');
+  assert.notStrictEqual(run.map.views[0][1], W.LAKE_BOUNDS, 'the map\'s own outline, which has arrived');
+  resized([]);
+  assert.strictEqual(run.map.views.length, 1, 'and only once: a later resize keeps where you are');
+});
+
+test('the open water between the lanes: a line from each downstream corner to the nearest point of the upstream lanes', () => {
+  const down = MAP_DATA.folders[0].features.map((f) => f.coords), up = MAP_DATA.folders[1].features.map((f) => f.coords);
+  const rungs = W.rungsBetween(down, up);
+  assert.strictEqual(rungs.length, down.reduce((n, r) => n + r.length, 0), 'one from every corner');
+  const lengths = rungs.map(([a, b]) => W.distance(a, b));
+  assert.ok(Math.max(...lengths) < 260, `never across the land: longest ${Math.round(Math.max(...lengths))} m`);
+  const sorted = lengths.slice().sort((x, y) => x - y);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  assert.ok(median > 20 && median < 120, `the middle of the river: ${Math.round(median)} m`);
+  // A square lane and a lane 100 m east of it: the rung lands on the nearer side.
+  const r = W.rungsBetween([[[0, 0], [0, 0.001], [0.001, 0.001], [0, 0]]], [[[0, 0.003], [0.001, 0.003]]]);
+  assert.strictEqual(r.length, 4);
+  assert.ok(Math.abs(r[1][1][1] - 0.003) < 1e-12 && Math.abs(r[1][1][0] - 0) < 1e-12, JSON.stringify(r[1]));
+  assert.deepStrictEqual(W.rungsBetween(down, []), [], 'no upstream lanes: none');
+});
+
+test('the streaks are on the water as soon as the lanes arrive - not only after the map is moved', async () => {
+  const env = fakeEnv({ maskAlpha: true });
+  const realMap = env.leaflet.map;
+  env.leaflet.map = (...a) => { const m = realMap(...a); m.getSize = () => ({ x: 400, y: 300 }); return m; };
+  const realNow = Date.now;
+  Date.now = () => NOW;
+  let run;
+  try { run = W.init(env); await run.forecast; await run.drawn; } finally { Date.now = realNow; }
+  const water = run.state.wind.state.water;
+  assert.ok(water && water.w === 200 && water.h === 150, 'the water, worked out once the lanes were drawn');
+  assert.ok(run.state.wind.state.parts.every((q) => run.state.wind.onWater(q.x, q.y)), 'every streak on it');
 });
 
 test('every corner is drawn where the committee put it: the lanes are not smoothed', async () => {
@@ -728,7 +888,10 @@ test('a refresh keeps the hour you were looking at', async () => {
   p.$('wind-time').value = '5';
   p.$('wind-time').dispatch('input');
   const t = p.run.state.slots[5].t;
-  await p.window.timers[0][0]();
+  // The refresh runs at the forecast's own time, not whenever the tests happen to run.
+  const realNow = Date.now;
+  Date.now = () => NOW + 15 * 60000;
+  try { await p.window.timers[0][0](); } finally { Date.now = realNow; }
   assert.strictEqual(p.run.state.slots[p.run.state.index].t, t);
 });
 

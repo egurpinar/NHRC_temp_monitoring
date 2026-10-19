@@ -96,6 +96,14 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid var(-
 .hz-key img{width:18px;height:18px;display:block;}
 .sw{width:14px;height:14px;border-radius:3px;display:inline-block;border:1px solid rgba(var(--ink),.25);}
 .dot{width:12px;height:12px;border-radius:50%;display:inline-block;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.35);}
+/* The boathouse: the club's logo on white, in the header's navy and gold rings - clear at every zoom. */
+.leaflet-marker-icon.dock-icon{box-sizing:border-box;padding:5px;background:#fff;border:3px solid #0d1f3c;border-radius:50%;
+  box-shadow:0 0 0 3px #f0b429,0 2px 8px rgba(0,0,0,.55);object-fit:contain;}
+.hz-mid .leaflet-marker-icon.dock-icon{width:48px!important;height:48px!important;margin-left:-24px!important;margin-top:-24px!important;padding:4px;}
+.hz-far .leaflet-marker-icon.dock-icon{width:38px!important;height:38px!important;margin-left:-19px!important;margin-top:-19px!important;padding:3px;border-width:2px;}
+.leaflet-marker-icon.dock-icon:focus-visible{outline:3px solid var(--focus);outline-offset:4px;}
+.key-logo{width:20px;height:20px;box-sizing:border-box;padding:2px;background:#fff;border:1.5px solid #0d1f3c;border-radius:50%;
+  box-shadow:0 0 0 1.5px #f0b429;object-fit:contain;}
 /* The hazards' pictures on the map: a keyboard can reach them too. */
 .leaflet-marker-icon.hz-icon:focus-visible{outline:3px solid var(--focus);outline-offset:1px;border-radius:50%;}
 </style>
@@ -137,7 +145,7 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid var(-
       <span><i class="dot" style="background:#E65100"></i>Orange: do not row / danger</span>
       <span><i class="dot" style="background:#FFD600"></i>Yellow: caution</span>
       <span id="hazard-key"></span>
-      <span><i class="dot" style="background:#f0b429;border-color:#0d1f3c"></i>Boathouse dock</span>
+      <span><img class="key-logo" src="../NHRC_logo.svg" alt=""/>NHRC boathouse dock</span>
     </div>
 
     <div class="note-text">
@@ -145,8 +153,9 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid var(-
       drawn exactly where the committee placed them; tap any of them for its note. The photos are the State of
       Connecticut's, taken in spring 2023 before the leaves came out, so the banks show: 3-inch detail,
       accurate to about 4 inches. The wind is one forecast for the whole lake, at the boathouse dock, now and
-      for the next 48 hours: the banks shelter some stretches, and gusts vary. Headwind, crosswind and tailwind
-      are worked out from the direction of each stretch of the lanes.
+      for the next 48 hours: the banks shelter some stretches, and gusts vary. The streaks drift with it over the
+      water; the longer, faster ones are the gusts. Headwind, crosswind and tailwind are worked out from the
+      direction of each stretch of the lanes.
       <a href="https://open-meteo.com/">Weather data by Open-Meteo.com</a>.
     </div>
   </div>
