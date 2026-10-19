@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 /**
- * Tests for the trial hazard map with the wind (trial/index.html,
- * trial/wind-map.js).
+ * Tests for the hazard map with the wind on the main page (index.html,
+ * map/wind-map.js), and the old trial address that now points to it.
  *
  *  1. The wind in words: compass points, calm, gusts only when stronger,
  *     missing values shown as missing - never as 0.
  *  2. Headwind, crosswind, tailwind on the lanes: the geometry, both ways.
- *  3. The forecast: now, then 48 hours, in the boathouse's time.
+ *  3. Now and the 48 hours: now is the airport's measured reading (from the
+ *     weather card), the hours ahead the forecast for the dock - never the
+ *     model's own "now".
  *  4. The page itself, run with stand-ins for the browser and Leaflet: what
  *     is drawn, in which colours, what the popups say (as text, never as
  *     markup), the slider, the badge, and what happens when the map library,
@@ -14,7 +16,7 @@
  *  5. The page's markup: kept out of search engines, the credits the data's
  *     licences ask for, the libraries pinned by hash, no keys.
  *
- * Run: node scripts/test_trial_map.js
+ * Run: node scripts/test_map.js
  */
 
 'use strict';
@@ -22,11 +24,12 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const W = require('../trial/wind-map.js');
+const W = require('../map/wind-map.js');
 
 const ROOT = path.join(__dirname, '..');
-const HTML = fs.readFileSync(path.join(ROOT, 'trial', 'index.html'), 'utf8');
-const MAP_DATA = JSON.parse(fs.readFileSync(path.join(ROOT, 'trial', 'hazard-map.json'), 'utf8'));
+const HTML = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+const TRIAL = fs.readFileSync(path.join(ROOT, 'trial', 'index.html'), 'utf8');
+const MAP_DATA = JSON.parse(fs.readFileSync(path.join(ROOT, 'map', 'hazard-map.json'), 'utf8'));
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -72,7 +75,7 @@ function fakeEnv(opts = {}) {
   };
   const calls = [];
   doc.ctx = new Proxy({}, { get: (o, k) => (k in o ? o[k] : (...a) => calls.push([k, ...a])), set: (o, k, v) => { o[k] = v; return true; } });
-  for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-course', 'wind-status', 'wind-now', 'map-copied', 'hazard-key', 'map-tools']) {
+  for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-source', 'wind-course', 'wind-status', 'wind-now', 'map-copied', 'hazard-key', 'map-tools']) {
     if (opts.withoutMapBox && id === 'hazard-map') continue;
     doc.byId[id] = fakeElement(id === 'wind-time' ? 'input' : 'div', doc);
   }
@@ -83,7 +86,11 @@ function fakeEnv(opts = {}) {
     requestAnimationFrame: (f) => { frames.push(f); return frames.length; },
     cancelAnimationFrame: () => {},
     setInterval(f, ms) { this.timers.push([f, ms]); return this.timers.length; },
-    addEventListener() {},
+    // The weather card's airport reading, as the page leaves it, and its event.
+    NHRC_STATION: Object.prototype.hasOwnProperty.call(opts, 'station') ? opts.station : STATION,
+    listeners: {},
+    addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); },
+    station(detail) { (this.listeners['nhrc-station'] || []).forEach((f) => f({ detail })); },
   };
   const leaflet = fakeLeaflet(doc);
   const answers = Object.assign({ forecast: { ok: true, body: sampleForecast() }, map: { ok: true, body: MAP_DATA } }, opts.answers || {});
@@ -160,6 +167,9 @@ function fakeLeaflet(doc) {
 
 /** An Open-Meteo answer: now 14:20 Eastern on 18 October 2026, and 60 hours from 13:00. */
 const NOW = Date.UTC(2026, 9, 18, 18, 20);                     // 14:20 EDT
+/** The airport's reading at 14:15, as the weather card hands it over (readStation, with the station's name). */
+const STATION = { atMs: NOW - 5 * 60000, tempF: 54, windMph: 12, dir: 'NW', deg: 315, gustMph: 19, humidity: 70, feelsF: null,
+  cond: 'Mostly Cloudy', code: 3, name: 'Waterbury-Oxford Airport', where: 'on a hilltop 7.6 mi north of the dock' };
 function sampleForecast() {
   const t0 = Date.UTC(2026, 9, 18, 17) / 1000;                 // 13:00 EDT
   const n = 60, time = [], sp = [], gu = [], dir = [], tmp = [], pp = [], code = [];
@@ -291,34 +301,57 @@ test('which way a folder\'s lanes are rowed, from its name', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 section('3. The forecast: now, then 48 hours');
 
-test('now from Open-Meteo\'s current conditions, then the next 48 whole hours, in Eastern time', () => {
+test('the forecast: this hour and the next 48, whole hours in Eastern time - and the model\'s own "current" is never used', () => {
   const s = W.forecastSlots(sampleForecast(), NOW);
   assert.strictEqual(s.length, 49);
-  assert.deepStrictEqual([s[0].label, s[0].isNow, s[0].speed, s[0].from, s[0].temp], ['Now', true, 11.6, 315, 54.4]);
-  assert.strictEqual(s[0].rain, 5, 'the chance of rain for the current hour (14:00)');
+  assert.deepStrictEqual([s[0].label, s[0].isNow, s[0].forecast, s[0].speed, s[0].from, s[0].temp, s[0].rain], ['Now', true, true, 6, 15, 51, 5],
+    'the 14:00 hour - not the answer\'s "current" block (11.6 mph from the NW)');
   assert.strictEqual(s[1].label, 'Sun 3 PM');
   assert.strictEqual(s[48].label, 'Tue 2 PM');
-  assert.ok(s.slice(1).every((x, i) => x.t === NOW - 20 * 60000 + (i + 1) * 3600000), 'whole hours, in order');
-});
-
-test('without current conditions, now is the current hour; missing numbers stay missing', () => {
+  assert.ok(s.every((x, i) => x.t === NOW - 20 * 60000 + i * 3600000 && x.forecast), 'whole hours, in order, all forecasts');
+  // Missing numbers stay missing.
   const fc = sampleForecast();
-  delete fc.current;
   fc.hourly.wind_gusts_10m[1] = null;
   fc.hourly.temperature_2m[2] = 'warm';
-  const s = W.forecastSlots(fc, NOW);
-  assert.deepStrictEqual([s[0].label, s[0].speed, s[0].gust, s[0].from], ['Now', 6, null, 15]);
-  assert.strictEqual(s[1].temp, null, 'not a number: not shown');
+  const m = W.forecastSlots(fc, NOW);
+  assert.deepStrictEqual([m[0].gust, m[1].temp], [null, null]);
+});
+
+test('now is the airport\'s measured reading when the weather card has one under 2 hours old - otherwise the forecast\'s hour, said to be one', () => {
+  const fc = W.forecastSlots(sampleForecast(), NOW);
+  const s = W.withStation(fc, STATION, NOW);
+  assert.strictEqual(s.length, 49, 'the measured now takes the forecast hour\'s place');
+  assert.deepStrictEqual([s[0].measured, s[0].isNow, s[0].label, s[0].speed, s[0].gust, s[0].from, s[0].temp, s[0].rain, s[0].cond],
+    [true, true, 'Now', 12, 19, 315, 54, null, 'Mostly Cloudy']);
+  assert.strictEqual(s[1], fc[1], 'the hours ahead are the forecast\'s');
+  assert.strictEqual(W.sourceText(s[0]), 'Measured at Waterbury-Oxford Airport, on a hilltop 7.6 mi north of the dock, at 2:15 PM.');
+  assert.strictEqual(W.slotName(s[0]), 'Now, measured at the airport');
+  assert.strictEqual(W.conditionsText(s[0]), '54°F · Mostly Cloudy', 'the station\'s own words; no chance of rain is measured');
+  assert.deepStrictEqual([W.slotName(fc[0]), W.slotName(fc[1]), W.sourceText(fc[1])],
+    ['Now (forecast)', 'Sun 3 PM (forecast)', 'Forecast for the dock, from weather models.']);
+  // Not current, or not a reading: the forecast's own hour stays.
+  assert.strictEqual(W.withStation(fc, Object.assign({}, STATION, { atMs: NOW - 121 * 60000 }), NOW), fc, 'over 2 hours old');
+  assert.strictEqual(W.withStation(fc, Object.assign({}, STATION, { atMs: NOW - 120 * 60000 }), NOW)[0].measured, true, '2 hours exactly is still now');
+  for (const bad of [null, undefined, {}, Object.assign({}, STATION, { tempF: null }), Object.assign({}, STATION, { windMph: 'x' })]) {
+    assert.strictEqual(W.withStation(fc, bad, NOW), fc, JSON.stringify(bad));
+  }
+  // A calm or a shifting wind has no direction to draw; no forecast still gives the reading.
+  assert.strictEqual(W.withStation(fc, Object.assign({}, STATION, { windMph: 0, deg: 0 }), NOW)[0].from, null);
+  assert.strictEqual(W.withStation(fc, Object.assign({}, STATION, { deg: null }), NOW)[0].from, null);
+  assert.deepStrictEqual(W.withStation([], STATION, NOW).map((x) => x.measured), [true]);
+  assert.strictEqual(W.withStation(fc, Object.assign({}, STATION, { name: '' }), NOW)[0].station, 'the airport');
 });
 
 test('a forecast that is empty, broken or all in the past gives nothing to show - not a crash', () => {
   assert.deepStrictEqual(W.forecastSlots(null, NOW), []);
   assert.deepStrictEqual(W.forecastSlots({ hourly: {} }, NOW), []);
   const old = sampleForecast();
-  delete old.current;
   old.hourly.time = old.hourly.time.map((t) => t - 10 * 86400);
   const s = W.forecastSlots(old, NOW);
   assert.ok(s.length === 1 && s[0].isNow, 'only its last hour, as now');
+  const later = sampleForecast();
+  later.hourly.time = later.hourly.time.map((t) => t + 10 * 86400);
+  assert.deepStrictEqual(W.forecastSlots(later, NOW), [], 'a forecast that starts after now has no "now"');
 });
 
 test('the forecast is for the boathouse dock, in mph and °F, with times the page can trust', () => {
@@ -330,6 +363,7 @@ test('the forecast is for the boathouse dock, in mph and °F, with times the pag
   assert.strictEqual(u.searchParams.get('timeformat'), 'unixtime', 'instants, not local clock strings read as UTC');
   for (const v of ['wind_speed_10m', 'wind_gusts_10m', 'wind_direction_10m', 'precipitation_probability']) assert.ok(u.searchParams.get('hourly').includes(v), v);
   assert.ok(Number(u.searchParams.get('forecast_days')) >= 3, 'enough for 48 hours from late in the day');
+  assert.strictEqual(u.searchParams.get('current'), null, 'the model\'s "now" is never asked for');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -354,14 +388,15 @@ test('the map: the lanes and areas, then the hazards on top with their pictures,
   assert.strictEqual(p.$('map-copied').textContent, MAP_DATA.copied);
 });
 
-test('the wind: badge, words, conditions and the course - for now', async () => {
+test('the wind now: the airport\'s reading - badge, words, where it was measured, and the course', async () => {
   const p = await started();
   assert.strictEqual(p.$('wind-line').textContent, '12 mph from the NW, gusts 19');
   assert.strictEqual(p.$('wind-time-label').textContent, 'Now');
-  assert.strictEqual(p.$('wind-conditions').textContent, '54°F · Overcast · 5% chance of rain');
+  assert.strictEqual(p.$('wind-conditions').textContent, '54°F · Mostly Cloudy');
+  assert.strictEqual(p.$('wind-source').textContent, 'Measured at Waterbury-Oxford Airport, on a hilltop 7.6 mi north of the dock, at 2:15 PM.');
   assert.ok(/^Going downstream: mostly tailwind/.test(p.$('wind-course').textContent), p.$('wind-course').textContent);
   const badge = p.run.state.badge;
-  assert.ok(/12 mph from the NW, gusts 19/.test(badge.textContent) && /Now/.test(badge.textContent));
+  assert.ok(/12 mph from the NW, gusts 19/.test(badge.textContent) && /Now, measured at the airport/.test(badge.textContent), badge.textContent);
   const g = badge.children[0].children.find((c) => c.tagName === 'G');
   assert.strictEqual(g.attrs.transform, 'rotate(135 20 20)', 'the arrow points downwind');
   assert.strictEqual(p.$('wind-time').max, '48');
@@ -376,7 +411,8 @@ test('the slider moves through the hours; "Now" comes back; the moving wind foll
   const s17 = p.run.state.slots[17];
   assert.strictEqual(p.$('wind-time-label').textContent, s17.label);
   assert.strictEqual(p.$('wind-line').textContent, W.windText(s17));
-  assert.strictEqual(sl.attrs['aria-valuetext'], `${s17.label}: ${W.windText(s17)}`);
+  assert.strictEqual(sl.attrs['aria-valuetext'], `${s17.label} (forecast): ${W.windText(s17)}`);
+  assert.strictEqual(p.$('wind-source').textContent, 'Forecast for the dock, from weather models.');
   assert.strictEqual(p.run.state.wind.state.speed, s17.speed);
   sl.value = '999';
   sl.dispatch('input');
@@ -394,8 +430,36 @@ test('popups say the committee\'s words as text - and a lane\'s says the wind it
   assert.strictEqual(box.children[1].textContent, 'There is a boulder in this area and it is shallow.');
   const lane = L.layers.find((x) => x.kind === 'polygon' && x.popup().children[0].textContent === 'Upstream Section 2');
   const words = lane.popup().textContent;
-  assert.ok(/^Upstream Section 2Now: 12 mph from the NW, gusts 19\. Rowing upstream here: mostly headwind/.test(words), words);
+  assert.ok(/^Upstream Section 2Now, measured at the airport: 12 mph from the NW, gusts 19\. Rowing upstream here: mostly headwind/.test(words), words);
   assert.deepStrictEqual(p.document.innerHTMLWrites, [], 'nothing from the map data is ever written as markup');
+});
+
+test('no airport reading: now is the forecast\'s hour, and says so; a reading arriving later takes its place', async () => {
+  const p = await started({ station: null });
+  assert.strictEqual(p.$('wind-line').textContent, '6 mph from the NNE, gusts 13');
+  assert.strictEqual(p.$('wind-conditions').textContent, '51°F · Partly cloudy · 5% chance of rain');
+  assert.strictEqual(p.$('wind-source').textContent, 'Forecast for the dock, from weather models.');
+  assert.ok(/Now \(forecast\)/.test(p.run.state.badge.textContent));
+  // The weather card loads the airport's reading: the map takes it as now.
+  const realNow = Date.now;
+  Date.now = () => NOW;
+  try { p.window.station(STATION); } finally { Date.now = realNow; }
+  assert.strictEqual(p.$('wind-line').textContent, '12 mph from the NW, gusts 19');
+  assert.strictEqual(p.run.state.slots.length, 49);
+  assert.strictEqual(p.run.state.wind.state.speed, 12, 'the streaks follow');
+  // And a refresh with no reading puts the forecast back.
+  Date.now = () => NOW;
+  try { p.window.station(null); } finally { Date.now = realNow; }
+  assert.strictEqual(p.$('wind-line').textContent, '6 mph from the NNE, gusts 13');
+});
+
+test('a reading that has gone old by the time the forecast refreshes is no longer now', async () => {
+  const p = await started();
+  assert.strictEqual(p.run.state.slots[0].measured, true);
+  const realNow = Date.now;
+  Date.now = () => NOW + 3 * 3600000;
+  try { await p.window.timers[0][0](); } finally { Date.now = realNow; }
+  assert.ok(!p.run.state.slots[0].measured, 'three hours later, without a new reading: the forecast\'s hour');
 });
 
 test('markup in the map\'s text stays text', async () => {
@@ -593,19 +657,20 @@ test('the boathouse is the NHRC logo, centred on the dock the club gave, above e
   const p = await started();
   const dock = dockMarker(p.leaflet.made);
   const io = dock.o.icon.iconOptions;
-  assert.strictEqual(io.iconUrl, '../NHRC_logo.svg', 'the site\'s own logo file');
+  assert.strictEqual(io.iconUrl, 'NHRC_logo.svg', 'the site\'s own logo file');
   assert.deepStrictEqual([io.iconSize, io.iconAnchor], [[58, 58], [29, 29]], 'its middle is the dock');
   assert.deepStrictEqual([dock.o.title, dock.o.alt, dock.o.keyboard, dock.o.zIndexOffset, dock.o.pane],
     ['NHRC boathouse dock', 'NHRC boathouse dock', true, 1000, 'hazards']);
   assert.strictEqual(dock.popup().textContent, 'NHRC boathouse dock');
   assert.deepStrictEqual([W.DOCK.lat, W.DOCK.lon], [41.3685422, -73.1478128]);
-  assert.ok(fs.existsSync(path.join(ROOT, 'NHRC_logo.svg')), 'the file is there, one level up from trial/');
+  assert.ok(fs.existsSync(path.join(ROOT, W.LOGO_URL)), 'the file is there, next to the page');
+  assert.strictEqual(W.LOGO_URL, 'NHRC_logo.svg');
   // Shrunk with the lake in view, still centred and still bigger than the hazards.
   for (const [cls, px] of [['hz-mid', 48], ['hz-far', 38]]) {
     const rule = HTML.match(new RegExp(`\\.${cls} \\.leaflet-marker-icon\\.dock-icon\\{([^}]*)\\}`))[1];
     assert.ok(rule.includes(`width:${px}px!important`) && rule.includes(`margin-left:-${px / 2}px!important`) && rule.includes(`margin-top:-${px / 2}px!important`), cls);
   }
-  assert.ok(/<img class="key-logo" src="\.\.\/NHRC_logo\.svg" alt=""\/>NHRC boathouse dock/.test(HTML), 'the key shows the logo too');
+  assert.ok(/<img class="key-logo" src="NHRC_logo\.svg" alt=""\/>NHRC boathouse dock/.test(HTML), 'the key shows the logo too');
 });
 
 test('the streaks cover the whole map, not only the course: when it opens, once the lanes arrive, after a drag, and as they drift', async () => {
@@ -814,19 +879,22 @@ test('while the forecast is still on its way, the page says it is loading - not 
     assert.strictEqual(env.document.byId['wind-course'].textContent, '');
     release();
     await run.forecast;
-    assert.strictEqual(env.document.byId['wind-line'].textContent, '12 mph from the NW, gusts 19');
+    assert.strictEqual(env.document.byId['wind-line'].textContent, '12 mph from the NW, gusts 19', 'the reading, once the hours are in');
   } finally {
     Date.now = realNow;
   }
 });
 
-test('the forecast cannot be loaded: the map still shows, and the page says so', async () => {
+test('the forecast cannot be loaded: the map still shows, the airport\'s reading still shows, and the page says so', async () => {
   for (const forecast of [{ throws: true }, { ok: false }, { ok: true, badJson: true }, { ok: true, body: { hourly: {} } }]) {
-    const p = await started({ answers: { forecast } });
+    const p = await started({ answers: { forecast }, station: null });
     assert.strictEqual(p.$('wind-line').textContent, 'Wind not available', JSON.stringify(forecast));
     assert.ok(/could not be loaded/.test(p.$('wind-status').textContent));
     assert.strictEqual(p.$('wind-time').disabled, true);
     assert.strictEqual(p.leaflet.made.layers.filter((x) => x.kind === 'polygon').length, 9, 'the hazards are still there');
+    const q = await started({ answers: { forecast } });
+    assert.deepStrictEqual([q.$('wind-line').textContent, q.$('wind-time').disabled, q.run.state.slots.length], ['12 mph from the NW, gusts 19', true, 1]);
+    assert.ok(/could not be loaded/.test(q.$('wind-status').textContent));
   }
 });
 
@@ -868,18 +936,32 @@ test('a refresh keeps the hour you were looking at', async () => {
 // ═════════════════════════════════════════════════════════════════════════════
 section('5. The page\'s markup');
 
-test('a trial: kept out of search engines, says it is a trial, and links back', () => {
-  assert.ok(/<meta name="robots" content="noindex, nofollow"\/>/.test(HTML));
-  assert.ok(/<strong>Trial<\/strong>/.test(HTML) && /href="\.\.\/">Back to roworno\.com</.test(HTML));
+test('the map is on the main page, where the Google embed was; the old trial address sends people to it', () => {
+  assert.ok(!/<iframe[^>]*google\.com\/maps/.test(HTML), 'the Google embed is gone');
+  assert.ok(/id="river-map"/.test(HTML) && HTML.indexOf('id="river-map"') > HTML.indexOf('id="river-content"')
+    && HTML.indexOf('id="river-map"') < HTML.indexOf('Daily Conditions Email'), 'between the river level and the email sign-up, as before');
+  assert.ok(/href="https:\/\/www\.google\.com\/maps\/d\/u\/0\/viewer\?mid=1dNR4qbbp2I8oIZK2ZMMKCNkksLDCXIk"/.test(HTML), 'the committee\'s own map, one tap away');
+  assert.ok(/<meta http-equiv="refresh" content="0; url=\.\.\/#river-map"\/>/.test(TRIAL) && /href="\.\.\/#river-map"/.test(TRIAL));
+  assert.ok(/<meta name="robots" content="noindex, nofollow"\/>/.test(TRIAL));
+  assert.ok(!fs.existsSync(path.join(ROOT, 'trial', 'wind-map.js')) && !fs.existsSync(path.join(ROOT, 'trial', 'hazard-map.json')), 'one copy of each');
+  assert.strictEqual(W.MAP_DATA_URL, 'map/hazard-map.json');
+  assert.ok(fs.existsSync(path.join(ROOT, W.MAP_DATA_URL)));
+});
+
+test('the weather card hands its airport reading to the map', () => {
+  const main = HTML.match(/<script>([\s\S]*)<\/script>\s*<\/body>/)[1];
+  assert.ok(/window\.NHRC_STATION = live \? Object\.assign\(\{ name: WEATHER_STATION\.name, where: WEATHER_STATION\.where \}, live\) : null;/.test(main));
+  assert.ok(/new CustomEvent\('nhrc-station', \{ detail: window\.NHRC_STATION \}\)/.test(main));
 });
 
 test('the credits the data asks for: Open-Meteo by name with a link; map tiles credited on the map', () => {
-  assert.ok(HTML.includes('<a href="https://open-meteo.com/">Weather data by Open-Meteo.com</a>'));
+  assert.ok(/<a href="https:\/\/open-meteo\.com\/"[^>]*>Forecast data by Open-Meteo\.com<\/a>/.test(HTML));
   assert.ok(/OpenStreetMap<\/a> contributors/.test(W.TILES.map.options.attribution));
   assert.ok(/CT State GIS Office/.test(W.TILES.aerial.options.attribution) && /maps\.cteco\.uconn\.edu\/data\/flight2023\//.test(W.TILES.aerial.options.attribution),
     'the state asks to be acknowledged: by name, with the link it gives');
   assert.ok(/USGS The National Map/.test(W.TILES.aerialBackup.options.attribution));
-  assert.ok(/Safety Committee's Google map/.test(HTML));
+  assert.ok(/Safety Committee's map, copied/.test(HTML));
+  assert.ok(/Now is the wind measured at Waterbury-Oxford Airport, on a hilltop 7\.6 mi north\s+of the dock/.test(HTML), 'where now comes from');
   assert.ok(/State of\s+Connecticut's, taken in spring 2023/.test(HTML), 'the page says whose photos, and when');
 });
 
@@ -887,20 +969,27 @@ test('Leaflet is pinned to the exact files, by hash; no keys anywhere', () => {
   assert.ok(HTML.includes('https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="')
     || /leaflet@1\.9\.4\/dist\/leaflet\.js"\s+integrity="sha256-20nQCchB9co0qIjJZRGuk2\/Z9VM\+kNiyxNV1lvTlZBo="/.test(HTML));
   assert.ok(/leaflet@1\.9\.4\/dist\/leaflet\.css"\s+integrity="sha256-p4NxAoJBhIIN\+hmNHrzRCf9tD\/miZyoHS5obTRR9BMY="/.test(HTML));
-  const js = fs.readFileSync(path.join(ROOT, 'trial', 'wind-map.js'), 'utf8');
+  const js = fs.readFileSync(path.join(ROOT, 'map', 'wind-map.js'), 'utf8');
+  assert.ok(/<script id="leaflet-js" src="https:\/\/unpkg\.com\/leaflet@1\.9\.4\/dist\/leaflet\.js"[^>]*\basync\b/.test(HTML)
+    && /<script src="map\/wind-map\.js" async><\/script>/.test(HTML), 'both async: a slow map library cannot hold up the page');
   assert.ok(!/api[_-]?key|apikey|access_token|token=/i.test(HTML + js));
 });
 
 test('every element the script looks for is on the page', () => {
-  for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-course', 'wind-status', 'wind-now', 'map-copied', 'hazard-key']) {
-    assert.ok(HTML.includes(`id="${id}"`), id);
+  for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-source', 'wind-course', 'wind-status', 'wind-now', 'map-copied', 'hazard-key', 'map-tools']) {
+    assert.strictEqual(HTML.split(`id="${id}"`).length, 2, `${id}: once`);
   }
-  assert.ok(HTML.indexOf('leaflet.js') < HTML.indexOf('wind-map.js'), 'Leaflet first');
+  assert.ok(HTML.indexOf('<script id="leaflet-js"') < HTML.indexOf('<script src="map/wind-map.js"'), 'Leaflet first');
+  // The site's main script stays the last one on the page: the email and the tests read it from there.
+  const main = HTML.match(/<script>([\s\S]*)<\/script>\s*<\/body>/)[1];
+  assert.ok(!/<script/.test(main) && /function loadWeatherNow/.test(main));
 });
 
-test('the theme follows the choice made on roworno.com', () => {
+test('the map\'s styles use the site\'s theme, light and dark', () => {
   assert.ok(HTML.includes("localStorage.getItem('nhrc-theme')"));
   assert.ok(/:root\[data-theme="light"\]\{/.test(HTML));
+  assert.ok(/#wind-line\{[^}]*color:var\(--white\)/.test(HTML) && /#wind-time-label\{[^}]*color:var\(--gold\)/.test(HTML));
+  assert.ok(/\.map-status\{[^}]*color:var\(--bad\)/.test(HTML));
 });
 
 // ── Run ──────────────────────────────────────────────────────────────────────

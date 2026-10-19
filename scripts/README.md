@@ -25,22 +25,23 @@ status using the site's own functions and compares against the email output.
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
 | `refresh_checkout.sh` | After the wait, pulls the readings made while the job slept |
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
-| `hazard_map.js` | Copies the Safety Committee's Google map (lanes, hazards, swim areas) into `trial/hazard-map.json` for the map with the wind |
+| `hazard_map.js` | Copies the Safety Committee's Google map (lanes, hazards, swim areas) into `map/hazard-map.json` for the map with the wind |
 | `test_hazard_map.js` | Its tests (17): the real map's KML, colours, the committee's words as plain text, and never replacing a good copy with an error page |
-| `test_trial_map.js` | The trial map page (54 tests): the wind in words, headwind/crosswind/tailwind on the lanes, the 48 hours, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet |
+| `test_map.js` | The hazard map with the wind (57 tests): the wind in words, headwind/crosswind/tailwind on the lanes, now measured and the 48 hours forecast, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet, and the old trial address |
 | `fixtures/hazard_map.kml` | The Google map as exported in October 2026 |
 
-## The hazard map with the wind (trial)
+## The hazard map with the wind
 
-`roworno.com/trial/` shows the club's hazard map with the wind on it, for
-review before it replaces the Google map on the main page. A Google My Map
-cannot show live data, so the page draws the same map itself from
-`trial/hazard-map.json` - a copy of the Google map. The committee keeps
-editing the map in Google; after a change, refresh the copy:
+The main page's River Navigation & Safety Map is the club's hazard map with
+the wind on it (`map/wind-map.js`, with Leaflet). It replaced the embedded
+Google map in October 2026; `roworno.com/trial/`, where it was tried out, now
+sends visitors to it. A Google My Map cannot show live data, so the page draws
+the same map itself from `map/hazard-map.json` - a copy of the Google map. The
+committee keeps editing the map in Google; after a change, refresh the copy:
 
 ```bash
 curl -fsSL -o /tmp/hazard_map.kml 'https://www.google.com/maps/d/kml?mid=1dNR4qbbp2I8oIZK2ZMMKCNkksLDCXIk&forcekml=1'
-node scripts/hazard_map.js /tmp/hazard_map.kml trial/hazard-map.json
+node scripts/hazard_map.js /tmp/hazard_map.kml map/hazard-map.json
 ```
 
 The script refuses anything that is not the club's map (no lanes or no
@@ -61,6 +62,14 @@ The dock is marked with the club's logo (`NHRC_logo.svg`, the site's own
 file). The wind's streaks drift across the whole map (still arrows for
 anyone whose device asks for less motion), and gusts show as some streaks
 running faster and longer.
+
+"Now" on the map is the same measured reading as the weather card's -
+Waterbury-Oxford Airport - which the card hands over when it loads (the
+`nhrc-station` event); the slider's 48 hours ahead are Open-Meteo's forecast
+for the dock, and every hour says which it is. With no current reading, now
+is the forecast's own hour, labelled as one. Leaflet and the map load
+asynchronously: a slow or blocked map library never holds up the rest of
+the page, and the wind is still given in words without it.
 
 ## Rowing season
 

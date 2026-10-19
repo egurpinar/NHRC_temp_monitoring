@@ -1763,7 +1763,7 @@ test('every fog export reaches the email (extraction skips missing names silentl
 test('the airport\'s readings: units, the newest full reading, gusts from its hour, and the NWS quality flags', () => {
   const now = Date.parse('2026-10-19T14:00:00Z');
   const R = (o) => logic.readStation(stationObs(now, o), now);
-  assert.deepStrictEqual(Object.assign({}, R({})), { atMs: now - 5 * 60000, tempF: 59, windMph: 9, dir: 'NW', gustMph: null,
+  assert.deepStrictEqual(Object.assign({}, R({})), { atMs: now - 5 * 60000, tempF: 59, windMph: 9, dir: 'NW', deg: 310, gustMph: null,
     humidity: 71, feelsF: null, cond: 'Mostly Cloudy', code: 3 });
   // Units as sent: °F passes through, m/s and knots are converted, anything else is not guessed at.
   const unit = (key, unitCode, value) => R({ each: (i, p) => { p[key] = { unitCode, value, qualityControl: 'V' }; } });
@@ -1793,7 +1793,8 @@ test('the airport\'s readings: units, the newest full reading, gusts from its ho
   assert.deepStrictEqual([R({ count: 16, each: (i, p) => { if (i < 14) { p.textDescription = ''; p.icon = null; } } }).cond], [null]);
   // Exact conversions, and a calm has no direction.
   assert.deepStrictEqual([R({ windKmh: 100 }).windMph, R({ tempC: -10 }).tempF, R({ tempC: 37 }).tempF], [62, 14, 99]);
-  assert.strictEqual(R({ windKmh: 0, dirDeg: 0 }).dir, null);
+  assert.deepStrictEqual([R({ windKmh: 0, dirDeg: 0 }).dir, R({ windKmh: 0, dirDeg: 0 }).deg], [null, null], 'a calm has no direction');
+  assert.deepStrictEqual([R({ dirDeg: null }).dir, R({ dirDeg: null }).deg], ['variable', null]);
   assert.strictEqual(R({ windKmh: 0.4 }).dir, null, 'under half a mile an hour rounds to calm');
   // Nonsense: nothing, never a crash.
   for (const bad of [null, {}, { features: 'x' }, { features: [null, { properties: { timestamp: 'nope' } }] }]) {

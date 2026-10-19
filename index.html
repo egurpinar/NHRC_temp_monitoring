@@ -29,6 +29,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
 <style>
 /* COLOURS. Two themes, one set of names. The names come from the original
    dark design, which is the dark theme (a few colours brightened for
@@ -269,6 +271,56 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .weather-icon{font-size:38px;line-height:1;}
 .air-temp-val{font-family:var(--fserif);font-size:2.2rem;font-weight:700;color:var(--white);line-height:1;}
 .weather-cond{font-size:.78rem;color:var(--muted);margin-top:3px;}
+/* ── The hazard map with the wind (map/wind-map.js) ── */
+/* isolation: the map's own layers (z-index 400-1000) stay inside it, under the toast. */
+.map-wrap{position:relative;isolation:isolate;border-radius:10px;overflow:hidden;border:1px solid rgba(var(--ink),.08);}
+#hazard-map{height:min(62vh,560px);min-height:340px;background:var(--navy3);}
+/* In its own map pane (z 450): above the lanes, below the hazards and popups. */
+.wind-canvas{position:absolute;left:0;top:0;pointer-events:none;}
+.leaflet-container{font-family:var(--fsans);}
+.wind-badge{display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.94);color:#0d1f3c;border-radius:10px;padding:6px 10px 6px 6px;box-shadow:0 1px 4px rgba(0,0,0,.3);font-size:.78rem;line-height:1.3;max-width:220px;}
+.wind-badge svg{width:38px;height:38px;flex:0 0 38px;}
+.wind-badge .arrow-ring{fill:none;stroke:#c9d3df;stroke-width:2;}
+.wind-badge .arrow-head{fill:#0b3a4a;}
+.wind-badge .arrow-shaft{stroke:#0b3a4a;stroke-width:3;stroke-linecap:round;}
+.wind-badge b{display:block;font-size:.85rem;}
+.wind-badge span{color:#4a5d78;}
+.map-tools{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;}
+.map-tools:empty{display:none;}
+.map-tools .rb,.wind-panel .rb{padding:6px 12px;font-size:.75rem;}
+/* The hazards' pictures: smaller with the whole lake in view, full size close in. Still centred on the spot. */
+.hz-mid .leaflet-marker-icon.hz-icon{width:24px!important;height:24px!important;margin-left:-12px!important;margin-top:-12px!important;}
+.hz-far .leaflet-marker-icon.hz-icon{width:20px!important;height:20px!important;margin-left:-10px!important;margin-top:-10px!important;}
+.map-popup strong{display:block;font-size:.9rem;margin-bottom:2px;}
+.map-popup p{margin:4px 0 0;font-size:.8rem;line-height:1.45;}
+.map-popup .popup-wind{color:#0b3a4a;font-weight:600;}
+.map-status{font-size:.78rem;color:var(--bad);margin-top:8px;}
+.map-status:empty{display:none;}
+.wind-panel{margin-top:14px;}
+.wind-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;}
+#wind-time-label{font-weight:700;color:var(--gold);min-width:4.5em;}
+#wind-line{font-size:1.05rem;font-weight:700;color:var(--white);}
+#wind-conditions{font-size:.82rem;color:var(--muted);margin-top:4px;}
+#wind-source{font-size:.72rem;color:var(--muted);margin-top:2px;line-height:1.45;}
+#wind-course{font-size:.85rem;margin-top:8px;line-height:1.5;color:var(--white);}
+#wind-course:empty,#wind-conditions:empty,#wind-source:empty{display:none;}
+.slider-row{display:flex;align-items:center;gap:10px;margin-top:12px;}
+.slider-row input[type=range]{flex:1;accent-color:var(--gold);min-height:32px;}
+.slider-ends{display:flex;justify-content:space-between;font-size:.68rem;color:var(--muted);margin-top:2px;}
+.map-legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:14px;font-size:.75rem;color:var(--muted);}
+.map-legend span{display:inline-flex;align-items:center;gap:6px;}
+#hazard-key{display:contents;}
+.hz-key img{width:18px;height:18px;display:block;}
+.map-sw{width:14px;height:14px;border-radius:3px;display:inline-block;border:1px solid rgba(var(--ink),.25);}
+.map-dot{width:12px;height:12px;border-radius:50%;display:inline-block;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.35);}
+/* The boathouse: the club's logo on white, in the header's navy and gold rings - clear at every zoom. */
+.leaflet-marker-icon.dock-icon{box-sizing:border-box;padding:5px;background:#fff;border:3px solid #0d1f3c;border-radius:50%;box-shadow:0 0 0 3px #f0b429,0 2px 8px rgba(0,0,0,.55);object-fit:contain;}
+.hz-mid .leaflet-marker-icon.dock-icon{width:48px!important;height:48px!important;margin-left:-24px!important;margin-top:-24px!important;padding:4px;}
+.hz-far .leaflet-marker-icon.dock-icon{width:38px!important;height:38px!important;margin-left:-19px!important;margin-top:-19px!important;padding:3px;border-width:2px;}
+.leaflet-marker-icon.dock-icon:focus-visible{outline:3px solid var(--focus);outline-offset:4px;}
+.key-logo{width:20px;height:20px;box-sizing:border-box;padding:2px;background:#fff;border:1.5px solid #0d1f3c;border-radius:50%;box-shadow:0 0 0 1.5px #f0b429;object-fit:contain;}
+/* The hazards' pictures on the map: a keyboard can reach them too. */
+.leaflet-marker-icon.hz-icon:focus-visible{outline:3px solid var(--focus);outline-offset:1px;border-radius:50%;}
 .weather-feels{font-size:.72rem;color:var(--muted);margin-top:2px;}
 .weather-source{font-size:.7rem;color:var(--muted);margin:-4px 0 10px;line-height:1.45;}
 .weather-missing{font-size:.78rem;color:var(--caution);padding:4px 0 10px;line-height:1.45;}
@@ -520,13 +572,56 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       </div>
     </div>
 
-    <!-- RIVER NAVIGATION & SAFETY MAP -->
-    <div class="river-card">
+    <!-- RIVER NAVIGATION & SAFETY MAP: the Safety Committee's Google map, drawn
+         by the site itself (map/wind-map.js) on the state's aerial photos, with
+         the wind on it. The committee keeps editing the Google map;
+         scripts/hazard_map.js copies it into map/hazard-map.json. -->
+    <div class="river-card" id="river-map">
       <div class="section-label">River Navigation &amp; Safety Map</div>
-      <div style="border-radius:10px;overflow:hidden;border:1px solid rgba(var(--ink),.08);line-height:0;">
-        <iframe src="https://www.google.com/maps/d/u/0/embed?mid=1dNR4qbbp2I8oIZK2ZMMKCNkksLDCXIk&amp;ehbc=2E312F&amp;noprof=1" style="width:100%;height:480px;border:0;display:block;" loading="lazy" allowfullscreen title="NHRC River Navigation and Safety Map"></iframe>
+      <div class="map-wrap">
+        <div id="hazard-map" role="region" aria-label="Map of Lake Housatonic with the lanes, hazards and the wind"></div>
       </div>
-      <div class="note-text">Custom map of navigation hazards, launch points, and safety markers on Lake Housatonic. <a href="https://www.google.com/maps/d/u/0/viewer?mid=1dNR4qbbp2I8oIZK2ZMMKCNkksLDCXIk" target="_blank" style="color:var(--muted);text-decoration:underline;">Open full map in Google Maps</a></div>
+      <div id="map-tools" class="map-tools"></div>
+      <p id="map-status" class="map-status" role="status"></p>
+
+      <div class="wind-panel">
+        <div class="wind-row" aria-live="polite">
+          <span id="wind-time-label">Now</span>
+          <span id="wind-line">Loading the wind&hellip;</span>
+        </div>
+        <div id="wind-conditions"></div>
+        <div id="wind-source"></div>
+        <div id="wind-course"></div>
+        <div class="slider-row">
+          <label for="wind-time" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);">Hour</label>
+          <input type="range" id="wind-time" min="0" max="0" value="0" step="1" disabled/>
+          <button type="button" class="rb" id="wind-now">Now</button>
+        </div>
+        <div class="slider-ends"><span>Now</span><span>48 hours ahead</span></div>
+        <p id="wind-status" class="map-status" role="status"></p>
+      </div>
+
+      <div class="map-legend" aria-label="What the colours mean">
+        <span><i class="map-sw" style="background:rgba(15,157,88,.45);border-color:#0F9D58"></i>Upstream lane</span>
+        <span><i class="map-sw" style="background:rgba(230,81,0,.45);border-color:#E65100"></i>Downstream lane</span>
+        <span><i class="map-dot" style="background:#E65100"></i>Orange: do not row / danger</span>
+        <span><i class="map-dot" style="background:#FFD600"></i>Yellow: caution</span>
+        <span id="hazard-key"></span>
+        <span><img class="key-logo" src="NHRC_logo.svg" alt=""/>NHRC boathouse dock</span>
+      </div>
+
+      <div class="note-text">
+        The lanes and hazards are the Safety Committee's map, copied <span id="map-copied">recently</span>
+        and drawn exactly where the committee placed them; tap any of them for its note
+        (<a href="https://www.google.com/maps/d/u/0/viewer?mid=1dNR4qbbp2I8oIZK2ZMMKCNkksLDCXIk" target="_blank" rel="noopener" style="color:var(--muted);text-decoration:underline;">the committee's map in Google Maps</a>).
+        The photos are the State of Connecticut's, taken in spring 2023 before the leaves came out: 3-inch detail,
+        accurate to about 4 inches. Now is the wind measured at Waterbury-Oxford Airport, on a hilltop 7.6 mi north
+        of the dock, where it usually blows harder than on the river. The hours ahead are a forecast for the dock,
+        one for the whole lake: the banks shelter some stretches, and gusts vary. The streaks drift with the wind
+        across the map; the longer, faster ones are the gusts. Headwind, crosswind and tailwind are worked out from
+        the direction of each stretch of the lanes.
+        <a href="https://open-meteo.com/" target="_blank" rel="noopener" style="color:var(--muted);text-decoration:underline;">Forecast data by Open-Meteo.com</a>.
+      </div>
     </div>
 
     <!-- DAILY CONDITIONS EMAIL SUBSCRIBE -->
@@ -603,6 +698,12 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 </div>
 <div id="toast"></div>
 
+<!-- The map: Leaflet pinned by hash, then the site's own map script. Both async:
+     a slow or blocked map library never holds up the rest of the page. -->
+<script id="leaflet-js" src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" async
+        onerror="this.dataset.failed='1'"></script>
+<script src="map/wind-map.js" async></script>
 <script>
 // ─────────────────────────────────────────────────────────────────────────
 // MANUAL ZONE OVERRIDE — Safety Committee use only
@@ -2080,10 +2181,11 @@ function nwsWmo(iconUrl) {
 }
 /**
  * The station's latest reading from an NWS observations answer: { atMs, tempF,
- * windMph, dir, gustMph, humidity, feelsF, cond, code }. Temperature and wind
+ * windMph, dir, deg, gustMph, humidity, feelsF, cond, code }. Temperature and wind
  * come from the newest observation that has both; the sky from the newest in
  * the hour before it that describes it; gusts are the highest reported in that
- * hour (null: none). dir is null in a calm, 'variable' when it shifts about.
+ * hour (null: none). dir is null in a calm, 'variable' when it shifts about;
+ * deg is where it blows from, in degrees, null in either.
  * Null when nothing usable came back; { stale: true, atMs } when the newest
  * usable reading is more than 2 hours old. Values the NWS quality checks
  * failed or questioned are left out.
@@ -2118,6 +2220,7 @@ function readStation(json, nowMs) {
   return {
     atMs: cur.t, tempF, windMph,
     dir: windMph === 0 ? null : deg === null ? 'variable' : windDirLabel(deg),
+    deg: windMph === 0 ? null : deg,
     gustMph: gusts.length ? Math.round(Math.max(...gusts)) : null,
     humidity: rh === null ? null : Math.round(rh),
     feelsF: feels !== null && Math.round(feels) !== tempF ? Math.round(feels) : null,
@@ -2302,6 +2405,14 @@ async function loadWeatherNow() {
   const data = fc.status === 'fulfilled' ? fc.value : null;
   const live = reading && !reading.stale ? reading : null;
   state.station = live;
+  // The map shows the same reading as its "now" (map/wind-map.js). The map is
+  // extra: nothing here may stop the weather card.
+  try {
+    window.NHRC_STATION = live ? Object.assign({ name: WEATHER_STATION.name, where: WEATHER_STATION.where }, live) : null;
+    if (typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('nhrc-station', { detail: window.NHRC_STATION }));
+    }
+  } catch (e) { /* no map */ }
   try {
     // Open-Meteo returns daily times already converted to the requested
     // timezone and WITHOUT an offset ("2026-08-07T05:52"). Parsing those with

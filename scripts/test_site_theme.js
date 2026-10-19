@@ -149,10 +149,12 @@ test('no dark-only colour is written into the page outside the palette', () => {
   const body = html.slice(html.indexOf('<body>'));
   // Allowed on purpose: the logo (on its own white disc), the Subscribe button
   // (the club's gold and navy in both themes), the backup badge (over the
-  // photo), and the charts' fallbacks if the CSS cannot be read (the dark values).
+  // photo), the map's wind badge and markers (over the aerial photos, the same
+  // in both themes), and the charts' fallbacks if the CSS cannot be read (the
+  // dark values).
   const fallbacks = body.slice(body.indexOf('function chartColors()'), body.indexOf('function restyleCharts()'));
   const scan = (css + body.replace(fallbacks, ''))
-    .split('\n').filter(l => !/header-logo-wrap|camera-badge|background:#f0b429;color:#0d1f3c|rgba\(255,209,102,\.6\)|rgba\(255,209,102,0\.15\)/.test(l)).join('\n');
+    .split('\n').filter(l => !/header-logo-wrap|camera-badge|^\.wind-badge\{|^\.map-dot\{|^\.leaflet-marker-icon\.dock-icon\{|background:#f0b429;color:#0d1f3c|rgba\(255,209,102,\.6\)|rgba\(255,209,102,0\.15\)/.test(l)).join('\n');
   const DARK_ONLY = ['#f07070', '#ffd166', '#5cc98a', '#f0a450', '#7a93b4', '#b0c4de', '#5ba4e0', '#162d52', '#1e3d6e', '#f4f7fb',
     'rgba(255,255,255', 'rgba(0,0,0', 'background:#f0b429', 'color:#f0b429'];
   const found = DARK_ONLY.filter(c => scan.includes(c)).map(c => {

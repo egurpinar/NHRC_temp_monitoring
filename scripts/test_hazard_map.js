@@ -18,7 +18,7 @@ const path = require('path');
 const H = require('./hazard_map');
 
 const KML = fs.readFileSync(path.join(__dirname, 'fixtures', 'hazard_map.kml'), 'utf8');
-const TRIAL_JSON = path.join(__dirname, '..', 'trial', 'hazard-map.json');
+const MAP_JSON = path.join(__dirname, '..', 'map', 'hazard-map.json');
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -144,9 +144,9 @@ test('the JSON reads back as the same map, one feature a line', () => {
   assert.ok(json.length < 20000, `small: ${json.length} bytes`);
 });
 
-test('the trial page\'s copy is exactly what this script makes from the KML', () => {
-  const page = JSON.parse(fs.readFileSync(TRIAL_JSON, 'utf8'));
-  assert.deepStrictEqual(page, H.kmlToMap(KML, { copied: page.copied }), 'regenerate it: node scripts/hazard_map.js scripts/fixtures/hazard_map.kml trial/hazard-map.json');
+test('the map\'s copy is exactly what this script makes from the KML', () => {
+  const page = JSON.parse(fs.readFileSync(MAP_JSON, 'utf8'));
+  assert.deepStrictEqual(page, H.kmlToMap(KML, { copied: page.copied }), 'regenerate it: node scripts/hazard_map.js scripts/fixtures/hazard_map.kml map/hazard-map.json');
   assert.ok(/^\d{4}-\d\d-\d\d$/.test(page.copied));
 });
 

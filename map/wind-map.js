@@ -1,15 +1,18 @@
 /**
- * The club's hazard map with the wind on it (trial).
+ * The club's hazard map with the wind on it, on roworno.com.
  *
  * The lanes, hazards and swim areas come from the Safety Committee's Google
- * map ("Lake Housatonic Navigation"), copied into hazard-map.json by
+ * map ("Lake Housatonic Navigation"), copied into map/hazard-map.json by
  * scripts/hazard_map.js - a Google My Map cannot show live data, so the site
- * draws the same map itself. The wind is Open-Meteo's forecast for the
- * boathouse dock: one forecast for the whole lake, now and for the next 48
- * hours. No thresholds, no verdicts: the wind, and how it lies on the course.
+ * draws the same map itself. Now is the wind measured at Waterbury-Oxford
+ * Airport, which the page's weather card loads and hands over (the
+ * 'nhrc-station' event); the 48 hours ahead are Open-Meteo's forecast for the
+ * boathouse dock, one forecast for the whole lake, and say so. No model
+ * output is ever shown as now. No thresholds, no verdicts: the wind, and how
+ * it lies on the course.
  *
  * In a browser this file starts itself. In Node it only exports its pieces,
- * for scripts/test_trial_map.js.
+ * for scripts/test_map.js.
  */
 (function (root) {
   'use strict';
@@ -17,17 +20,16 @@
   // ── Settings ───────────────────────────────────────────────────────────────
   const DOCK = { lat: 41.3685422, lon: -73.1478128 };   // the NHRC dock, as the club gave it
   /** The club's logo (the site's own file), for the dock. */
-  const LOGO_URL = '../NHRC_logo.svg';
+  const LOGO_URL = 'NHRC_logo.svg';
   // The rowable lake, from the shallows above the boathouse to the power lines
   // above the Derby dam: the first view, until the map's own outline arrives.
   const LAKE_BOUNDS = [[41.3262, -73.1565], [41.3770, -73.1035]];
   const TZ = 'America/New_York';
   const HOURS_AHEAD = 48;
   const REFRESH_MS = 15 * 60 * 1000;
-  const MAP_DATA_URL = 'hazard-map.json';
+  const MAP_DATA_URL = 'map/hazard-map.json';
   const FORECAST_URL = 'https://api.open-meteo.com/v1/forecast'
     + `?latitude=${DOCK.lat}&longitude=${DOCK.lon}`
-    + '&current=temperature_2m,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m'
     + '&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m'
     + '&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=America%2FNew_York&timeformat=unixtime&forecast_days=3';
   // The map opens on the State of Connecticut's aerial photos from spring 2023:
@@ -45,6 +47,8 @@
   };
   /** State photos that fail before any has loaded: the server is down, use the USGS photos. */
   const PHOTO_FAILS = 3;
+  /** A measured reading older than this is not "now". */
+  const STATION_MAX_AGE_MS = 2 * 3600 * 1000;
   /** Popups narrow enough to fit a phone's map with room to spare. */
   const POPUP = { maxWidth: 240, autoPanPadding: [12, 12] };
   /** The still arrows (less motion asked for): one every this many pixels, all over the map. */
@@ -135,8 +139,11 @@
   }
 
   /**
-   * Open-Meteo's answer -> [now, then each of the next 48 hours]: { t, label,
-   * speed, gust, from, temp, rain, code }. Missing values stay null - never 0.
+   * Open-Meteo's answer -> [this hour, then each of the next 48 hours]: { t,
+   * label, speed, gust, from, temp, rain, code, forecast: true }. Missing
+   * values stay null - never 0. All forecasts: the model's own "current"
+   * values are never asked for, and the airport's measured reading takes this
+   * hour's place when there is one (withStation).
    */
   function forecastSlots(fc, nowMs) {
     const h = fc && fc.hourly;
@@ -144,23 +151,54 @@
     const at = (key, i) => (Array.isArray(h[key]) && num(h[key][i]) ? h[key][i] : null);
     let i0 = -1;
     h.time.forEach((t, i) => { if (num(t) && t * 1000 <= nowMs) i0 = i; });
-    const hourSlot = (i) => ({ t: h.time[i] * 1000, speed: at('wind_speed_10m', i), gust: at('wind_gusts_10m', i),
-      from: at('wind_direction_10m', i), temp: at('temperature_2m', i), rain: at('precipitation_probability', i), code: at('weather_code', i) });
+    if (i0 < 0) return [];
     const out = [];
-    const c = fc.current || {};
-    if (num(c.wind_speed_10m) && num(c.wind_direction_10m)) {
-      out.push({ t: num(c.time) ? c.time * 1000 : nowMs, speed: c.wind_speed_10m, gust: num(c.wind_gusts_10m) ? c.wind_gusts_10m : null,
-        from: c.wind_direction_10m, temp: num(c.temperature_2m) ? c.temperature_2m : null,
-        rain: i0 >= 0 ? at('precipitation_probability', i0) : null, code: num(c.weather_code) ? c.weather_code : null });
-    } else if (i0 >= 0) {
-      out.push(hourSlot(i0));
-    }
-    if (out.length) out[0].isNow = true;
-    for (let k = 1; k <= HOURS_AHEAD && i0 + k < h.time.length; k++) {
-      if (num(h.time[i0 + k])) out.push(hourSlot(i0 + k));
+    for (let k = 0; k <= HOURS_AHEAD && i0 + k < h.time.length; k++) {
+      const i = i0 + k;
+      if (!num(h.time[i])) continue;
+      out.push({ t: h.time[i] * 1000, speed: at('wind_speed_10m', i), gust: at('wind_gusts_10m', i),
+        from: at('wind_direction_10m', i), temp: at('temperature_2m', i), rain: at('precipitation_probability', i),
+        code: at('weather_code', i), forecast: true, isNow: k === 0 });
     }
     out.forEach((s) => { s.label = slotLabel(s.t, s.isNow); });
     return out;
+  }
+
+  /**
+   * The airport's measured reading - from the page's weather card - as now, in
+   * front of the forecast hours, when it is under 2 hours old. Otherwise the
+   * forecast's own hour stays, labelled a forecast. `station`: { atMs, tempF,
+   * windMph, deg, gustMph, code, cond, name, where }.
+   */
+  function withStation(slots, station, nowMs) {
+    const st = station;
+    if (!st || !num(st.atMs) || !num(st.tempF) || !num(st.windMph) || nowMs - st.atMs > STATION_MAX_AGE_MS) return slots;
+    const now = {
+      t: st.atMs, label: 'Now', isNow: true, measured: true,
+      speed: st.windMph, gust: num(st.gustMph) ? st.gustMph : null, from: num(st.deg) && st.windMph > 0 ? st.deg : null,
+      temp: st.tempF, rain: null, code: num(st.code) ? st.code : null,
+      cond: typeof st.cond === 'string' && st.cond.trim() ? st.cond.trim() : null,
+      station: typeof st.name === 'string' && st.name ? st.name : 'the airport',
+      where: typeof st.where === 'string' ? st.where : '',
+    };
+    return [now].concat(slots.slice(slots.length && slots[0].isNow ? 1 : 0));
+  }
+
+  /** "6:05 AM", in the boathouse's time. */
+  const clock = (ms) => new Intl.DateTimeFormat('en-US', { timeZone: TZ, hour: 'numeric', minute: '2-digit' }).format(new Date(ms));
+
+  /** What an hour is called where there is room: "Now, measured at the airport", "Sun 7 AM (forecast)". */
+  function slotName(s) {
+    if (!s) return '';
+    if (s.measured) return 'Now, measured at the airport';
+    return s.isNow ? 'Now (forecast)' : `${s.label} (forecast)`;
+  }
+
+  /** Where an hour's numbers come from. */
+  function sourceText(s) {
+    if (!s) return '';
+    if (s.measured) return `Measured at ${s.station}${s.where ? `, ${s.where}` : ''}, at ${clock(s.t)}.`;
+    return 'Forecast for the dock, from weather models.';
   }
 
   /** "12 mph from the NW, gusts 20" - or "Calm", or "Wind not available". */
@@ -171,12 +209,13 @@
     const gust = num(s.gust) && Math.round(s.gust) > mph ? `, gusts ${Math.round(s.gust)}` : '';
     return num(s.from) ? `${mph} mph from the ${compass(s.from)}${gust}` : `${mph} mph${gust}`;
   }
-  /** "54°F · Partly cloudy · 10% chance of rain" */
+  /** "54°F · Partly cloudy · 10% chance of rain" - for a measured hour, the station's own words for the sky. */
   function conditionsText(s) {
     if (!s) return '';
     const parts = [];
     if (num(s.temp)) parts.push(`${Math.round(s.temp)}°F`);
-    if (condition(s.code)) parts.push(condition(s.code));
+    const sky = s.cond || condition(s.code);
+    if (sky) parts.push(sky);
     if (num(s.rain)) parts.push(`${Math.round(s.rain)}% chance of rain`);
     return parts.join(' · ');
   }
@@ -523,13 +562,14 @@
   function init(env) {
     const doc = env.document, win = env.window, L = env.L;
     const $ = (id) => doc.getElementById(id);
-    const state = { slots: [], index: 0, lanes: [], fetchedAt: 0, tried: false, map: null, wind: null, badge: null, base: 'aerial',
-      photos: 'state', tabVisible: doc.visibilityState !== 'hidden', onScreen: true };
+    const state = { slots: [], fcSlots: [], station: win.NHRC_STATION || null, index: 0, lanes: [], fetchedAt: 0, tried: false,
+      map: null, wind: null, badge: null, base: 'aerial', photos: 'state', tabVisible: doc.visibilityState !== 'hidden', onScreen: true };
     // The streaks move only while someone can see them: the tab open and the map on screen.
     const seen = () => { if (state.wind) state.wind.setVisible(state.tabVisible && state.onScreen); };
 
     const slider = $('wind-time'), timeLabel = $('wind-time-label'), windLine = $('wind-line'),
-      condLine = $('wind-conditions'), courseLine = $('wind-course'), status = $('wind-status'), mapStatus = $('map-status');
+      condLine = $('wind-conditions'), sourceLine = $('wind-source'), courseLine = $('wind-course'),
+      status = $('wind-status'), mapStatus = $('map-status');
 
     function popupFor(f, lane) {
       const box = el(doc, 'div', 'map-popup');
@@ -538,7 +578,7 @@
       if (lane) {
         const s = state.slots[state.index];
         const words = laneText(s, lane);
-        if (words) box.appendChild(el(doc, 'p', 'popup-wind', `${s.label}: ${windText(s)}. ${words}`));
+        if (words) box.appendChild(el(doc, 'p', 'popup-wind', `${slotName(s)}: ${windText(s)}. ${words}`));
       }
       return box;
     }
@@ -549,14 +589,15 @@
       if (timeLabel) timeLabel.textContent = s ? s.label : '';
       if (windLine) windLine.textContent = windText(s);
       if (condLine) condLine.textContent = conditionsText(s);
+      if (sourceLine) sourceLine.textContent = sourceText(s);
       if (courseLine) courseLine.textContent = courseText(s, state.lanes);
-      if (slider && s) slider.setAttribute('aria-valuetext', `${s.label}: ${windText(s)}`);
+      if (slider && s) slider.setAttribute('aria-valuetext', `${slotName(s)}: ${windText(s)}`);
       if (state.badge) {
         state.badge.textContent = '';
         state.badge.appendChild(arrowSvg(doc, isCalm(s) ? null : s.from));
         const words = el(doc, 'div', 'badge-words');
         words.appendChild(el(doc, 'b', '', windText(s)));
-        words.appendChild(el(doc, 'span', '', s ? s.label : ''));
+        words.appendChild(el(doc, 'span', '', slotName(s)));
         state.badge.appendChild(words);
       }
       if (state.wind) state.wind.set(s ? s.speed : null, s ? s.from : null, s ? s.gust : null);
@@ -576,6 +617,9 @@
       showSlot();
     }
 
+    // The hours to show: the forecast, with the airport's reading as now when there is one.
+    const refreshSlots = () => setSlots(withStation(state.fcSlots, state.station, Date.now()));
+
     async function loadForecast() {
       try {
         const r = await env.fetch(FORECAST_URL);
@@ -584,15 +628,23 @@
         if (!slots.length) throw new Error('no forecast in the answer');
         state.fetchedAt = Date.now();
         state.tried = true;
+        state.fcSlots = slots;
         if (status) status.textContent = '';
-        setSlots(slots);
+        refreshSlots();
       } catch (e) {
         state.tried = true;
-        if (!state.slots.length) {
-          setSlots([]);
+        if (!state.fcSlots.length) {
+          refreshSlots();
           if (status) status.textContent = 'The wind forecast could not be loaded. It is tried again every 15 minutes.';
         }
       }
+    }
+    // The weather card hands over each new airport reading.
+    if (win.addEventListener) {
+      win.addEventListener('nhrc-station', (e) => {
+        state.station = (e && e.detail) || null;
+        if (state.tried) refreshSlots();
+      });
     }
 
     async function loadMapData() {
@@ -757,7 +809,7 @@
     DOCK, LOGO_URL, LAKE_BOUNDS, TZ, HOURS_AHEAD, FORECAST_URL, MAP_DATA_URL, TILES, PHOTO_FAILS, POPUP, REFRESH_MS,
     hazardKind, KIND_WORDS, KIND_ORDER, GLYPHS, glyphColor, iconSvg, iconUrl, areaMiddle, ARROW_STEP,
     compass, bearing, distance, angleBetween, windOnBoat, laneEdge, windShares, mostlyText, slotLabel,
-    forecastSlots, windText, conditionsText, arrowRotation, isCalm, courseText, laneText, laneDirection,
+    forecastSlots, withStation, slotName, sourceText, STATION_MAX_AGE_MS, windText, conditionsText, arrowRotation, isCalm, courseText, laneText, laneDirection,
     drawHazards, createWindLayer, arrowSvg, init,
   };
   if (typeof module !== 'undefined' && module.exports) {
@@ -772,7 +824,19 @@
         if (s) s.textContent = 'The map could not be started. Reload the page to try again.';
       }
     };
-    if (root.document.readyState === 'loading') root.document.addEventListener('DOMContentLoaded', go);
-    else go();
+    const start = () => {
+      if (root.document.readyState === 'loading') root.document.addEventListener('DOMContentLoaded', go);
+      else go();
+    };
+    start.once = (() => { let done = false; return () => { if (!done) { done = true; start(); } }; })();
+    // Leaflet loads on its own (async), so it may still be on its way: wait for
+    // it - or for its failure, after which the wind is still given in words.
+    const tag = root.document.getElementById('leaflet-js');
+    if (root.L || !tag || (tag.dataset && tag.dataset.failed)) start.once();
+    else {
+      tag.addEventListener('load', start.once);
+      tag.addEventListener('error', start.once);
+      root.setTimeout(start.once, 20000);
+    }
   }
 })(typeof window !== 'undefined' ? window : globalThis);
