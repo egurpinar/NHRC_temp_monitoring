@@ -27,7 +27,7 @@ status using the site's own functions and compares against the email output.
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
 | `hazard_map.js` | Copies the Safety Committee's Google map (lanes, hazards, swim areas) into `map/hazard-map.json` for the map with the wind |
 | `test_hazard_map.js` | Its tests (17): the real map's KML, colours, the committee's words as plain text, and never replacing a good copy with an error page |
-| `test_map.js` | The hazard map with the wind (57 tests): the wind in words, headwind/crosswind/tailwind on the lanes, now measured and the 48 hours forecast, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet, and the old trial address |
+| `test_map.js` | The hazard map with the wind (59 tests): the wind in words, headwind/crosswind/tailwind on the lanes, now measured and the 48 hours forecast, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet, and the old trial address |
 | `fixtures/hazard_map.kml` | The Google map as exported in October 2026 |
 
 ## The hazard map with the wind

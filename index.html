@@ -699,11 +699,14 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 <div id="toast"></div>
 
 <!-- The map: Leaflet pinned by hash, then the site's own map script. Both async:
-     a slow or blocked map library never holds up the rest of the page. -->
+     a slow or blocked map library never holds up the rest of the page. The ?v=
+     is the start of the script's SHA-256, so a browser holding the old copy
+     (GitHub Pages lets them keep it 10 minutes) fetches the new one at once;
+     scripts/test_map.js says the right value after any change. -->
 <script id="leaflet-js" src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" async
         onerror="this.dataset.failed='1'"></script>
-<script src="map/wind-map.js" async></script>
+<script src="map/wind-map.js?v=c0711caa52" async></script>
 <script>
 // ─────────────────────────────────────────────────────────────────────────
 // MANUAL ZONE OVERRIDE — Safety Committee use only

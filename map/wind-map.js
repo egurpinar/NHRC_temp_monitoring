@@ -685,19 +685,24 @@
     // The page scrolls past the map: the wheel does not zoom it (the buttons do).
     // The lake runs from top left to bottom right, so the map's own controls
     // sit top right, over land; the other buttons are below the map.
-    const map = L.map(mapBox, { zoomSnap: 0.5, scrollWheelZoom: false, zoomControl: false });
+    // The map has a view from the start - the middle of the lake - so Leaflet
+    // treats it as ready, and invalidateSize() always measures it afresh. Before
+    // a map has a view, Leaflet keeps the first size anything measured - 0 x 0
+    // while the page's cards are still hidden - and the map stayed blank, or
+    // loaded only a few tiles (October 2026).
+    const map = L.map(mapBox, { zoomSnap: 0.5, scrollWheelZoom: false, zoomControl: false,
+      center: [(LAKE_BOUNDS[0][0] + LAKE_BOUNDS[1][0]) / 2, (LAKE_BOUNDS[0][1] + LAKE_BOUNDS[1][1]) / 2], zoom: 13 });
     state.map = map;
     const FIT = { paddingTopLeft: [20, 20], paddingBottomRight: [20, 34] };   // clear of the credits line
     // The whole lake in view. A map with no size yet would zoom all the way in on
-    // the middle of the lake - the woods by the river - so it waits until it has
-    // one. On roworno.com it often has none at first: the page shows its cards
+    // the middle of the lake - the woods by the river - so it waits until its box
+    // has one. On roworno.com it often has none at first: the page shows its cards
     // only once the first water reading is in, and a tab opened in the background
-    // has no layout. The size asked is the box's own: asked before the map has a
-    // view, Leaflet keeps the 0 x 0 it measured - even after invalidateSize() -
-    // and the map stays blank (October 2026).
+    // has no layout. Then Leaflet measures the box as it is now, and fits.
     const fitLake = () => {
       if (!(mapBox.clientWidth > 0 && mapBox.clientHeight > 0)) { state.fitPending = true; return; }
       state.fitPending = false;
+      map.invalidateSize();
       map.fitBounds(state.bounds || LAKE_BOUNDS, FIT);
     };
     fitLake();

@@ -774,17 +774,23 @@ test('a map with no size yet waits to show the whole lake - and shows it once it
   const realMap = env.leaflet.map;
   env.leaflet.map = (...a) => {
     const m = realMap(...a);
+    const o = a[1] || {};
     let measured = null, stale = false;
+    const ready = () => !!(o.center && o.zoom !== undefined) || m.views.length > 0;
     m.getSize = () => { if (!measured || stale) { measured = { x: size.x, y: size.y }; stale = false; } return measured; };
-    m.invalidateSize = () => { if (m.views.length) stale = true; return m; };
+    m.invalidateSize = () => { if (ready()) stale = true; return m; };
     const fit = m.fitBounds.bind(m);
-    m.fitBounds = (b, o) => { const z = m.getSize(); m.fittedAt = [z.x, z.y]; return fit(b, o); };
+    m.fitBounds = (b, fo) => { const z = m.getSize(); m.fittedAt = [z.x, z.y]; return fit(b, fo); };
     return m;
   };
   const realNow = Date.now;
   Date.now = () => NOW;
   let run;
   try { run = W.init(env); await run.forecast; await run.drawn; } finally { Date.now = realNow; }
+  assert.ok(run.map.o.center && run.map.o.zoom === 13, 'a view from the start, so Leaflet measures afresh when asked');
+  // Anything at all measuring the map while its box is hidden - a tile layer,
+  // a control: Leaflet would keep that 0 x 0.
+  run.map.getSize();
   assert.deepStrictEqual(run.map.views, [], 'no fit while the map has no size');
   assert.strictEqual(run.state.fitPending, true);
   size = { x: 400, y: 300 };
@@ -794,6 +800,34 @@ test('a map with no size yet waits to show the whole lake - and shows it once it
   assert.notStrictEqual(run.map.views[0][1], W.LAKE_BOUNDS, 'the map\'s own outline, which has arrived');
   resized([]);
   assert.strictEqual(run.map.views.length, 1, 'and only once: a later resize keeps where you are');
+});
+
+test('"Whole lake" measures the box as it is now - even before the page has said it changed size', async () => {
+  const env = fakeEnv();
+  env.window.ResizeObserver = function () { this.observe = () => {}; };      // its call has not come yet
+  let size = { x: 0, y: 0 };
+  const box = env.document.byId['hazard-map'];
+  Object.defineProperty(box, 'clientWidth', { get: () => size.x });
+  Object.defineProperty(box, 'clientHeight', { get: () => size.y });
+  const realMap = env.leaflet.map;
+  env.leaflet.map = (...a) => {
+    const m = realMap(...a);
+    const o = a[1] || {};
+    let measured = null, stale = false;
+    m.getSize = () => { if (!measured || stale) { measured = { x: size.x, y: size.y }; stale = false; } return measured; };
+    m.invalidateSize = () => { if ((o.center && o.zoom !== undefined) || m.views.length) stale = true; return m; };
+    const fit = m.fitBounds.bind(m);
+    m.fitBounds = (b, fo) => { const z = m.getSize(); m.fittedAt = [z.x, z.y]; return fit(b, fo); };
+    return m;
+  };
+  const realNow = Date.now;
+  Date.now = () => NOW;
+  let run;
+  try { run = W.init(env); await run.forecast; await run.drawn; } finally { Date.now = realNow; }
+  run.map.getSize();                                                   // measured while hidden: 0 x 0
+  size = { x: 400, y: 300 };
+  env.document.byId['map-tools'].children[1].click();                  // Whole lake
+  assert.deepStrictEqual([run.map.views.length, run.map.fittedAt], [1, [400, 300]]);
 });
 
 test('every corner is drawn where the committee put it: the lanes are not smoothed', async () => {
@@ -988,15 +1022,21 @@ test('Leaflet is pinned to the exact files, by hash; no keys anywhere', () => {
   assert.ok(/leaflet@1\.9\.4\/dist\/leaflet\.css"\s+integrity="sha256-p4NxAoJBhIIN\+hmNHrzRCf9tD\/miZyoHS5obTRR9BMY="/.test(HTML));
   const js = fs.readFileSync(path.join(ROOT, 'map', 'wind-map.js'), 'utf8');
   assert.ok(/<script id="leaflet-js" src="https:\/\/unpkg\.com\/leaflet@1\.9\.4\/dist\/leaflet\.js"[^>]*\basync\b/.test(HTML)
-    && /<script src="map\/wind-map\.js" async><\/script>/.test(HTML), 'both async: a slow map library cannot hold up the page');
+    && /<script src="map\/wind-map\.js\?v=[0-9a-f]{10}" async><\/script>/.test(HTML), 'both async: a slow map library cannot hold up the page');
   assert.ok(!/api[_-]?key|apikey|access_token|token=/i.test(HTML + js));
+});
+
+test('the page asks for this very version of the map script, so no browser keeps running an old one', () => {
+  const hash = require('crypto').createHash('sha256').update(fs.readFileSync(path.join(ROOT, 'map', 'wind-map.js'))).digest('hex').slice(0, 10);
+  assert.ok(HTML.includes(`<script src="map/wind-map.js?v=${hash}" async></script>`),
+    `map/wind-map.js has changed: in index.html, load it as map/wind-map.js?v=${hash}`);
 });
 
 test('every element the script looks for is on the page', () => {
   for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-source', 'wind-course', 'wind-status', 'wind-now', 'map-copied', 'hazard-key', 'map-tools']) {
     assert.strictEqual(HTML.split(`id="${id}"`).length, 2, `${id}: once`);
   }
-  assert.ok(HTML.indexOf('<script id="leaflet-js"') < HTML.indexOf('<script src="map/wind-map.js"'), 'Leaflet first');
+  assert.ok(HTML.indexOf('<script id="leaflet-js"') < HTML.indexOf('<script src="map/wind-map.js?v='), 'Leaflet first');
   // The site's main script stays the last one on the page: the email and the tests read it from there.
   const main = HTML.match(/<script>([\s\S]*)<\/script>\s*<\/body>/)[1];
   assert.ok(!/<script/.test(main) && /function loadWeatherNow/.test(main));
