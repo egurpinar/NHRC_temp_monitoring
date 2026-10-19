@@ -2308,7 +2308,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     Intl, Date: FixedDate, Math, JSON, isNaN, parseInt, parseFloat, Number, Array, Object, String,
   };
   const ctx = vmT.createContext(sandbox);
-  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, getEffectiveLevel, morningsNeeded, wind24, renderWind24, smoothPath, renderFogOutlook, renderFloodGrid, renderDashboard,' +
+  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, getEffectiveLevel, morningsNeeded, wind24, renderWind24, wireWind24, smoothPath, renderFogOutlook, renderFloodGrid, renderDashboard,' +
     ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData,' +
     ' loadData, loadHistory, refreshAll, loadFogOutlook, loadCameraSnapshot, historyNeedsRefresh, pickRiverLevel,' +
     ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraBackupAsleep,' +
@@ -2720,7 +2720,9 @@ test('wind, next 24 hours: one smooth line through the hours, the gusts dashed a
     'each the speed of the hour it sits under');
   assert.ok(/Strongest 14 mph, gusts 20 around \d+ [AP]M/.test(html), html.match(/w24-peak">[^<]*/)[0]);
   assert.ok(/aria-label="Wind forecast for the dock, next 24 hours: 5 to 14 mph, gusts up to 20\. Strongest 14 mph, gusts 20 around \d+ [AP]M, from the NW\."/.test(html));
-  assert.ok(/Forecast for the dock from weather models, in mph: the line is the wind, the dashed line the gusts/.test(html), 'a forecast, and which line is which');
+  assert.ok(!/w24-key|the dashed line the gusts/.test(html), 'no sentence explaining the drawing');
+  assert.ok(/<div class="w24-legend" aria-hidden="true">\s*<span><svg[^>]*><line class="lw"[^>]*\/><\/svg>Wind<\/span>\s*<span><svg[^>]*><line class="lg"[^>]*\/><\/svg>Gust<\/span>/.test(html),
+    'a small legend: the line is the wind, the dashed line the gusts');
   assert.ok(/<span class="wk">Wind forecast, next 24 hours<\/span>/.test(html));
   assert.ok(new RegExp('around ' + '\\d+' + '\u00a0[AP]M').test(site.renderWind24(site.wind24(windDays(), now))),
     'the hour and its AM/PM never split across lines');
@@ -2741,7 +2743,8 @@ test('wind, next 24 hours: a missing hour is bridged, calm shows circles, no gus
   // No speed for the current hour: the dot goes on the first hour that has one.
   const late0 = windDays(); late0.hourly.wind_speed_10m[20] = null;
   assert.ok(/class="w24-now" style="left:6\.25%;top:67\.24%"/.test(site.renderWind24(site.wind24(late0, now))));
-  assert.ok(!/NaN|undefined|null|Infinity/.test(gh));
+  assert.ok(!/NaN|undefined|null|Infinity/.test(gh.replace(/data-hours="[^"]*"/, '')), 'nothing broken in what is drawn');
+  assert.strictEqual(JSON.parse(gh.match(/data-hours="([^"]*)"/)[1])[4][1], null, 'the missing hour stays missing for pointing at too');
   // Calm all day: circles, not arrows that point nowhere.
   const calm = windDays(); calm.hourly.wind_speed_10m = calm.hourly.wind_speed_10m.map(() => 0.2); calm.hourly.wind_gusts_10m = calm.hourly.wind_gusts_10m.map(() => 1);
   const ch = site.renderWind24(site.wind24(calm, now));
@@ -2750,7 +2753,7 @@ test('wind, next 24 hours: a missing hour is bridged, calm shows circles, no gus
   // No gusts in the forecast: just the wind line, and no gusts in the words.
   const still = windDays(); still.hourly.wind_gusts_10m = still.hourly.wind_gusts_10m.map(() => null);
   const sh = site.renderWind24(site.wind24(still, now));
-  assert.ok(w24Paths(sh).line && !/w24-gline/.test(sh) && !/gusts/.test(sh.replace(/w24-key">[^<]*/, '')), sh);
+  assert.ok(w24Paths(sh).line && !/w24-gline/.test(sh) && !/gusts/.test(sh), sh);
   // Twelve hours left: twelve columns, four ticks, each still under its three hours.
   const late = plainSpaces(site.renderWind24(site.wind24(windDays(), etDate('2026-10-19', 12).getTime())));
   assert.ok(/grid-template-columns:repeat\(12,1fr\)/.test(late) && /viewBox="0 0 120 58"/.test(late));
@@ -2762,6 +2765,98 @@ test('wind, next 24 hours: a missing hour is bridged, calm shows circles, no gus
   assert.strictEqual(site.renderWind24(null), '');
   assert.strictEqual(site.renderWind24({ hours: [] }), '');
   assert.strictEqual(site.renderWind24({ hours: [{ t: now, speed: 5, gust: 7, from: 0, night: false }], peak: null, top: 7 }), '');
+});
+
+test('wind, next 24 hours: pointing at the line shows that hour - date, time, wind and gusts - by mouse, finger or keys', () => {
+  const now = etDate('2026-10-18', 20, 14).getTime();
+  const { site } = loadSite(now);
+  const html = site.renderWind24(site.wind24(windDays(), now));
+  // The hours behind it: [time, wind, gust, from], numbers or null only.
+  const attr = html.match(/data-hours="([^"]*)"/)[1];
+  assert.ok(/^[\[\]0-9.,\-nul]*$/.test(attr), 'nothing but numbers, commas, brackets and null: no markup can hide in it');
+  const hours = JSON.parse(attr);
+  assert.strictEqual(hours.length, 24);
+  assert.deepStrictEqual(hours[0], [etDate('2026-10-18', 20).getTime(), 5, 11, 315]);
+  assert.ok(/class="w24-plot" role="img" tabindex="0"/.test(html) && /data-top="20"/.test(html), 'it can take focus, for the arrow keys');
+  assert.ok(/<span class="w24-cursor" hidden><\/span><span class="w24-hdot" hidden><\/span><div class="w24-tip" aria-hidden="true" hidden><\/div>/.test(html));
+  // A stand-in for the strip on the page, 240 px wide.
+  const on = {};
+  const part = () => ({ hidden: true, style: {}, innerHTML: '', offsetWidth: 110 });
+  const tip = part(), cursor = part(), hdot = part();
+  let wired = 0;
+  const plot = {
+    attrs: { 'data-hours': attr, 'data-top': '20' }, getAttribute(k) { return this.attrs[k]; }, clientWidth: 240,
+    getBoundingClientRect: () => ({ left: 100, width: 240 }),
+    querySelector: (sel) => ({ '.w24-tip': tip, '.w24-cursor': cursor, '.w24-hdot': hdot })[sel],
+    addEventListener: (t, fn) => { on[t] = fn; wired++; },
+  };
+  site.wireWind24(plot);
+  assert.deepStrictEqual(Object.keys(on).sort(), ['blur', 'focus', 'keydown', 'pointerdown', 'pointerleave', 'pointermove']);
+  // The mouse over the middle of the strip: hour 12 of 24, 8 AM tomorrow.
+  on.pointermove({ clientX: 100 + 125, pointerType: 'mouse' });
+  assert.strictEqual(plainSpaces(tip.innerHTML), '<b>Mon, Oct 19, 8 AM</b><div>Wind 7 mph NW</div><div>Gusts 13 mph</div>');
+  assert.deepStrictEqual([tip.hidden, cursor.hidden, hdot.hidden], [false, false, false]);
+  assert.strictEqual(cursor.style.left, '52.08%', 'the guide over the middle of the hour');
+  assert.deepStrictEqual([hdot.style.left, hdot.style.top], ['52.08%', '62.93%'], 'the dot on the wind line: 7 mph of 20');
+  assert.strictEqual(tip.style.left, '125px');
+  // At the edges the numbers stay inside the strip.
+  on.pointermove({ clientX: 100 + 2, pointerType: 'mouse' });
+  assert.ok(/8 PM/.test(plainSpaces(tip.innerHTML)) && tip.style.left === '55px', tip.style.left);
+  on.pointermove({ clientX: 100 + 239, pointerType: 'mouse' });
+  assert.ok(/Mon, Oct 19, 7 PM/.test(plainSpaces(tip.innerHTML)) && tip.style.left === '185px', tip.style.left);
+  on.pointerleave({ pointerType: 'mouse' });
+  assert.deepStrictEqual([tip.hidden, cursor.hidden, hdot.hidden], [true, true, true], 'gone when the mouse leaves');
+  // The arrow keys, once it has focus.
+  on.focus();
+  assert.ok(/Sun, Oct 18, 8 PM/.test(plainSpaces(tip.innerHTML)) && !tip.hidden);
+  on.keydown({ key: 'ArrowRight', preventDefault() {} });
+  assert.ok(/9 PM/.test(plainSpaces(tip.innerHTML)));
+  on.keydown({ key: 'ArrowLeft', preventDefault() {} }); on.keydown({ key: 'ArrowLeft', preventDefault() {} });
+  assert.ok(/Sun, Oct 18, 8 PM/.test(plainSpaces(tip.innerHTML)), 'held at the first hour');
+  on.keydown({ key: 'Escape' });
+  assert.strictEqual(tip.hidden, true);
+  on.blur();
+  // A missing hour says so, and no dot is drawn for it.
+  const gap = windDays(); gap.hourly.wind_speed_10m[24] = null; gap.hourly.wind_gusts_10m[24] = null;
+  const gattr = site.renderWind24(site.wind24(gap, now)).match(/data-hours="([^"]*)"/)[1];
+  const gtip = part(), gcur = part(), gdot = part();
+  const gon = {};
+  site.wireWind24(Object.assign({}, plot, { __w24wired: false, attrs: { 'data-hours': gattr, 'data-top': '20' }, getAttribute(k) { return this.attrs[k]; },
+    querySelector: (sel) => ({ '.w24-tip': gtip, '.w24-cursor': gcur, '.w24-hdot': gdot })[sel], addEventListener: (t, fn) => { gon[t] = fn; } }));
+  gon.pointermove({ clientX: 100 + 45, pointerType: 'mouse' });
+  assert.ok(/12 AM<\/b><div>Wind --<\/div><div>Gusts --<\/div>/.test(plainSpaces(gtip.innerHTML)) && gdot.hidden === true, gtip.innerHTML);
+  // Nothing to point at, or no strip at all: nothing happens, nothing breaks.
+  assert.doesNotThrow(() => site.wireWind24(null));
+  const bad = { getAttribute: () => 'not json', querySelector: () => null, addEventListener() { throw new Error('should not wire'); } };
+  assert.doesNotThrow(() => site.wireWind24(bad));
+  // Wired once, however often it is asked.
+  const before = wired;
+  site.wireWind24(plot);
+  assert.strictEqual(wired, before);
+});
+
+test('wind, next 24 hours: the weather card wires up the line it has just drawn', async () => {
+  const now = etDate('2026-10-18', 20, 14).getTime();
+  const fc = Object.assign({}, WEATHER_FORECAST, windDays());
+  const { site, els } = loadSite(now, weatherFetch(stationObs(now), fc));
+  const on = {};
+  const part = () => ({ hidden: true, style: {}, innerHTML: '', offsetWidth: 100 });
+  const parts = { '.w24-tip': part(), '.w24-cursor': part(), '.w24-hdot': part() };
+  const plot = {
+    getAttribute: (k) => ((els['weather-content'].innerHTML.match(new RegExp(`${k}="([^"]*)"`)) || [])[1]),
+    querySelector: (sel) => parts[sel], addEventListener: (t, fn) => { on[t] = fn; },
+    clientWidth: 240, getBoundingClientRect: () => ({ left: 0, width: 240 }),
+  };
+  els.__document.querySelector = (sel) => (sel === '#weather-content .w24-plot' ? plot : null);
+  await site.loadWeather();
+  assert.ok(on.pointermove, 'listening');
+  on.pointermove({ clientX: 5, pointerType: 'mouse' });
+  assert.ok(/Sun, Oct 18, 8 PM/.test(plainSpaces(parts['.w24-tip'].innerHTML)), parts['.w24-tip'].innerHTML);
+  // A strip that cannot be wired never costs the card.
+  const r = loadSite(now, weatherFetch(stationObs(now), fc));
+  r.els.__document.querySelector = () => { throw new Error('boom'); };
+  await r.site.loadWeather();
+  assert.ok(/59°F/.test(r.els['weather-content'].innerHTML) && /class="w24"/.test(r.els['weather-content'].innerHTML));
 });
 
 test('the weather card asks for the dock\'s forecast - two days of hourly wind, as instants - and the airport\'s readings', async () => {

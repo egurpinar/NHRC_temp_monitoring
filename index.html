@@ -342,7 +342,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .w24-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 10px;margin-bottom:8px;}
 .w24-head .wk{font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);}
 .w24-peak{font-size:.72rem;color:var(--white);}
-.w24-plot{position:relative;height:58px;}
+.w24-plot{position:relative;height:58px;touch-action:pan-y;cursor:crosshair;}
+.w24-plot:focus-visible{outline:2px solid var(--focus);outline-offset:4px;border-radius:4px;}
 .w24-plot svg{display:block;width:100%;height:100%;overflow:visible;}
 .w24-night{fill:rgba(var(--ink),.07);}
 .w24-top{stop-color:var(--gold);stop-opacity:.45;}
@@ -355,7 +356,16 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .w24-tick svg{width:15px;height:15px;color:var(--white);}
 .w24-tick b{font-size:.78rem;color:var(--white);line-height:1.15;}
 .w24-tick span{font-size:.6rem;color:var(--muted);white-space:nowrap;}
-.w24-key{font-size:.6rem;color:var(--muted);margin-top:6px;}
+.w24-legend{display:flex;gap:14px;margin-top:7px;font-size:.62rem;color:var(--muted);}
+.w24-legend span{display:inline-flex;align-items:center;gap:5px;}
+.w24-legend svg{width:20px;height:8px;overflow:visible;}
+.w24-legend .lw{stroke:var(--gold);stroke-width:2.5;stroke-linecap:round;}
+.w24-legend .lg{stroke:var(--white);stroke-opacity:.6;stroke-width:1.5;stroke-dasharray:3 3;stroke-linecap:round;}
+/* Pointing at the line: a guide, a dot on the wind, and the hour's numbers above. */
+.w24-cursor{position:absolute;top:0;bottom:0;width:1px;margin-left:-.5px;background:rgba(var(--ink),.45);pointer-events:none;}
+.w24-hdot{position:absolute;width:9px;height:9px;margin:-4.5px 0 0 -4.5px;border-radius:50%;background:var(--white);box-shadow:0 0 0 2px var(--gold);pointer-events:none;}
+.w24-tip{position:absolute;bottom:calc(100% + 6px);left:0;transform:translateX(-50%);z-index:2;background:var(--navy2);border:1px solid var(--border);border-radius:8px;padding:6px 9px;font-size:.7rem;line-height:1.45;color:var(--white);white-space:nowrap;pointer-events:none;}
+.w24-tip b{display:block;font-size:.72rem;}
 .chart-wrap{height:200px;}
 @media(min-width:600px){.chart-wrap{height:230px;}}
 
@@ -2316,9 +2326,10 @@ function smoothPath(pts) {
 /**
  * The strip as markup: only numbers from wind24() and fixed words go in.
  * The wind as one smooth line over a soft fill, the gusts as a dashed line
- * above it, the night shaded; under it, every 3 hours, an arrow and the
- * speed. Each hour sits in the middle of its 24th of the width, so the
- * arrows below line up with the line above.
+ * above it, the night shaded, and a small legend; under it, every 3 hours,
+ * an arrow and the speed. Each hour sits in the middle of its 24th of the
+ * width, so the arrows below line up with the line above. Pointing at the
+ * line shows each hour's numbers (wireWind24).
  */
 const W24 = { H: 58, PAD: 4, STEP: 10 };
 function renderWind24(w) {
@@ -2373,9 +2384,13 @@ function renderWind24(w) {
   const said = `Wind forecast for the dock, next 24 hours: ${Math.min(...speeds)} to ${Math.max(...speeds)} mph`
     + (gusts.length ? `, gusts up to ${Math.max(...gusts)}` : '')
     + (p ? `. ${peakText}${wxNum(p.from) ? `, from the ${windDirLabel(p.from)}` : ''}.` : '.');
+  // Each hour for pointing at (wireWind24): [time, wind, gust, from] - numbers
+  // or null only, so nothing in it can be markup.
+  const r1 = (v) => (wxNum(v) ? Math.round(v * 10) / 10 : null);
+  const hoursData = JSON.stringify(w.hours.map(x => [x.t, r1(x.speed), r1(x.gust), r1(x.from)]));
   return `<div class="w24">
         <div class="w24-head"><span class="wk">Wind forecast, next 24 hours</span><span class="w24-peak">${peakText}</span></div>
-        <div class="w24-plot" role="img" aria-label="${said}">
+        <div class="w24-plot" role="img" tabindex="0" aria-label="${said}" data-top="${f(w.top)}" data-hours="${hoursData}">
           <svg viewBox="0 0 ${f(width)} ${H}" preserveAspectRatio="none" aria-hidden="true">
             <defs><linearGradient id="w24-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="w24-top"/><stop offset="1" class="w24-bottom"/></linearGradient></defs>
             ${nights.join('')}
@@ -2383,10 +2398,72 @@ function renderWind24(w) {
             ${gustPts ? `<path class="w24-gline" d="${smoothPath(gustPts)}"/>` : ''}
             <path class="w24-line" d="${windD}"/>
           </svg>${nowDot}
+          <span class="w24-cursor" hidden></span><span class="w24-hdot" hidden></span><div class="w24-tip" aria-hidden="true" hidden></div>
         </div>
         <div class="w24-ticks" style="grid-template-columns:repeat(${n},1fr)" aria-hidden="true">${ticks.join('')}</div>
-        <div class="w24-key">Forecast for the dock from weather models, in mph: the line is the wind, the dashed line the gusts, the dot now; arrows point the way the wind blows; shaded hours are dark.</div>
+        <div class="w24-legend" aria-hidden="true">
+          <span><svg viewBox="0 0 20 8"><line class="lw" x1="1" y1="4" x2="19" y2="4"/></svg>Wind</span>
+          <span><svg viewBox="0 0 20 8"><line class="lg" x1="1" y1="4" x2="19" y2="4"/></svg>Gust</span>
+        </div>
       </div>`;
+}
+
+/**
+ * The 24-hour line, pointed at: the hour under the mouse - or the finger, or
+ * the arrow keys once it has focus - with its date and time, wind and gusts,
+ * over a thin guide line and a dot on the wind.
+ */
+function wireWind24(plot) {
+  if (!plot || plot.__w24wired) return;
+  let hours = [];
+  try { hours = JSON.parse(plot.getAttribute('data-hours') || '[]'); } catch (e) { return; }
+  const tip = plot.querySelector('.w24-tip'), cursor = plot.querySelector('.w24-cursor'), hdot = plot.querySelector('.w24-hdot');
+  if (!Array.isArray(hours) || !hours.length || !tip || !cursor || !hdot) return;
+  plot.__w24wired = true;
+  const n = hours.length, top = Number(plot.getAttribute('data-top')) || 1;
+  const when = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric' });
+  const pct = (v) => `${Math.round(v * 10000) / 100}%`;
+  let at = -1, hideTimer = null;
+  function show(i) {
+    at = Math.max(0, Math.min(n - 1, i));
+    const [t, speed, gust, from] = hours[at];
+    const wind = speed === null ? 'Wind --' : Math.round(speed) === 0 ? 'Wind calm'
+      : `Wind ${Math.round(speed)} mph${wxNum(from) ? ' ' + windDirLabel(from) : ''}`;
+    const gusts = gust === null ? 'Gusts --' : `Gusts ${Math.round(gust)} mph`;
+    tip.innerHTML = `<b>${escText(when.format(new Date(t)))}</b><div>${escText(wind)}</div><div>${escText(gusts)}</div>`;
+    const x = (at + 0.5) / n;
+    cursor.style.left = pct(x);
+    cursor.hidden = false;
+    hdot.hidden = speed === null;
+    if (speed !== null) {
+      hdot.style.left = pct(x);
+      hdot.style.top = pct((W24.H - W24.PAD - Math.max(0, Math.min(1, speed / top)) * (W24.H - 2 * W24.PAD)) / W24.H);
+    }
+    tip.hidden = false;
+    // Over the hour, kept inside the strip.
+    const width = plot.clientWidth || 0, tw = tip.offsetWidth || 0;
+    tip.style.left = `${Math.round(Math.max(tw / 2, Math.min(width - tw / 2, x * width)))}px`;
+  }
+  function hide() { at = -1; tip.hidden = true; cursor.hidden = true; hdot.hidden = true; }
+  const hourAt = (e) => {
+    const r = plot.getBoundingClientRect();
+    return r.width > 0 ? Math.floor((e.clientX - r.left) / r.width * n) : 0;
+  };
+  plot.addEventListener('pointermove', (e) => show(hourAt(e)));
+  plot.addEventListener('pointerdown', (e) => {
+    show(hourAt(e));
+    // A finger leaves nothing to hover: the numbers stay a few seconds.
+    if (e.pointerType === 'touch') { clearTimeout(hideTimer); hideTimer = setTimeout(hide, 4000); }
+  });
+  plot.addEventListener('pointerleave', (e) => { if (e.pointerType !== 'touch') hide(); });
+  plot.addEventListener('focus', () => show(at >= 0 ? at : 0));
+  plot.addEventListener('blur', hide);
+  plot.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      if (e.preventDefault) e.preventDefault();
+      show((at >= 0 ? at : 0) + (e.key === 'ArrowRight' ? 1 : -1));
+    } else if (e.key === 'Escape') hide();
+  });
 }
 
 function loadWeather() {
@@ -2493,6 +2570,7 @@ async function loadWeatherNow() {
           &middot; <a href="https://forecast.weather.gov/MapClick.php?lat=${DOCK_POINT.lat}&lon=${DOCK_POINT.lon}" target="_blank" rel="noopener">NWS forecast for the dock</a></div>
         <div>Readings: National Weather Service &middot; Forecasts: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a></div>
       </div>`;
+    try { wireWind24(document.querySelector('#weather-content .w24-plot')); } catch (e) { /* the line still shows */ }
   } catch(e) {
     state.station = null;
     renderSummaryWeather(null);
