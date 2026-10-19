@@ -2201,7 +2201,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     Intl, Date: FixedDate, Math, JSON, isNaN, parseInt, parseFloat, Number, Array, Object, String,
   };
   const ctx = vmT.createContext(sandbox);
-  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, getEffectiveLevel, morningsNeeded, renderFogOutlook, renderFloodGrid, renderDashboard,' +
+  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, getEffectiveLevel, morningsNeeded, wind24, renderWind24, renderFogOutlook, renderFloodGrid, renderDashboard,' +
     ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData,' +
     ' loadData, loadHistory, refreshAll, loadFogOutlook, loadCameraSnapshot, historyNeedsRefresh, pickRiverLevel,' +
     ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraBackupAsleep,' +
@@ -2405,6 +2405,98 @@ test('summary weather tile: an outage says "Weather unavailable" and breaks noth
   assert.ok(/Weather unavailable/.test(els['sum-weather'].innerHTML));
   assert.ok(/Could not load weather/.test(els['weather-content'].innerHTML));
   assert.doesNotThrow(() => site.renderSummaryWeather({ get tempF() { throw new Error('boom'); } }));
+});
+
+// ── Wind, next 24 hours (in the weather card) ───────────────────────────────
+
+// Two days of hourly wind from midnight ET on 2026-10-18, as Open-Meteo sends it
+// with timeformat=unixtime: speed 5-14 mph in a 10-hour cycle, gusts 6 above.
+function windDays(over = {}) {
+  const t0 = etDate('2026-10-18', 0).getTime() / 1000;
+  const time = [], sp = [], gu = [], dir = [];
+  for (let h = 0; h < 48; h++) { time.push(t0 + h * 3600); sp.push(5 + (h % 10)); gu.push(11 + (h % 10)); dir.push(315); }
+  return Object.assign({
+    hourly: { time, wind_speed_10m: sp, wind_gusts_10m: gu, wind_direction_10m: dir },
+    daily: { sunrise: [etDate('2026-10-18', 7, 12).getTime() / 1000, etDate('2026-10-19', 7, 13).getTime() / 1000],
+             sunset: [etDate('2026-10-18', 18, 8).getTime() / 1000, etDate('2026-10-19', 18, 6).getTime() / 1000] },
+  }, over);
+}
+const plainSpaces = (s) => String(s).replace(/[  ]/g, ' ');
+
+test('wind, next 24 hours: from the current hour, the night shaded from sunset to sunrise, the strongest hour', () => {
+  const now = etDate('2026-10-18', 20, 14).getTime();
+  const { site } = loadSite(now);
+  const w = site.wind24(windDays(), now);
+  assert.strictEqual(w.hours.length, 24);
+  assert.strictEqual(w.hours[0].t, etDate('2026-10-18', 20).getTime(), 'starts with the current hour, 8 PM');
+  assert.strictEqual(w.hours[23].t, etDate('2026-10-19', 19).getTime(), 'ends at 7 PM tomorrow');
+  const night = (h) => w.hours.find(x => x.t === h.getTime()).night;
+  assert.deepStrictEqual([night(etDate('2026-10-18', 20)), night(etDate('2026-10-19', 7)), night(etDate('2026-10-19', 8)),
+    night(etDate('2026-10-19', 18)), night(etDate('2026-10-19', 19))], [true, true, false, false, true],
+    '8 PM dark; 7 AM, before the 7:13 sunrise, dark; 8 AM light; 6 PM, before the 6:06 sunset, light; 7 PM dark');
+  assert.strictEqual(w.peak.speed, 14);
+  assert.strictEqual(w.top, 20, 'the scale runs to the strongest gust');
+  // Too little to show: nothing, rather than a strip of gaps.
+  const half = windDays(); half.hourly.wind_speed_10m = half.hourly.wind_speed_10m.map((v, i) => (i % 2 ? null : v));
+  const fromMidnight = etDate('2026-10-18', 0, 30).getTime();
+  assert.ok(site.wind24(half, fromMidnight), 'half the hours (12) is enough to draw');
+  half.hourly.wind_speed_10m[0] = null;
+  assert.strictEqual(site.wind24(half, fromMidnight), null, '11 is not: nothing, rather than a strip of gaps');
+  assert.strictEqual(site.wind24({}, now), null);
+  assert.strictEqual(site.wind24({ hourly: { time: 'x' } }, now), null);
+  assert.strictEqual(site.wind24(windDays(), etDate('2026-10-17', 23).getTime()), null, 'a forecast that starts later than now');
+  const late = site.wind24(windDays(), etDate('2026-10-19', 12).getTime());
+  assert.strictEqual(late.hours.length, 24 - 12, 'fewer hours left: only what there is');
+});
+
+test('wind, next 24 hours: a bar an hour, every 3 hours which way and how hard, the strongest in words', () => {
+  const now = etDate('2026-10-18', 20, 14).getTime();
+  const { site } = loadSite(now);
+  const html = plainSpaces(site.renderWind24(site.wind24(windDays(), now)));
+  assert.strictEqual((html.match(/<div class="w24-bar[ "]/g) || []).length, 24);
+  assert.strictEqual((html.match(/<div class="w24-bar night"/g) || []).length, 13, '8 PM to 7 AM, and 7 PM tomorrow');
+  assert.strictEqual((html.match(/class="w24-tick"/g) || []).length, 8);
+  assert.strictEqual((html.match(/rotate\(135 8 8\)/g) || []).length, 8, 'from the NW, the arrows point SE - the way it blows');
+  const labels = [...html.matchAll(/<span>(\d+ [AP]M)<\/span>/g)].map(m => m[1]);
+  assert.deepStrictEqual(labels, ['9 PM', '12 AM', '3 AM', '6 AM', '9 AM', '12 PM', '3 PM', '6 PM'], 'each over the middle of its three hours');
+  assert.ok(/Strongest 14 mph, gusts 20 around \d+ [AP]M/.test(html), html.match(/w24-peak">[^<]*/)[0]);
+  assert.ok(/aria-label="Wind for the next 24 hours: 5 to 14 mph, gusts up to 20\. Strongest 14 mph, gusts 20 around \d+ [AP]M, from the NW\."/.test(html));
+  assert.ok(/style="height:100%"/.test(html) && /style="height:25%"/.test(html), 'bars scaled to the strongest gust: 20 is full, 5 a quarter');
+  assert.ok(!/NaN|undefined|null/.test(html));
+  // Calm all day: circles, not arrows that point nowhere.
+  const calm = windDays(); calm.hourly.wind_speed_10m = calm.hourly.wind_speed_10m.map(() => 0.2); calm.hourly.wind_gusts_10m = calm.hourly.wind_gusts_10m.map(() => 1);
+  const ch = site.renderWind24(site.wind24(calm, now));
+  assert.ok(!/rotate\(/.test(ch) && (ch.match(/<circle/g) || []).length === 8, 'calm: circles');
+  assert.ok(/Calm all day/.test(ch));
+  assert.strictEqual(site.renderWind24(null), '');
+});
+
+test('the weather card asks for two days of hourly wind, as instants, and shows the strip - sunrise still right', async () => {
+  const now = etDate('2026-10-18', 20, 14).getTime();
+  const urls = [];
+  const data = Object.assign(JSON.parse(JSON.stringify(WEATHER_NOW)), windDays());
+  const { site, els } = loadSite(now, (u) => { urls.push(String(u)); return okJson(data); });
+  await site.loadWeather();
+  const u = new URL(urls.find(x => /api\.open-meteo\.com/.test(x)));
+  assert.strictEqual(u.searchParams.get('hourly'), 'wind_speed_10m,wind_gusts_10m,wind_direction_10m');
+  assert.deepStrictEqual([u.searchParams.get('forecast_days'), u.searchParams.get('timeformat')], ['2', 'unixtime']);
+  const card = plainSpaces(els['weather-content'].innerHTML);
+  assert.ok(/class="w24"/.test(card) && /Wind, next 24 hours/.test(card), 'the strip is in the card');
+  assert.ok(card.indexOf('class="w24"') > card.indexOf('Peak gust') && card.indexOf('class="w24"') < card.indexOf('Sunrise'),
+    'under the wind and gust tiles, above sunrise and sunset');
+  assert.ok(/7:12 AM/.test(card) && /6:08 PM/.test(card), 'sunrise and sunset, given as instants now, still in boathouse time');
+  // Without hourly wind, or with nonsense, the card is just as before.
+  for (const hourly of [undefined, { time: 'x' }, { time: [1, 2], wind_speed_10m: ['a', 'b'] }]) {
+    const d2 = JSON.parse(JSON.stringify(WEATHER_NOW)); if (hourly) d2.hourly = hourly;
+    const r = loadSite(now, () => okJson(d2));
+    await r.site.loadWeather();
+    assert.ok(!/class="w24"/.test(r.els['weather-content'].innerHTML) && /63°F/.test(r.els['weather-content'].innerHTML), JSON.stringify(hourly));
+  }  // Whatever goes wrong drawing the strip, the card above it still shows.
+  const odd = JSON.parse(JSON.stringify(WEATHER_NOW));
+  odd.hourly = { get time() { throw new Error('boom'); } };
+  const r = loadSite(now, () => okJson(odd));
+  await r.site.loadWeather();
+  assert.ok(/63°F/.test(r.els['weather-content'].innerHTML) && !/Could not load/.test(r.els['weather-content'].innerHTML));
 });
 
 test('summary river tile: filled by the real river loader - level, gauge, restriction', async () => {

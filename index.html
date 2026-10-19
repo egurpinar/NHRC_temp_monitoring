@@ -279,6 +279,25 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .wstat .wv{font-family:var(--fserif);font-size:1.1rem;font-weight:700;color:var(--white);}
 .wstat .wu{font-size:.65rem;color:var(--muted);margin-left:2px;}
 .wstat .wd{font-size:.65rem;color:var(--muted);margin-top:2px;}
+/* Wind, next 24 hours: a bar an hour (the lighter top is the gusts), the night
+   shaded, and every 3 hours which way it blows and how hard. No colours for
+   "too windy": the numbers, and the shape of the day. */
+.w24{margin-top:10px;background:var(--navy3);border-radius:8px;padding:10px 12px 8px;}
+.w24-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 10px;margin-bottom:8px;}
+.w24-head .wk{font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);}
+.w24-peak{font-size:.72rem;color:var(--white);}
+.w24-bars{display:grid;grid-template-columns:repeat(24,1fr);gap:2px;height:44px;}
+.w24-bar{position:relative;height:100%;border-radius:2px;}
+.w24-bar.night{background:rgba(var(--ink),.07);}
+.w24-gust,.w24-wind{position:absolute;left:0;right:0;bottom:0;border-radius:2px 2px 0 0;}
+.w24-gust{background:var(--gold);opacity:.35;}
+.w24-wind{background:var(--gold);}
+.w24-ticks{display:grid;grid-template-columns:repeat(8,1fr);margin-top:6px;text-align:center;}
+.w24-tick{display:flex;flex-direction:column;align-items:center;gap:1px;min-width:0;}
+.w24-tick svg{width:15px;height:15px;color:var(--white);}
+.w24-tick b{font-size:.78rem;color:var(--white);line-height:1.15;}
+.w24-tick span{font-size:.6rem;color:var(--muted);white-space:nowrap;}
+.w24-key{font-size:.6rem;color:var(--muted);margin-top:6px;}
 .chart-wrap{height:200px;}
 @media(min-width:600px){.chart-wrap{height:230px;}}
 
@@ -2012,6 +2031,81 @@ function rowingWeatherAlert(windMph, gustMph, code) {
   if (windMph > 12)                  return { cls:'warn',   text:'Moderate wind — monitor conditions' };
   return null;
 }
+/* ── WIND, NEXT 24 HOURS ──────────────────────────────────────────────────────
+ * From the same Open-Meteo answer as the card above it (same place): hourly
+ * wind, gusts and direction, and sunrise and sunset to shade the night. Times
+ * are instants (timeformat=unixtime). No thresholds: the numbers and the shape
+ * of the day, for planning when to go out.
+ *
+ * wind24() picks the 24 hours from the current one: [{ t, speed, gust, from,
+ * night }], the strongest hour, and the top of the scale. Fewer than 12 hours
+ * with a wind speed: null, and the card simply has no strip.
+ */
+function wind24(data, nowMs) {
+  const h = data && data.hourly;
+  if (!h || !Array.isArray(h.time)) return null;
+  const at = (k, i) => (Array.isArray(h[k]) && wxNum(h[k][i]) ? h[k][i] : null);
+  let i0 = -1;
+  h.time.forEach((t, i) => { if (wxNum(t) && t * 1000 <= nowMs) i0 = i; });
+  if (i0 < 0) return null;
+  const days = [];
+  const d = (data && data.daily) || {};
+  if (Array.isArray(d.sunrise) && Array.isArray(d.sunset)) {
+    d.sunrise.forEach((r, i) => { const s = d.sunset[i]; if (wxNum(r) && wxNum(s)) days.push([r * 1000, s * 1000]); });
+  }
+  const hours = [];
+  for (let k = 0; k < 24 && i0 + k < h.time.length; k++) {
+    const i = i0 + k;
+    if (!wxNum(h.time[i])) continue;
+    const t = h.time[i] * 1000;
+    hours.push({ t, speed: at('wind_speed_10m', i), gust: at('wind_gusts_10m', i), from: at('wind_direction_10m', i),
+      night: days.length > 0 && !days.some(([r, s]) => t >= r && t < s) });
+  }
+  if (hours.filter(x => x.speed !== null).length < 12) return null;
+  let peak = null;
+  for (const x of hours) if (x.speed !== null && (!peak || x.speed > peak.speed)) peak = x;
+  const top = Math.max(1, ...hours.map(x => Math.max(x.speed || 0, x.gust || 0)));
+  return { hours, peak, top };
+}
+
+/** The strip as markup: only numbers from wind24() and fixed words go in. */
+function renderWind24(w) {
+  if (!w || !w.hours || !w.hours.length) return '';
+  const hourLabel = (t) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric' })
+    .format(new Date(t)).replace(' ', '\u00a0');
+  const pct = (v) => Math.round(Math.max(0, Math.min(1, v / w.top)) * 100);
+  const bars = w.hours.map(x => `<div class="w24-bar${x.night ? ' night' : ''}">`
+    + (x.gust !== null ? `<div class="w24-gust" style="height:${pct(x.gust)}%"></div>` : '')
+    + (x.speed !== null ? `<div class="w24-wind" style="height:${pct(x.speed)}%"></div>` : '')
+    + '</div>').join('');
+  // Every 3 hours, over the middle of its three bars: which way it blows (the
+  // arrow points downwind, as the wind goes) and how hard.
+  const ticks = [];
+  for (let k = 1; k < w.hours.length; k += 3) {
+    const x = w.hours[k];
+    const blowing = x.speed !== null && Math.round(x.speed) > 0 && wxNum(x.from);
+    const arrow = blowing
+      ? `<svg viewBox="0 0 16 16" aria-hidden="true"><g transform="rotate(${Math.round((x.from + 180) % 360)} 8 8)"><path d="M8 1.5 12.5 8H9.2v6.5H6.8V8H3.5z" fill="currentColor"/></g></svg>`
+      : `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
+    ticks.push(`<div class="w24-tick">${arrow}<b>${x.speed === null ? '--' : Math.round(x.speed)}</b><span>${hourLabel(x.t)}</span></div>`);
+  }
+  const p = w.peak;
+  const gustsOf = (x) => (x.gust !== null && Math.round(x.gust) > Math.round(x.speed) ? `, gusts ${Math.round(x.gust)}` : '');
+  const peakText = !p ? '' : Math.round(p.speed) === 0 ? 'Calm all day'
+    : `Strongest ${Math.round(p.speed)} mph${gustsOf(p)} around ${hourLabel(p.t)}`;
+  const speeds = w.hours.filter(x => x.speed !== null).map(x => Math.round(x.speed));
+  const gusts = w.hours.filter(x => x.gust !== null).map(x => Math.round(x.gust));
+  const said = `Wind for the next 24 hours: ${Math.min(...speeds)} to ${Math.max(...speeds)} mph`
+    + (gusts.length ? `, gusts up to ${Math.max(...gusts)}` : '')
+    + (p ? `. ${peakText}${wxNum(p.from) ? `, from the ${windDirLabel(p.from)}` : ''}.` : '.');
+  return `<div class="w24">
+        <div class="w24-head"><span class="wk">Wind, next 24 hours</span><span class="w24-peak">${peakText}</span></div>
+        <div class="w24-bars" role="img" aria-label="${said}">${bars}</div>
+        <div class="w24-ticks" aria-hidden="true">${ticks.join('')}</div>
+        <div class="w24-key">mph; arrows point the way the wind blows; the lighter tops are gusts; shaded hours are dark.</div>
+      </div>`;
+}
+
 function loadWeather() {
   return once('weather', loadWeatherNow);
 }
@@ -2021,7 +2115,8 @@ async function loadWeatherNow() {
     const lat = 41.4370, lon = -73.1190;
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
       `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation` +
-      `&daily=sunrise,sunset` +
+      `&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m` +
+      `&daily=sunrise,sunset&forecast_days=2&timeformat=unixtime` +
       `&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=America%2FNew_York`;
     const res  = await fetchWithTimeout(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2066,6 +2161,8 @@ async function loadWeatherNow() {
     const icon    = WMO_ICONS[code] || '&#127777;';
     const cond    = WMO_CODES[code] || 'Unknown';
     renderSummaryWeather({ tempF, cond, icon, windMph, gustMph, dir, alert });
+    let windStrip = '';
+    try { windStrip = renderWind24(wind24(data, Date.now())); } catch (e) { windStrip = ''; }
     document.getElementById('weather-content').innerHTML = `
       <div class="weather-main-row">
         <div class="weather-icon-block">
@@ -2083,6 +2180,7 @@ async function loadWeatherNow() {
         <div class="wstat"><div class="wk">Gusts</div><div class="wv">${gustMph}<span class="wu">mph</span></div><div class="wd">Peak gust</div></div>
         <div class="wstat"><div class="wk">Precip</div><div class="wv">${precip}<span class="wu">in</span></div><div class="wd">Current hour</div></div>
       </div>
+      ${windStrip}
       ${(sunrise || sunset) ? `<div class="weather-stats-row" style="margin-top:10px;grid-template-columns:repeat(2,1fr);">
         <div class="wstat"><div class="wk">Sunrise</div><div class="wv">${sunrise || '--'}</div><div class="wd">Oxford, CT</div></div>
         <div class="wstat"><div class="wk">Sunset</div><div class="wv">${sunset || '--'}</div><div class="wd">Oxford, CT</div></div>
