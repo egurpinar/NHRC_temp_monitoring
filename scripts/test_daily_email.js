@@ -2201,7 +2201,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     Intl, Date: FixedDate, Math, JSON, isNaN, parseInt, parseFloat, Number, Array, Object, String,
   };
   const ctx = vmT.createContext(sandbox);
-  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, getEffectiveLevel, morningsNeeded, wind24, renderWind24, renderFogOutlook, renderFloodGrid, renderDashboard,' +
+  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, getEffectiveLevel, morningsNeeded, wind24, renderWind24, smoothPath, renderFogOutlook, renderFloodGrid, renderDashboard,' +
     ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData,' +
     ' loadData, loadHistory, refreshAll, loadFogOutlook, loadCameraSnapshot, historyNeedsRefresh, pickRiverLevel,' +
     ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraBackupAsleep,' +
@@ -2449,26 +2449,138 @@ test('wind, next 24 hours: from the current hour, the night shaded from sunset t
   assert.strictEqual(late.hours.length, 24 - 12, 'fewer hours left: only what there is');
 });
 
-test('wind, next 24 hours: a bar an hour, every 3 hours which way and how hard, the strongest in words', () => {
+// The strip's drawing: its paths, and the points a path passes through (after
+// the M, the last pair of each C; the fill's closing L/Z left off).
+function w24Paths(html) {
+  const get = (cls) => { const m = String(html).match(new RegExp(`<path class="${cls}"[^>]* d="([^"]+)"`)); return m ? m[1] : null; };
+  return { line: get('w24-line'), area: get('w24-area'), gust: get('w24-gline') };
+}
+function pathEnds(d) {
+  const num = (s) => s.trim().split(/[ ,]+/).map(Number);
+  const segs = d.split('L')[0].split('C');
+  return [num(segs[0].slice(1)), ...segs.slice(1).map(s => num(s).slice(4, 6))];
+}
+
+test('the wind line: smooth through every hour, and never past them - no wind below calm, no peak above the forecast', () => {
+  const { site } = loadSite(Date.now());
+  const sp = site.smoothPath;
+  assert.strictEqual(sp([]), '');
+  assert.strictEqual(sp([[1, 2]]), 'M1 2');
+  // A steady change draws straight - no wobble that the forecast does not have.
+  const steady = sp([[0, 50], [10, 40], [20, 30], [30, 20]]);
+  assert.strictEqual(steady, 'M0 50C3.33 46.67 6.67 43.33 10 40C13.33 36.67 16.67 33.33 20 30C23.33 26.67 26.67 23.33 30 20');
+  const r2 = (v) => Math.round(v * 100) / 100;
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  for (let run = 0; run < 300; run++) {
+    const pts = [];
+    let x = 0;
+    const n = 2 + Math.floor(rnd() * 30);
+    for (let i = 0; i < n; i++) {
+      x += 1 + rnd() * 20;
+      // Some flat stretches, some sharp turns, as wind forecasts have.
+      const y = i && rnd() < 0.25 ? pts[i - 1][1] : Math.round(rnd() * 500) / 10;
+      pts.push([x, y]);
+    }
+    const d = sp(pts);
+    assert.ok(/^M-?[\d.]+ -?[\d.]+(C(-?[\d.]+ ){5}-?[\d.]+)+$/.test(d), d);
+    assert.deepStrictEqual(pathEnds(d), pts.map(([a, b]) => [r2(a), r2(b)]), 'through every point');
+    const segs = d.split('C').slice(1).map(s => s.split(' ').map(Number));
+    segs.forEach((c, i) => {
+      const [y0, y3] = [r2(pts[i][1]), r2(pts[i + 1][1])];
+      const lo = Math.min(y0, y3), hi = Math.max(y0, y3);
+      const x0 = r2(pts[i][0]);
+      assert.ok(x0 <= c[0] && c[0] <= c[2] && c[2] <= c[4], `x in order: ${d}`);
+      for (let k = 0; k <= 20; k++) {
+        const t = k / 20, u = 1 - t;
+        const y = u * u * u * y0 + 3 * u * u * t * c[1] + 3 * u * t * t * c[3] + t * t * t * y3;
+        assert.ok(y >= lo - 1e-9 && y <= hi + 1e-9, `segment ${i} strays to ${y} outside ${lo}..${hi}: ${d}`);
+      }
+      if (y0 === y3) assert.ok(c[1] === y0 && c[3] === y0, 'a level stretch stays level');
+    });
+  }
+});
+
+test('wind, next 24 hours: one smooth line through the hours, the gusts dashed above, the night shaded, every 3 hours which way and how hard', () => {
   const now = etDate('2026-10-18', 20, 14).getTime();
   const { site } = loadSite(now);
   const html = plainSpaces(site.renderWind24(site.wind24(windDays(), now)));
-  assert.strictEqual((html.match(/<div class="w24-bar[ "]/g) || []).length, 24);
-  assert.strictEqual((html.match(/<div class="w24-bar night"/g) || []).length, 13, '8 PM to 7 AM, and 7 PM tomorrow');
-  assert.strictEqual((html.match(/class="w24-tick"/g) || []).length, 8);
+  const { line, area, gust } = w24Paths(html);
+  assert.ok(line && area && gust, 'the wind line, its fill, the gust line');
+  // Each hour in the middle of its 24th of the width, scaled so the strongest gust (20) is the top.
+  const Y = (v) => Math.round((54 - (v / 20) * 50) * 100) / 100;  // as drawn: to a hundredth
+  const speeds = [], gusts = [];
+  for (let h = 20; h < 44; h++) { speeds.push(5 + (h % 10)); gusts.push(11 + (h % 10)); }
+  const want = (vals) => [[0, Y(vals[0])], ...vals.map((v, i) => [i * 10 + 5, Y(v)]), [240, Y(vals[23])]];
+  assert.deepStrictEqual(pathEnds(line), want(speeds), 'the wind: each hour where it belongs, held level to both edges');
+  assert.deepStrictEqual(pathEnds(gust), want(gusts), 'the gusts likewise');
+  assert.strictEqual(Math.min(...pathEnds(gust).map(p => p[1])), 4, 'the strongest gust at the top of the strip');
+  assert.ok(area.startsWith(line) && /L240 58L0 58Z$/.test(area), 'the fill: the line, closed along the bottom');
+  for (const d of [line, gust]) {
+    const nums = d.match(/-?\d+(?:\.\d+)?/g).map(Number);
+    for (let i = 0; i < nums.length; i += 2) {
+      assert.ok(nums[i] >= 0 && nums[i] <= 240 && nums[i + 1] >= 4 && nums[i + 1] <= 54, `inside the strip: ${nums[i]},${nums[i + 1]}`);
+    }
+  }
+  assert.ok(/<svg viewBox="0 0 240 58" preserveAspectRatio="none" aria-hidden="true">/.test(html));
+  assert.ok(/<linearGradient id="w24-fill"/.test(html) && /fill="url\(#w24-fill\)"/.test(html));
+  // The night: 8 PM to 7 AM, and 7 PM tomorrow.
+  const nights = [...html.matchAll(/<rect class="w24-night" x="([\d.]+)" y="0" width="([\d.]+)" height="58"\/>/g)].map(m => [+m[1], +m[2]]);
+  assert.deepStrictEqual(nights, [[0, 120], [230, 10]]);
+  // Now: a dot on the line at the current hour.
+  assert.ok(/<span class="w24-now" style="left:2\.08%;top:71\.55%"><\/span>/.test(html), (html.match(/w24-now[^>]*/) || ['no dot'])[0]);
+  // Every 3 hours, under the middle of its three hours.
+  assert.ok(/class="w24-ticks" style="grid-template-columns:repeat\(24,1fr\)"/.test(html));
+  const cols = [...html.matchAll(/class="w24-tick" style="grid-column:(\d+) \/ span 3"/g)].map(m => +m[1]);
+  assert.deepStrictEqual(cols, [1, 4, 7, 10, 13, 16, 19, 22]);
   assert.strictEqual((html.match(/rotate\(135 8 8\)/g) || []).length, 8, 'from the NW, the arrows point SE - the way it blows');
   const labels = [...html.matchAll(/<span>(\d+ [AP]M)<\/span>/g)].map(m => m[1]);
-  assert.deepStrictEqual(labels, ['9 PM', '12 AM', '3 AM', '6 AM', '9 AM', '12 PM', '3 PM', '6 PM'], 'each over the middle of its three hours');
+  assert.deepStrictEqual(labels, ['9 PM', '12 AM', '3 AM', '6 AM', '9 AM', '12 PM', '3 PM', '6 PM']);
+  assert.deepStrictEqual([...html.matchAll(/<b>(\d+)<\/b>/g)].map(m => +m[1]), cols.map(c => speeds[c]),
+    'each the speed of the hour it sits under');
   assert.ok(/Strongest 14 mph, gusts 20 around \d+ [AP]M/.test(html), html.match(/w24-peak">[^<]*/)[0]);
   assert.ok(/aria-label="Wind for the next 24 hours: 5 to 14 mph, gusts up to 20\. Strongest 14 mph, gusts 20 around \d+ [AP]M, from the NW\."/.test(html));
-  assert.ok(/style="height:100%"/.test(html) && /style="height:25%"/.test(html), 'bars scaled to the strongest gust: 20 is full, 5 a quarter');
-  assert.ok(!/NaN|undefined|null/.test(html));
+  assert.ok(/The line is the wind, the dashed line the gusts/.test(html), 'the key says which line is which');
+  assert.ok(new RegExp('around ' + '\\d+' + '\u00a0[AP]M').test(site.renderWind24(site.wind24(windDays(), now))),
+    'the hour and its AM/PM never split across lines');
+  assert.ok(!/NaN|undefined|null|Infinity/.test(html));
+  assert.ok(!/w24-bar/.test(html), 'no bars left');
+});
+
+test('wind, next 24 hours: a missing hour is bridged, calm shows circles, no gusts no gust line, fewer hours still line up', () => {
+  const now = etDate('2026-10-18', 20, 14).getTime();
+  const { site } = loadSite(now);
+  // No speed at midnight: the line goes from 11 PM to 1 AM, and its tick says so.
+  const gap = windDays(); gap.hourly.wind_speed_10m[24] = null;
+  const gh = plainSpaces(site.renderWind24(site.wind24(gap, now)));
+  const ends = pathEnds(w24Paths(gh).line);
+  assert.strictEqual(ends.length, 25);
+  assert.ok(!ends.some(p => p[0] === 45), 'no point for the missing hour - not dropped to calm');
+  assert.ok(/<b>--<\/b><span>12 AM<\/span>/.test(gh));
+  // No speed for the current hour: the dot goes on the first hour that has one.
+  const late0 = windDays(); late0.hourly.wind_speed_10m[20] = null;
+  assert.ok(/class="w24-now" style="left:6\.25%;top:67\.24%"/.test(site.renderWind24(site.wind24(late0, now))));
+  assert.ok(!/NaN|undefined|null|Infinity/.test(gh));
   // Calm all day: circles, not arrows that point nowhere.
   const calm = windDays(); calm.hourly.wind_speed_10m = calm.hourly.wind_speed_10m.map(() => 0.2); calm.hourly.wind_gusts_10m = calm.hourly.wind_gusts_10m.map(() => 1);
   const ch = site.renderWind24(site.wind24(calm, now));
   assert.ok(!/rotate\(/.test(ch) && (ch.match(/<circle/g) || []).length === 8, 'calm: circles');
   assert.ok(/Calm all day/.test(ch));
+  // No gusts in the forecast: just the wind line, and no gusts in the words.
+  const still = windDays(); still.hourly.wind_gusts_10m = still.hourly.wind_gusts_10m.map(() => null);
+  const sh = site.renderWind24(site.wind24(still, now));
+  assert.ok(w24Paths(sh).line && !/w24-gline/.test(sh) && !/gusts/.test(sh.replace(/w24-key">[^<]*/, '')), sh);
+  // Twelve hours left: twelve columns, four ticks, each still under its three hours.
+  const late = plainSpaces(site.renderWind24(site.wind24(windDays(), etDate('2026-10-19', 12).getTime())));
+  assert.ok(/grid-template-columns:repeat\(12,1fr\)/.test(late) && /viewBox="0 0 120 58"/.test(late));
+  assert.deepStrictEqual([...late.matchAll(/grid-column:(\d+) \/ span 3/g)].map(m => +m[1]), [1, 4, 7, 10]);
+  // 23 hours left: the last full three hours end at 10 PM, so no tick hangs past the strip.
+  const late23 = site.renderWind24(site.wind24(windDays(), etDate('2026-10-19', 1).getTime()));
+  assert.deepStrictEqual([...late23.matchAll(/grid-column:(\d+) \/ span 3/g)].map(m => +m[1]), [1, 4, 7, 10, 13, 16, 19]);
+  // Nothing to draw a line through: no strip, rather than a broken one.
   assert.strictEqual(site.renderWind24(null), '');
+  assert.strictEqual(site.renderWind24({ hours: [] }), '');
+  assert.strictEqual(site.renderWind24({ hours: [{ t: now, speed: 5, gust: 7, from: 0, night: false }], peak: null, top: 7 }), '');
 });
 
 test('the weather card asks for two days of hourly wind, as instants, and shows the strip - sunrise still right', async () => {

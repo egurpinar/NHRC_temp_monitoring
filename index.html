@@ -286,13 +286,15 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .w24-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 10px;margin-bottom:8px;}
 .w24-head .wk{font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);}
 .w24-peak{font-size:.72rem;color:var(--white);}
-.w24-bars{display:grid;grid-template-columns:repeat(24,1fr);gap:2px;height:44px;}
-.w24-bar{position:relative;height:100%;border-radius:2px;}
-.w24-bar.night{background:rgba(var(--ink),.07);}
-.w24-gust,.w24-wind{position:absolute;left:0;right:0;bottom:0;border-radius:2px 2px 0 0;}
-.w24-gust{background:var(--gold);opacity:.35;}
-.w24-wind{background:var(--gold);}
-.w24-ticks{display:grid;grid-template-columns:repeat(8,1fr);margin-top:6px;text-align:center;}
+.w24-plot{position:relative;height:58px;}
+.w24-plot svg{display:block;width:100%;height:100%;overflow:visible;}
+.w24-night{fill:rgba(var(--ink),.07);}
+.w24-top{stop-color:var(--gold);stop-opacity:.45;}
+.w24-bottom{stop-color:var(--gold);stop-opacity:.02;}
+.w24-line{fill:none;stroke:var(--gold);stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke;}
+.w24-gline{fill:none;stroke:var(--white);stroke-opacity:.5;stroke-width:1.5;stroke-dasharray:3 4;stroke-linecap:round;vector-effect:non-scaling-stroke;}
+.w24-now{position:absolute;width:9px;height:9px;margin:-4.5px 0 0 -4.5px;border-radius:50%;background:var(--gold);box-shadow:0 0 0 2px var(--navy3);}
+.w24-ticks{display:grid;grid-template-columns:repeat(24,1fr);margin-top:6px;text-align:center;}
 .w24-tick{display:flex;flex-direction:column;align-items:center;gap:1px;min-width:0;}
 .w24-tick svg{width:15px;height:15px;color:var(--white);}
 .w24-tick b{font-size:.78rem;color:var(--white);line-height:1.15;}
@@ -2071,26 +2073,83 @@ function wind24(data, nowMs) {
   return { hours, peak, top };
 }
 
-/** The strip as markup: only numbers from wind24() and fixed words go in. */
+/**
+ * A smooth line through points [[x, y], ...] as an SVG path: monotone cubic
+ * (Fritsch-Carlson), so it never swings above a peak or below zero between
+ * two hours - the curve is the forecast, not a flourish on it.
+ */
+function smoothPath(pts) {
+  const n = pts.length;
+  const f = (v) => String(Math.round(v * 100) / 100);
+  if (!n) return '';
+  const dx = [], m = [];
+  for (let i = 0; i < n - 1; i++) { dx.push(pts[i + 1][0] - pts[i][0]); m.push((pts[i + 1][1] - pts[i][1]) / dx[i]); }
+  const t = [m[0]];
+  for (let i = 1; i < n - 1; i++) t.push(m[i - 1] * m[i] <= 0 ? 0 : (m[i - 1] + m[i]) / 2);
+  t.push(m[n - 2]);
+  for (let i = 0; i < n - 1; i++) {
+    if (m[i] === 0) { t[i] = 0; t[i + 1] = 0; continue; }
+    const a = t[i] / m[i], b = t[i + 1] / m[i], s = a * a + b * b;
+    if (s > 9) { const k = 3 / Math.sqrt(s); t[i] = k * a * m[i]; t[i + 1] = k * b * m[i]; }
+  }
+  let d = `M${f(pts[0][0])} ${f(pts[0][1])}`;
+  for (let i = 0; i < n - 1; i++) {
+    const h = dx[i] / 3;
+    d += `C${f(pts[i][0] + h)} ${f(pts[i][1] + t[i] * h)} ${f(pts[i + 1][0] - h)} ${f(pts[i + 1][1] - t[i + 1] * h)} ${f(pts[i + 1][0])} ${f(pts[i + 1][1])}`;
+  }
+  return d;
+}
+
+/**
+ * The strip as markup: only numbers from wind24() and fixed words go in.
+ * The wind as one smooth line over a soft fill, the gusts as a dashed line
+ * above it, the night shaded; under it, every 3 hours, an arrow and the
+ * speed. Each hour sits in the middle of its 24th of the width, so the
+ * arrows below line up with the line above.
+ */
+const W24 = { H: 58, PAD: 4, STEP: 10 };
 function renderWind24(w) {
   if (!w || !w.hours || !w.hours.length) return '';
   const hourLabel = (t) => new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric' })
     .format(new Date(t)).replace(' ', '\u00a0');
-  const pct = (v) => Math.round(Math.max(0, Math.min(1, v / w.top)) * 100);
-  const bars = w.hours.map(x => `<div class="w24-bar${x.night ? ' night' : ''}">`
-    + (x.gust !== null ? `<div class="w24-gust" style="height:${pct(x.gust)}%"></div>` : '')
-    + (x.speed !== null ? `<div class="w24-wind" style="height:${pct(x.speed)}%"></div>` : '')
-    + '</div>').join('');
-  // Every 3 hours, over the middle of its three bars: which way it blows (the
-  // arrow points downwind, as the wind goes) and how hard.
+  const n = w.hours.length, width = n * W24.STEP, H = W24.H, PAD = W24.PAD;
+  const X = (i) => (i + 0.5) * W24.STEP;
+  const Y = (v) => H - PAD - Math.max(0, Math.min(1, v / w.top)) * (H - 2 * PAD);
+  const f = (v) => String(Math.round(v * 100) / 100);
+  // A line through the hours that have a value, held level out to both edges.
+  const line = (key) => {
+    const pts = [];
+    w.hours.forEach((x, i) => { if (x[key] !== null) pts.push([X(i), Y(x[key])]); });
+    if (pts.length < 2) return null;
+    return [[0, pts[0][1]], ...pts, [width, pts[pts.length - 1][1]]];
+  };
+  const windPts = line('speed'), gustPts = line('gust');
+  if (!windPts) return '';
+  const windD = smoothPath(windPts);
+  const area = `${windD}L${f(width)} ${f(H)}L0 ${f(H)}Z`;
+  // The night: one shaded band for each run of dark hours.
+  const nights = [];
+  for (let i = 0; i < n; i++) {
+    if (!w.hours[i].night) continue;
+    let j = i;
+    while (j + 1 < n && w.hours[j + 1].night) j++;
+    nights.push(`<rect class="w24-night" x="${f(i * W24.STEP)}" y="0" width="${f((j - i + 1) * W24.STEP)}" height="${H}"/>`);
+    i = j;
+  }
+  const first = w.hours.findIndex(x => x.speed !== null);
+  const nowDot = first >= 0
+    ? `<span class="w24-now" style="left:${f(X(first) / width * 100)}%;top:${f(Y(w.hours[first].speed) / H * 100)}%"></span>` : '';
+  // Every 3 hours, under the middle of its three hours (columns k-1 to k+1 of
+  // one per hour): which way it blows (the arrow points downwind, as the wind
+  // goes) and how hard.
   const ticks = [];
-  for (let k = 1; k < w.hours.length; k += 3) {
+  for (let k = 1; k + 1 < n; k += 3) {
     const x = w.hours[k];
     const blowing = x.speed !== null && Math.round(x.speed) > 0 && wxNum(x.from);
     const arrow = blowing
       ? `<svg viewBox="0 0 16 16" aria-hidden="true"><g transform="rotate(${Math.round((x.from + 180) % 360)} 8 8)"><path d="M8 1.5 12.5 8H9.2v6.5H6.8V8H3.5z" fill="currentColor"/></g></svg>`
       : `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
-    ticks.push(`<div class="w24-tick">${arrow}<b>${x.speed === null ? '--' : Math.round(x.speed)}</b><span>${hourLabel(x.t)}</span></div>`);
+    ticks.push(`<div class="w24-tick" style="grid-column:${k} / span 3">${arrow}<b>${x.speed === null ? '--' : Math.round(x.speed)}</b><span>${hourLabel(x.t)}</span></div>`);
   }
   const p = w.peak;
   const gustsOf = (x) => (x.gust !== null && Math.round(x.gust) > Math.round(x.speed) ? `, gusts ${Math.round(x.gust)}` : '');
@@ -2103,9 +2162,17 @@ function renderWind24(w) {
     + (p ? `. ${peakText}${wxNum(p.from) ? `, from the ${windDirLabel(p.from)}` : ''}.` : '.');
   return `<div class="w24">
         <div class="w24-head"><span class="wk">Wind, next 24 hours</span><span class="w24-peak">${peakText}</span></div>
-        <div class="w24-bars" role="img" aria-label="${said}">${bars}</div>
-        <div class="w24-ticks" aria-hidden="true">${ticks.join('')}</div>
-        <div class="w24-key">mph; arrows point the way the wind blows; the lighter tops are gusts; shaded hours are dark.</div>
+        <div class="w24-plot" role="img" aria-label="${said}">
+          <svg viewBox="0 0 ${f(width)} ${H}" preserveAspectRatio="none" aria-hidden="true">
+            <defs><linearGradient id="w24-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="w24-top"/><stop offset="1" class="w24-bottom"/></linearGradient></defs>
+            ${nights.join('')}
+            <path class="w24-area" fill="url(#w24-fill)" d="${area}"/>
+            ${gustPts ? `<path class="w24-gline" d="${smoothPath(gustPts)}"/>` : ''}
+            <path class="w24-line" d="${windD}"/>
+          </svg>${nowDot}
+        </div>
+        <div class="w24-ticks" style="grid-template-columns:repeat(${n},1fr)" aria-hidden="true">${ticks.join('')}</div>
+        <div class="w24-key">mph. The line is the wind, the dashed line the gusts, the dot now; arrows point the way the wind blows; shaded hours are dark.</div>
       </div>`;
 }
 
