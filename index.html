@@ -603,11 +603,12 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         <div id="wind-source"></div>
         <div id="wind-course"></div>
         <div class="slider-row">
+          <button type="button" class="rb" id="wind-play">&#9654;&#65038; Play</button>
           <label for="wind-time" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);">Hour</label>
           <input type="range" id="wind-time" min="0" max="0" value="0" step="1" disabled/>
           <button type="button" class="rb" id="wind-now">Now</button>
         </div>
-        <div class="slider-ends"><span>Now</span><span>48 hours ahead</span></div>
+        <div class="slider-ends"><span>Now</span><span>24 hours ahead</span></div>
         <p id="wind-status" class="map-status" role="status"></p>
       </div>
 
@@ -716,7 +717,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 <script id="leaflet-js" src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" async
         onerror="this.dataset.failed='1'"></script>
-<script src="map/wind-map.js?v=c0711caa52" async></script>
+<script src="map/wind-map.js?v=1401e3088d" async></script>
 <script>
 // ─────────────────────────────────────────────────────────────────────────
 // MANUAL ZONE OVERRIDE — Safety Committee use only

@@ -6,7 +6,7 @@
  *  1. The wind in words: compass points, calm, gusts only when stronger,
  *     missing values shown as missing - never as 0.
  *  2. Headwind, crosswind, tailwind on the lanes: the geometry, both ways.
- *  3. Now and the 48 hours: now is the airport's measured reading (from the
+ *  3. Now and the 24 hours: now is the airport's measured reading (from the
  *     weather card), the hours ahead the forecast for the dock - never the
  *     model's own "now".
  *  4. The page itself, run with stand-ins for the browser and Leaflet: what
@@ -76,10 +76,13 @@ function fakeEnv(opts = {}) {
   };
   const calls = [];
   doc.ctx = new Proxy({}, { get: (o, k) => (k in o ? o[k] : (...a) => calls.push([k, ...a])), set: (o, k, v) => { o[k] = v; return true; } });
-  for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-source', 'wind-course', 'wind-status', 'wind-now', 'map-copied', 'hazard-key', 'map-tools']) {
+  for (const id of ['hazard-map', 'map-status', 'wind-time', 'wind-time-label', 'wind-line', 'wind-conditions', 'wind-source', 'wind-course', 'wind-status', 'wind-now', 'wind-play', 'map-copied', 'hazard-key', 'map-tools']) {
     if (opts.withoutMapBox && id === 'hazard-map') continue;
     doc.byId[id] = fakeElement(id === 'wind-time' ? 'input' : 'div', doc);
   }
+  // The row the wind's words sit in, as on the page: it is the one read out.
+  doc.liveRow = fakeElement('div', doc);
+  doc.byId['wind-line'].parentNode = doc.liveRow;
   const frames = [];
   const win = {
     devicePixelRatio: 2, timers: [],
@@ -87,6 +90,12 @@ function fakeEnv(opts = {}) {
     requestAnimationFrame: (f) => { frames.push(f); return frames.length; },
     cancelAnimationFrame: () => {},
     setInterval(f, ms) { this.timers.push([f, ms]); return this.timers.length; },
+    // One-off timers (the loop through the hours): kept to be run by hand.
+    timeouts: [],
+    setTimeout(f, ms) { this.timeouts.push({ f, ms, live: true }); return this.timeouts.length; },
+    clearTimeout(id) { if (this.timeouts[id - 1]) this.timeouts[id - 1].live = false; },
+    pending() { return this.timeouts.filter((t) => t.live); },
+    tick() { const t = this.pending().slice(-1)[0]; if (!t) return null; t.live = false; t.f(); return t.ms; },
     // The weather card's airport reading, as the page leaves it, and its event.
     NHRC_STATION: Object.prototype.hasOwnProperty.call(opts, 'station') ? opts.station : STATION,
     listeners: {},
@@ -300,15 +309,15 @@ test('which way a folder\'s lanes are rowed, from its name', () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-section('3. The forecast: now, then 48 hours');
+section('3. The forecast: now, then 24 hours');
 
-test('the forecast: this hour and the next 48, whole hours in Eastern time - and the model\'s own "current" is never used', () => {
+test('the forecast: this hour and the next 24, whole hours in Eastern time - and the model\'s own "current" is never used', () => {
   const s = W.forecastSlots(sampleForecast(), NOW);
-  assert.strictEqual(s.length, 49);
+  assert.strictEqual(s.length, 25);
   assert.deepStrictEqual([s[0].label, s[0].isNow, s[0].forecast, s[0].speed, s[0].from, s[0].temp, s[0].rain], ['Now', true, true, 6, 15, 51, 5],
     'the 14:00 hour - not the answer\'s "current" block (11.6 mph from the NW)');
   assert.strictEqual(s[1].label, 'Sun 3 PM');
-  assert.strictEqual(s[48].label, 'Tue 2 PM');
+  assert.strictEqual(s[24].label, 'Mon 2 PM');
   assert.ok(s.every((x, i) => x.t === NOW - 20 * 60000 + i * 3600000 && x.forecast), 'whole hours, in order, all forecasts');
   // Missing numbers stay missing.
   const fc = sampleForecast();
@@ -321,7 +330,7 @@ test('the forecast: this hour and the next 48, whole hours in Eastern time - and
 test('now is the airport\'s measured reading when the weather card has one under 2 hours old - otherwise the forecast\'s hour, said to be one', () => {
   const fc = W.forecastSlots(sampleForecast(), NOW);
   const s = W.withStation(fc, STATION, NOW);
-  assert.strictEqual(s.length, 49, 'the measured now takes the forecast hour\'s place');
+  assert.strictEqual(s.length, 25, 'the measured now takes the forecast hour\'s place');
   assert.deepStrictEqual([s[0].measured, s[0].isNow, s[0].label, s[0].speed, s[0].gust, s[0].from, s[0].temp, s[0].rain, s[0].cond],
     [true, true, 'Now', 12, 19, 315, 54, null, 'Mostly Cloudy']);
   assert.strictEqual(s[1], fc[1], 'the hours ahead are the forecast\'s');
@@ -363,7 +372,7 @@ test('the forecast is for the boathouse dock, in mph and °F, with times the pag
   assert.strictEqual(u.searchParams.get('temperature_unit'), 'fahrenheit');
   assert.strictEqual(u.searchParams.get('timeformat'), 'unixtime', 'instants, not local clock strings read as UTC');
   for (const v of ['wind_speed_10m', 'wind_gusts_10m', 'wind_direction_10m', 'precipitation_probability']) assert.ok(u.searchParams.get('hourly').includes(v), v);
-  assert.ok(Number(u.searchParams.get('forecast_days')) >= 3, 'enough for 48 hours from late in the day');
+  assert.ok(Number(u.searchParams.get('forecast_days')) >= 2, 'enough for 24 hours from late in the day');
   assert.strictEqual(u.searchParams.get('current'), null, 'the model\'s "now" is never asked for');
 });
 
@@ -400,7 +409,7 @@ test('the wind now: the airport\'s reading - badge, words, where it was measured
   assert.ok(/12 mph from the NW, gusts 19/.test(badge.textContent) && /Now, measured at the airport/.test(badge.textContent), badge.textContent);
   const g = badge.children[0].children.find((c) => c.tagName === 'G');
   assert.strictEqual(g.attrs.transform, 'rotate(135 20 20)', 'the arrow points downwind');
-  assert.strictEqual(p.$('wind-time').max, '48');
+  assert.strictEqual(p.$('wind-time').max, '24');
   assert.strictEqual(p.$('wind-time').disabled, false);
 });
 
@@ -417,7 +426,7 @@ test('the slider moves through the hours; "Now" comes back; the moving wind foll
   assert.strictEqual(p.run.state.wind.state.speed, s17.speed);
   sl.value = '999';
   sl.dispatch('input');
-  assert.strictEqual(p.run.state.index, 48, 'held to the last hour');
+  assert.strictEqual(p.run.state.index, 24, 'held to the last hour');
   p.$('wind-now').click();
   assert.deepStrictEqual([p.run.state.index, sl.value, p.$('wind-time-label').textContent], [0, '0', 'Now']);
 });
@@ -446,7 +455,7 @@ test('no airport reading: now is the forecast\'s hour, and says so; a reading ar
   Date.now = () => NOW;
   try { p.window.station(STATION); } finally { Date.now = realNow; }
   assert.strictEqual(p.$('wind-line').textContent, '12 mph from the NW, gusts 19');
-  assert.strictEqual(p.run.state.slots.length, 49);
+  assert.strictEqual(p.run.state.slots.length, 25);
   assert.strictEqual(p.run.state.wind.state.speed, 12, 'the streaks follow');
   // And a refresh with no reading puts the forecast back.
   Date.now = () => NOW;
@@ -903,6 +912,79 @@ test('"Whole lake" works even before the map\'s outline has arrived; "Boathouse"
   assert.deepStrictEqual(p.run.map.fitOptions, { paddingTopLeft: [20, 20], paddingBottomRight: [20, 34] }, 'the lake\'s far end clear of the credits line');
   buttons[0].click();
   assert.deepStrictEqual(p.run.map.views.slice(-1)[0], ['view', [W.DOCK.lat, W.DOCK.lon], 16]);
+});
+
+test('the map rolls through the hours on its own, like a radar loop: now held, then an hour a second, and round again', async () => {
+  const p = await started();
+  const st = p.run.state, w = p.window;
+  assert.strictEqual(st.playing, true, 'rolling from the start');
+  assert.strictEqual(p.$('wind-play').textContent, '\u275a\u275a Pause');
+  assert.strictEqual(p.document.liveRow.attrs['aria-live'], 'off', 'the changing words are not read out every second');
+  assert.strictEqual(w.pending().length, 1);
+  assert.strictEqual(w.tick(), W.PLAY.holdNowMs, 'now is held a little longer');
+  assert.deepStrictEqual([st.index, p.$('wind-time').value, p.$('wind-time-label').textContent], [1, '1', 'Sun 3 PM']);
+  assert.strictEqual(st.wind.state.speed, st.slots[1].speed, 'the streaks follow each hour');
+  assert.ok(/Sun 3 PM \(forecast\)/.test(st.badge.textContent));
+  for (let i = 2; i <= 24; i++) assert.strictEqual(w.tick(), W.PLAY.frameMs, `hour ${i}`);
+  assert.strictEqual(st.index, 24);
+  w.tick();
+  assert.deepStrictEqual([st.index, p.$('wind-time-label').textContent, p.$('wind-line').textContent], [0, 'Now', '12 mph from the NW, gusts 19'], 'and round to now again');
+  assert.strictEqual(w.pending()[0].ms, W.PLAY.holdNowMs);
+  assert.strictEqual(w.pending().length, 1, 'one step waiting at a time');
+});
+
+test('taking the slider or "Now" stops the loop where you put it; Play starts it again', async () => {
+  const p = await started();
+  const st = p.run.state, w = p.window;
+  w.tick(); w.tick();
+  p.$('wind-time').value = '9';
+  p.$('wind-time').dispatch('input');
+  assert.deepStrictEqual([st.playing, st.index, w.pending().length], [false, 9, 0], 'stopped on the hour you chose');
+  assert.strictEqual(p.$('wind-play').textContent, '\u25b6\ufe0e Play');
+  assert.strictEqual(p.document.liveRow.attrs['aria-live'], 'polite', 'read out again once it holds still');
+  p.$('wind-play').click();
+  assert.deepStrictEqual([st.playing, w.pending().length, w.pending()[0].ms], [true, 1, W.PLAY.frameMs], 'on from where it was');
+  w.tick();
+  assert.strictEqual(st.index, 10);
+  p.$('wind-play').click();
+  assert.deepStrictEqual([st.playing, w.pending().length], [false, 0], 'Pause');
+  p.$('wind-play').click();
+  p.$('wind-now').click();
+  assert.deepStrictEqual([st.playing, st.index, w.pending().length, p.$('wind-time-label').textContent], [false, 0, 0, 'Now']);
+});
+
+test('the loop rests while nobody can see it - map scrolled away or tab hidden - and goes on when they can', async () => {
+  const env = fakeEnv();
+  let observe = null;
+  env.window.IntersectionObserver = function (cb) { observe = cb; this.observe = () => {}; };
+  const realNow = Date.now;
+  Date.now = () => NOW;
+  let run;
+  try { run = W.init(env); await run.forecast; await run.drawn; } finally { Date.now = realNow; }
+  const w = env.window;
+  assert.strictEqual(w.pending().length, 1);
+  observe([{ isIntersecting: false }]);
+  assert.deepStrictEqual([run.state.playing, w.pending().length], [true, 0], 'still on, but no steps while off screen');
+  observe([{ isIntersecting: true }]);
+  assert.strictEqual(w.pending().length, 1);
+  env.document.visibilityState = 'hidden';
+  env.document.listeners.visibilitychange.forEach((f) => f());
+  assert.strictEqual(w.pending().length, 0, 'tab hidden');
+  env.document.visibilityState = 'visible';
+  env.document.listeners.visibilitychange.forEach((f) => f());
+  assert.strictEqual(w.pending().length, 1);
+});
+
+test('no loop on its own for anyone who asked for less motion, without a map, or with only one hour to show', async () => {
+  const r = await started({ reduceMotion: true });
+  assert.deepStrictEqual([r.run.state.playing, r.window.pending().length], [false, 0]);
+  assert.strictEqual(r.document.byId['wind-play'].textContent, '', 'the button as the page wrote it: Play');
+  r.$('wind-play').click();
+  assert.deepStrictEqual([r.run.state.playing, r.window.pending().length], [true, 1], 'Play still works for them');
+  const n = await started({ noLeaflet: true });
+  assert.deepStrictEqual([n.run.state.playing, n.window.pending().length], [false, 0], 'no map: nothing to roll over');
+  const one = await started({ answers: { forecast: { throws: true } } });
+  assert.deepStrictEqual([one.run.state.slots.length, one.run.state.playing, one.window.pending().length], [1, false, 0], 'just now: nothing to roll through');
 });
 
 test('a calm hour clears the map of streaks', async () => {

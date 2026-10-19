@@ -6,10 +6,11 @@
  * scripts/hazard_map.js - a Google My Map cannot show live data, so the site
  * draws the same map itself. Now is the wind measured at Waterbury-Oxford
  * Airport, which the page's weather card loads and hands over (the
- * 'nhrc-station' event); the 48 hours ahead are Open-Meteo's forecast for the
+ * 'nhrc-station' event); the 24 hours ahead are Open-Meteo's forecast for the
  * boathouse dock, one forecast for the whole lake, and say so. No model
- * output is ever shown as now. No thresholds, no verdicts: the wind, and how
- * it lies on the course.
+ * output is ever shown as now. The map rolls through the hours on its own,
+ * like a radar loop, until someone takes the slider. No thresholds, no
+ * verdicts: the wind, and how it lies on the course.
  *
  * In a browser this file starts itself. In Node it only exports its pieces,
  * for scripts/test_map.js.
@@ -25,13 +26,15 @@
   // above the Derby dam: the first view, until the map's own outline arrives.
   const LAKE_BOUNDS = [[41.3262, -73.1565], [41.3770, -73.1035]];
   const TZ = 'America/New_York';
-  const HOURS_AHEAD = 48;
+  const HOURS_AHEAD = 24;
+  /** The loop through the hours: how long each hour shows, and how long now holds before it starts again. */
+  const PLAY = { frameMs: 1000, holdNowMs: 2500 };
   const REFRESH_MS = 15 * 60 * 1000;
   const MAP_DATA_URL = 'map/hazard-map.json';
   const FORECAST_URL = 'https://api.open-meteo.com/v1/forecast'
     + `?latitude=${DOCK.lat}&longitude=${DOCK.lon}`
     + '&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m'
-    + '&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=America%2FNew_York&timeformat=unixtime&forecast_days=3';
+    + '&wind_speed_unit=mph&temperature_unit=fahrenheit&timezone=America%2FNew_York&timeformat=unixtime&forecast_days=2';
   // The map opens on the State of Connecticut's aerial photos from spring 2023:
   // 3-inch pixels, tested to about 4 inches against 179 surveyed points, and
   // taken before the leaves came out, so the banks show. No key, no limits on
@@ -139,7 +142,7 @@
   }
 
   /**
-   * Open-Meteo's answer -> [this hour, then each of the next 48 hours]: { t,
+   * Open-Meteo's answer -> [this hour, then each of the next 24 hours]: { t,
    * label, speed, gust, from, temp, rain, code, forecast: true }. Missing
    * values stay null - never 0. All forecasts: the model's own "current"
    * values are never asked for, and the airport's measured reading takes this
@@ -563,9 +566,12 @@
     const doc = env.document, win = env.window, L = env.L;
     const $ = (id) => doc.getElementById(id);
     const state = { slots: [], fcSlots: [], station: win.NHRC_STATION || null, index: 0, lanes: [], fetchedAt: 0, tried: false,
+      playing: false, autoplayed: false,
       map: null, wind: null, badge: null, base: 'aerial', photos: 'state', tabVisible: doc.visibilityState !== 'hidden', onScreen: true };
-    // The streaks move only while someone can see them: the tab open and the map on screen.
-    const seen = () => { if (state.wind) state.wind.setVisible(state.tabVisible && state.onScreen); };
+    let playTimer = null;                               // the next step of the loop through the hours
+    // The streaks move, and the hours roll, only while someone can see them:
+    // the tab open and the map on screen.
+    const seen = () => { if (state.wind) state.wind.setVisible(state.tabVisible && state.onScreen); nextFrame(); };
 
     const slider = $('wind-time'), timeLabel = $('wind-time-label'), windLine = $('wind-line'),
       condLine = $('wind-conditions'), sourceLine = $('wind-source'), courseLine = $('wind-course'),
@@ -631,6 +637,7 @@
         state.fcSlots = slots;
         if (status) status.textContent = '';
         refreshSlots();
+        autoplay();
       } catch (e) {
         state.tried = true;
         if (!state.fcSlots.length) {
@@ -658,14 +665,47 @@
       }
     }
 
+    // ── Rolling through the hours, like a radar loop ──────────────────────
+    // Now, then each hour ahead, then back to now, over and over - while the map
+    // is on screen. Taking the slider, or "Now", stops it where you put it; Play
+    // starts it again. It does not start on its own for anyone whose device asks
+    // for less motion.
+    const playBtn = $('wind-play');
+    const liveRow = windLine && windLine.parentNode;
+    function nextFrame() {
+      if (playTimer) { win.clearTimeout(playTimer); playTimer = null; }
+      if (!state.playing || !(state.tabVisible && state.onScreen) || state.slots.length < 2 || !win.setTimeout) return;
+      playTimer = win.setTimeout(() => {
+        playTimer = null;
+        state.index = (state.index + 1) % state.slots.length;
+        if (slider) slider.value = String(state.index);
+        showSlot();
+        nextFrame();
+      }, state.index === 0 ? PLAY.holdNowMs : PLAY.frameMs);
+    }
+    function setPlaying(on) {
+      state.playing = !!on;
+      if (playBtn) playBtn.textContent = on ? '\u275a\u275a Pause' : '\u25b6\ufe0e Play';
+      // While it rolls the words change every second: not read out each time.
+      if (liveRow && liveRow.setAttribute) liveRow.setAttribute('aria-live', on ? 'off' : 'polite');
+      nextFrame();
+    }
+    function autoplay() {
+      if (state.autoplayed || !state.map || state.slots.length < 2 || (state.wind && state.wind.reduce)) return;
+      state.autoplayed = true;
+      setPlaying(true);
+    }
+    if (playBtn) playBtn.addEventListener('click', () => setPlaying(!state.playing));
+
     if (slider) {
       slider.addEventListener('input', () => {
+        setPlaying(false);
         state.index = Math.max(0, Math.min(state.slots.length - 1, Number(slider.value) || 0));
         showSlot();
       });
     }
     const nowBtn = $('wind-now');
-    if (nowBtn) nowBtn.addEventListener('click', () => { state.index = 0; if (slider) slider.value = '0'; showSlot(); });
+    if (nowBtn) nowBtn.addEventListener('click', () => { setPlaying(false); state.index = 0; if (slider) slider.value = '0'; showSlot(); });
 
     const forecast = loadForecast();
     const timer = win.setInterval(loadForecast, REFRESH_MS);
@@ -814,7 +854,7 @@
   }
 
   const api = {
-    DOCK, LOGO_URL, LAKE_BOUNDS, TZ, HOURS_AHEAD, FORECAST_URL, MAP_DATA_URL, TILES, PHOTO_FAILS, POPUP, REFRESH_MS,
+    DOCK, LOGO_URL, LAKE_BOUNDS, TZ, HOURS_AHEAD, PLAY, FORECAST_URL, MAP_DATA_URL, TILES, PHOTO_FAILS, POPUP, REFRESH_MS,
     hazardKind, KIND_WORDS, KIND_ORDER, GLYPHS, glyphColor, iconSvg, iconUrl, areaMiddle, ARROW_STEP,
     compass, bearing, distance, angleBetween, windOnBoat, laneEdge, windShares, mostlyText, slotLabel,
     forecastSlots, withStation, slotName, sourceText, STATION_MAX_AGE_MS, windText, conditionsText, arrowRotation, isCalm, courseText, laneText, laneDirection,

@@ -19,7 +19,7 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (241 tests): the email, and the website's script run against a fake network and clock |
+| `test_daily_email.js` | Test suite (243 tests): the email, and the website's script run against a fake network and clock |
 | `test_site_theme.js` | The website's light and dark themes (20 tests): contrast of every colour where it is used (WCAG AA), dark kept as the original design, the switch, the device default, the charts |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
@@ -27,7 +27,7 @@ status using the site's own functions and compares against the email output.
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
 | `hazard_map.js` | Copies the Safety Committee's Google map (lanes, hazards, swim areas) into `map/hazard-map.json` for the map with the wind |
 | `test_hazard_map.js` | Its tests (17): the real map's KML, colours, the committee's words as plain text, and never replacing a good copy with an error page |
-| `test_map.js` | The hazard map with the wind (59 tests): the wind in words, headwind/crosswind/tailwind on the lanes, now measured and the 48 hours forecast, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet, and the old trial address |
+| `test_map.js` | The hazard map with the wind (63 tests): the wind in words, headwind/crosswind/tailwind on the lanes, now measured and the 24 hours forecast, the loop through the hours, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet, and the old trial address |
 | `fixtures/hazard_map.kml` | The Google map as exported in October 2026 |
 
 ## The hazard map with the wind
@@ -65,11 +65,22 @@ running faster and longer.
 
 "Now" on the map is the same measured reading as the weather card's -
 Waterbury-Oxford Airport - which the card hands over when it loads (the
-`nhrc-station` event); the slider's 48 hours ahead are Open-Meteo's forecast
+`nhrc-station` event); the slider's 24 hours ahead are Open-Meteo's forecast
 for the dock, and every hour says which it is. With no current reading, now
-is the forecast's own hour, labelled as one. Leaflet and the map load
-asynchronously: a slow or blocked map library never holds up the rest of
-the page, and the wind is still given in words without it.
+is the forecast's own hour, labelled as one. Airports report wind under 3
+knots as calm, with no direction: then now has no streaks to draw.
+
+The map rolls through the hours by itself, like a radar loop - now held for
+2.5 seconds, then an hour a second - while it is on screen. Moving the
+slider or pressing "Now" stops it there; Play starts it again. It does not
+start by itself for anyone whose device asks for less motion, and the
+changing words are not read out by screen readers while it rolls.
+
+Leaflet and the map load asynchronously: a slow or blocked map library never
+holds up the rest of the page, and the wind is still given in words without
+it. The page loads `map/wind-map.js?v=` + the start of its SHA-256, so a new
+version reaches browsers at once; `scripts/test_map.js` says the value after
+any change.
 
 ## Rowing season
 
