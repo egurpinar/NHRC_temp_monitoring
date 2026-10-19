@@ -19,7 +19,7 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (236 tests): the email, and the website's script run against a fake network and clock |
+| `test_daily_email.js` | Test suite (241 tests): the email, and the website's script run against a fake network and clock |
 | `test_site_theme.js` | The website's light and dark themes (20 tests): contrast of every colour where it is used (WCAG AA), dark kept as the original design, the switch, the device default, the charts |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
@@ -257,6 +257,21 @@ fog, wind, current or debris on the water, so they never say it is clear to row:
 The label function and that note live in `index.html` and are extracted like the
 rules, so the website and the email cannot word a status differently.
 
+## Weather: measured, and forecast
+
+Nothing at the dock measures the air or the wind, so the weather now - on the
+website and in the email - is the readings of the nearest weather station,
+**Waterbury-Oxford Airport (KOXC)**, from the National Weather Service
+(`api.weather.gov`, every 5 minutes). It sits on a hilltop 7.6 mi north of the
+dock, where the wind usually runs stronger than on the river. Every reading
+says where and when it was taken; one more than 2 hours old is not shown as
+current, and the page says when the last one was. No model output is ever
+shown as a measurement (Safety Committee, October 2026).
+
+The 24-hour wind on the website is a **forecast** - Open-Meteo's weather models
+for the dock - and is labelled as one. Sunrise and sunset come with it. The
+fog outlook below stays at the point it was calibrated for.
+
 ## Fog outlook
 
 The email and the website both show a fog outlook for the coming dawn (4–9 AM),
@@ -274,7 +289,7 @@ the picket fence, do not launch.* **Fog never changes which boats are allowed** 
 it is a forecast, not an observation.
 
 **Why eight models.** On 2 Oct 2026 the river was fogged in at dawn. The model
-the weather card uses (HRRR) forecast a 5°F dew-point spread and clear sky; seven
+the weather card used then (HRRR) forecast a 5°F dew-point spread and clear sky; seven
 of eight other models had the air within 2°F of saturation. No model forecast
 low visibility — river fog is too small for them to resolve — so the outlook
 uses the precondition from many models rather than any one model's visibility.

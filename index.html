@@ -270,6 +270,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .air-temp-val{font-family:var(--fserif);font-size:2.2rem;font-weight:700;color:var(--white);line-height:1;}
 .weather-cond{font-size:.78rem;color:var(--muted);margin-top:3px;}
 .weather-feels{font-size:.72rem;color:var(--muted);margin-top:2px;}
+.weather-source{font-size:.7rem;color:var(--muted);margin:-4px 0 10px;line-height:1.45;}
+.weather-missing{font-size:.78rem;color:var(--caution);padding:4px 0 10px;line-height:1.45;}
+.weather-credits{margin-top:10px;font-size:.66rem;color:var(--muted);text-align:right;line-height:1.7;}
+.weather-credits a{color:var(--muted);white-space:nowrap;}
 .weather-alert{border-radius:8px;padding:8px 12px;font-size:.75rem;line-height:1.4;}
 .weather-alert.warn{background:rgba(224,123,32,.1);border:1px solid rgba(224,123,32,.35);color:var(--warn-text);}
 .weather-alert.danger{background:rgba(224,62,62,.1);border:1px solid rgba(224,62,62,.35);color:var(--bad);}
@@ -451,7 +455,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
     <!-- WEATHER CARD -->
     <div class="weather-card">
-      <div class="section-label">Current Weather — Oxford, CT</div>
+      <div class="section-label">Weather — Oxford, CT</div>
       <div id="weather-content">
         <div style="font-size:.8rem;color:var(--muted);padding:12px 0;">Loading weather data...</div>
       </div>
@@ -844,7 +848,8 @@ const state = {
   riverRange: 3,      // selected zoom window in days for the river chart (default: 3 days)
   fogLoaded: false,   // true once loadFogOutlook() has finished, even if both sources failed
   fogResponse: null,  // Open-Meteo multi-model forecast, or null if it could not be fetched
-  fogAlerts: null,    // NWS active alerts for the boathouse point, or null
+  fogAlerts: null,    // NWS active alerts for the fog point, or null
+  station: null,      // the airport's current reading (readStation), or null
   lastRaw: null,      // the last data.json that rendered, kept for failed refreshes
   lastTempC: null,
   dataRefreshFailed: false, // the latest data.json refresh failed; the last reading is still shown
@@ -2029,6 +2034,107 @@ function windDirLabel(deg) {
   const dirs = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
   return dirs[Math.round(deg / 22.5) % 16];
 }
+// Text from an outside source, made safe to put into markup.
+function escText(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ── THE WEATHER NOW: MEASURED ────────────────────────────────────────────────
+ * Nothing at the dock measures the air or the wind, so the weather now is the
+ * nearest weather station's own readings: Waterbury-Oxford Airport (KOXC),
+ * from the National Weather Service. It reads every 5 minutes. Every reading
+ * on the page says where and when it was taken, and one more than 2 hours old
+ * is not shown as current. The station sits on a hilltop 7.6 mi north of the
+ * dock, where the wind usually runs stronger than on the river.
+ *
+ * Forecasts (the 24-hour wind) come from Open-Meteo's weather models for the
+ * dock, and say so. Safety Committee, October 2026: no model output is shown
+ * as a measurement.
+ */
+const WEATHER_STATION = { id: 'KOXC', name: 'Waterbury-Oxford Airport', where: 'on a hilltop 7.6 mi north of the dock' };
+const STATION_MAX_AGE_MS = 2 * 3600 * 1000;
+// The NHRC dock, as the club gave it: where the water is measured, and the
+// place the forecasts are for.
+const DOCK_POINT = { lat: 41.3685422, lon: -73.1478128 };
+function stationObservationsUrl() {
+  return `https://api.weather.gov/stations/${WEATHER_STATION.id}/observations?limit=15`;
+}
+/** The forecast for the dock: the hourly wind for the 24-hour line, and sunrise and sunset. */
+function weatherForecastUrl() {
+  return `https://api.open-meteo.com/v1/forecast?latitude=${DOCK_POINT.lat}&longitude=${DOCK_POINT.lon}` +
+    `&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m&daily=sunrise,sunset&forecast_days=2` +
+    `&timeformat=unixtime&wind_speed_unit=mph&timezone=America%2FNew_York`;
+}
+// The station's sky and weather (the NWS icon names) as the WMO codes the
+// icons and the rowing alerts already use. Its own words are shown as they are.
+const NWS_TO_WMO = {
+  skc: 0, few: 1, sct: 2, bkn: 3, ovc: 3, wind_skc: 0, wind_few: 1, wind_sct: 2, wind_bkn: 3, wind_ovc: 3,
+  fog: 45, haze: 45, smoke: 45, dust: 45,
+  rain: 63, rain_showers: 80, rain_showers_hi: 80, fzra: 61, rain_fzra: 61,
+  tsra: 95, tsra_sct: 95, tsra_hi: 95, tornado: 99, hurricane: 99, tropical_storm: 99,
+  snow: 73, rain_snow: 71, snow_fzra: 71, sleet: 77, rain_sleet: 77, snow_sleet: 77, blizzard: 75,
+};
+function nwsWmo(iconUrl) {
+  const m = /\/icons\/land\/(?:day|night)\/([a-z_]+)/.exec(String(iconUrl || ''));
+  return m && Object.prototype.hasOwnProperty.call(NWS_TO_WMO, m[1]) ? NWS_TO_WMO[m[1]] : null;
+}
+/**
+ * The station's latest reading from an NWS observations answer: { atMs, tempF,
+ * windMph, dir, gustMph, humidity, feelsF, cond, code }. Temperature and wind
+ * come from the newest observation that has both; the sky from the newest in
+ * the hour before it that describes it; gusts are the highest reported in that
+ * hour (null: none). dir is null in a calm, 'variable' when it shifts about.
+ * Null when nothing usable came back; { stale: true, atMs } when the newest
+ * usable reading is more than 2 hours old. Values the NWS quality checks
+ * failed or questioned are left out.
+ */
+function readStation(json, nowMs) {
+  const good = (q) => (q && wxNum(q.value) && !/^[XQB]$/.test(String(q.qualityControl || '')) ? q.value : null);
+  const degF = (q) => {
+    const v = good(q);
+    if (v === null) return null;
+    return /degF/.test(q.unitCode) ? v : /degC/.test(q.unitCode) ? v * 9 / 5 + 32 : null;
+  };
+  const mph = (q) => {
+    const v = good(q);
+    if (v === null) return null;
+    return /km_h-1/.test(q.unitCode) ? v / 1.609344 : /m_s-1/.test(q.unitCode) ? v * 2.2369363
+      : /kt|knot/.test(q.unitCode) ? v * 1.1507794 : null;
+  };
+  const obs = (json && Array.isArray(json.features) ? json.features : [])
+    .map(f => f && f.properties).filter(p => p && typeof p.timestamp === 'string')
+    .map(p => ({ p, t: Date.parse(p.timestamp) })).filter(o => Number.isFinite(o.t) && o.t <= nowMs + 600000)
+    .sort((a, b) => b.t - a.t);
+  const cur = obs.find(o => degF(o.p.temperature) !== null && mph(o.p.windSpeed) !== null);
+  if (!cur) return null;
+  if (nowMs - cur.t > STATION_MAX_AGE_MS) return { stale: true, atMs: cur.t };
+  const hour = obs.filter(o => o.t <= cur.t && cur.t - o.t <= 3600000);
+  const sky = hour.find(o => typeof o.p.textDescription === 'string' && o.p.textDescription.trim());
+  const gusts = hour.map(o => mph(o.p.windGust)).filter(v => v !== null);
+  const p = cur.p, tempF = Math.round(degF(p.temperature)), windMph = Math.round(mph(p.windSpeed));
+  const deg = good(p.windDirection);
+  const feels = degF(p.windChill) !== null ? degF(p.windChill) : degF(p.heatIndex);
+  const rh = good(p.relativeHumidity);
+  return {
+    atMs: cur.t, tempF, windMph,
+    dir: windMph === 0 ? null : deg === null ? 'variable' : windDirLabel(deg),
+    gustMph: gusts.length ? Math.round(Math.max(...gusts)) : null,
+    humidity: rh === null ? null : Math.round(rh),
+    feelsF: feels !== null && Math.round(feels) !== tempF ? Math.round(feels) : null,
+    cond: sky ? sky.p.textDescription.trim() : null,
+    code: sky ? nwsWmo(sky.p.icon) : null,
+  };
+}
+/** "6:05 AM", boathouse time. */
+function clockTime(ms) {
+  return new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit' }).format(new Date(ms));
+}
+/** "Wind 9 mph NW", "Wind 4 mph, variable", "Calm". */
+function windWords(r) {
+  if (!r.windMph) return 'Calm';
+  return r.dir === 'variable' ? `Wind ${r.windMph} mph, variable` : `Wind ${r.windMph} mph ${r.dir}`;
+}
+
 function rowingWeatherAlert(windMph, gustMph, code) {
   if ([95,96,99,82].includes(code)) return { cls:'danger', text:'Severe weather — stay off the water' };
   if (gustMph > 25 || windMph > 20)  return { cls:'danger', text:'High wind — use caution on the water' };
@@ -2036,9 +2142,10 @@ function rowingWeatherAlert(windMph, gustMph, code) {
   if (windMph > 12)                  return { cls:'warn',   text:'Moderate wind — monitor conditions' };
   return null;
 }
-/* ── WIND, NEXT 24 HOURS ──────────────────────────────────────────────────────
- * From the same Open-Meteo answer as the card above it (same place): hourly
- * wind, gusts and direction, and sunrise and sunset to shade the night. Times
+/* ── WIND FORECAST, NEXT 24 HOURS ─────────────────────────────────────────────
+ * Open-Meteo's forecast for the dock (weatherForecastUrl): hourly wind, gusts
+ * and direction, and sunrise and sunset to shade the night. A forecast, and
+ * labelled as one - the measured wind is the airport's, above it. Times
  * are instants (timeformat=unixtime). No thresholds: the numbers and the shape
  * of the day, for planning when to go out.
  *
@@ -2157,11 +2264,11 @@ function renderWind24(w) {
     : `Strongest ${Math.round(p.speed)} mph${gustsOf(p)} around ${hourLabel(p.t)}`;
   const speeds = w.hours.filter(x => x.speed !== null).map(x => Math.round(x.speed));
   const gusts = w.hours.filter(x => x.gust !== null).map(x => Math.round(x.gust));
-  const said = `Wind for the next 24 hours: ${Math.min(...speeds)} to ${Math.max(...speeds)} mph`
+  const said = `Wind forecast for the dock, next 24 hours: ${Math.min(...speeds)} to ${Math.max(...speeds)} mph`
     + (gusts.length ? `, gusts up to ${Math.max(...gusts)}` : '')
     + (p ? `. ${peakText}${wxNum(p.from) ? `, from the ${windDirLabel(p.from)}` : ''}.` : '.');
   return `<div class="w24">
-        <div class="w24-head"><span class="wk">Wind, next 24 hours</span><span class="w24-peak">${peakText}</span></div>
+        <div class="w24-head"><span class="wk">Wind forecast, next 24 hours</span><span class="w24-peak">${peakText}</span></div>
         <div class="w24-plot" role="img" aria-label="${said}">
           <svg viewBox="0 0 ${f(width)} ${H}" preserveAspectRatio="none" aria-hidden="true">
             <defs><linearGradient id="w24-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="w24-top"/><stop offset="1" class="w24-bottom"/></linearGradient></defs>
@@ -2172,7 +2279,7 @@ function renderWind24(w) {
           </svg>${nowDot}
         </div>
         <div class="w24-ticks" style="grid-template-columns:repeat(${n},1fr)" aria-hidden="true">${ticks.join('')}</div>
-        <div class="w24-key">mph. The line is the wind, the dashed line the gusts, the dot now; arrows point the way the wind blows; shaded hours are dark.</div>
+        <div class="w24-key">Forecast for the dock from weather models, in mph: the line is the wind, the dashed line the gusts, the dot now; arrows point the way the wind blows; shaded hours are dark.</div>
       </div>`;
 }
 
@@ -2180,22 +2287,22 @@ function loadWeather() {
   return once('weather', loadWeatherNow);
 }
 async function loadWeatherNow() {
+  const getJson = (url, init) => fetchWithTimeout(url, FETCH_TIMEOUT_MS, init).then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  });
+  // Two sources, each failing on its own: with no reading the forecast still
+  // shows, and with no forecast the reading does.
+  const [obs, fc] = await Promise.allSettled([
+    getJson(stationObservationsUrl(), { headers: { Accept: 'application/geo+json' } }),
+    getJson(weatherForecastUrl()),
+  ]);
+  let reading = null;
+  try { reading = obs.status === 'fulfilled' ? readStation(obs.value, Date.now()) : null; } catch (e) { reading = null; }
+  const data = fc.status === 'fulfilled' ? fc.value : null;
+  const live = reading && !reading.stale ? reading : null;
+  state.station = live;
   try {
-    // Coordinates: 407 Roosevelt Drive, Oxford CT (Lake Housatonic boathouse)
-    const lat = 41.4370, lon = -73.1190;
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
-      `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation` +
-      `&hourly=wind_speed_10m,wind_gusts_10m,wind_direction_10m` +
-      `&daily=sunrise,sunset&forecast_days=2&timeformat=unixtime` +
-      `&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=America%2FNew_York`;
-    const res  = await fetchWithTimeout(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const c    = data.current;
-    // Temperature and wind are the point of this card: without them it says
-    // "unavailable" rather than printing Math.round(null), which is 0 - "0°F,
-    // wind 0 mph" on a page people use to decide whether to go out.
-    if (!c || !wxNum(c.temperature_2m) || !wxNum(c.wind_speed_10m)) throw new Error('weather: no temperature or wind');
     // Open-Meteo returns daily times already converted to the requested
     // timezone and WITHOUT an offset ("2026-08-07T05:52"). Parsing those with
     // new Date() would treat them as UTC and shift them by hours, so read the
@@ -2217,53 +2324,63 @@ async function loadWeatherNow() {
       h = h % 12; if (h === 0) h = 12;
       return `${h}:${m[2]} ${suffix}`;
     };
-    const sunrise = sunTime(data && data.daily && data.daily.sunrise && data.daily.sunrise[0]);
-    const sunset  = sunTime(data && data.daily && data.daily.sunset  && data.daily.sunset[0]);
-    const code    = c.weather_code;
-    const tempF   = Math.round(c.temperature_2m);
-    // The rest are secondary: shown as "--" when missing, never as zero.
-    const feelsF  = wxNum(c.apparent_temperature) ? Math.round(c.apparent_temperature) : '--';
-    const windMph = Math.round(c.wind_speed_10m);
-    const gustMph = wxNum(c.wind_gusts_10m) ? Math.round(c.wind_gusts_10m) : '--';
-    const dir     = wxNum(c.wind_direction_10m) ? windDirLabel(c.wind_direction_10m) : '--';
-    const precip  = wxNum(c.precipitation) ? c.precipitation.toFixed(2) : '--';
-    const alert   = rowingWeatherAlert(windMph, typeof gustMph === 'number' ? gustMph : 0, code);
-    const icon    = WMO_ICONS[code] || '&#127777;';
-    const cond    = WMO_CODES[code] || 'Unknown';
-    renderSummaryWeather({ tempF, cond, icon, windMph, gustMph, dir, alert });
+    const sunrise = data ? sunTime(data.daily && data.daily.sunrise && data.daily.sunrise[0]) : null;
+    const sunset  = data ? sunTime(data.daily && data.daily.sunset  && data.daily.sunset[0]) : null;
     let windStrip = '';
-    try { windStrip = renderWind24(wind24(data, Date.now())); } catch (e) { windStrip = ''; }
-    document.getElementById('weather-content').innerHTML = `
+    try { windStrip = data ? renderWind24(wind24(data, Date.now())) : ''; } catch (e) { windStrip = ''; }
+    if (!live && !windStrip && !sunrise && !sunset) throw new Error('weather: nothing to show');
+
+    let nowHtml;
+    if (live) {
+      const icon = (live.code !== null && WMO_ICONS[live.code]) || '&#127777;';
+      const cond = live.cond ? escText(live.cond) : (live.code !== null && WMO_CODES[live.code]) || '';
+      const alert = rowingWeatherAlert(live.windMph, live.gustMph || 0, live.code);
+      renderSummaryWeather({ tempF: live.tempF, cond, icon, wind: windWords(live), gustMph: live.gustMph,
+        at: clockTime(live.atMs), alert });
+      nowHtml = `
       <div class="weather-main-row">
         <div class="weather-icon-block">
           <div class="weather-icon">${icon}</div>
           <div>
-            <div class="air-temp-val">${tempF}°F</div>
-            <div class="weather-cond">${cond}</div>
-            <div class="weather-feels">Feels like ${feelsF}°F</div>
+            <div class="air-temp-val">${live.tempF}°F</div>
+            ${cond ? `<div class="weather-cond">${cond}</div>` : ''}
+            ${live.feelsF !== null ? `<div class="weather-feels">Feels like ${live.feelsF}°F</div>` : ''}
           </div>
         </div>
         ${alert ? `<div class="weather-alert ${alert.cls}">${alert.text}</div>` : ''}
       </div>
+      <div class="weather-source">Measured at ${WEATHER_STATION.name}, ${WEATHER_STATION.where}, at ${clockTime(live.atMs)}.</div>
       <div class="weather-stats-row">
-        <div class="wstat"><div class="wk">Wind</div><div class="wv">${windMph}<span class="wu">mph</span></div><div class="wd">${dir} direction</div></div>
-        <div class="wstat"><div class="wk">Gusts</div><div class="wv">${gustMph}<span class="wu">mph</span></div><div class="wd">Peak gust</div></div>
-        <div class="wstat"><div class="wk">Precip</div><div class="wv">${precip}<span class="wu">in</span></div><div class="wd">Current hour</div></div>
-      </div>
+        <div class="wstat"><div class="wk">Wind</div>${live.windMph
+          ? `<div class="wv">${live.windMph}<span class="wu">mph</span></div><div class="wd">${live.dir === 'variable' ? 'Variable direction' : `From the ${live.dir}`}</div>`
+          : `<div class="wv">Calm</div><div class="wd">No wind</div>`}</div>
+        <div class="wstat"><div class="wk">Gusts</div>${live.gustMph !== null
+          ? `<div class="wv">${live.gustMph}<span class="wu">mph</span></div>`
+          : `<div class="wv">None</div>`}<div class="wd">In the last hour</div></div>
+        <div class="wstat"><div class="wk">Humidity</div><div class="wv">${live.humidity !== null ? `${live.humidity}<span class="wu">%</span>` : '--'}</div><div class="wd">Relative</div></div>
+      </div>`;
+    } else {
+      const why = reading && reading.stale
+        ? `No current reading from ${WEATHER_STATION.name}: the last was at ${clockTime(reading.atMs)}${
+            Date.now() - reading.atMs > 20 * 3600 * 1000 ? ' on ' + new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric' }).format(new Date(reading.atMs)) : ''}.`
+        : obs.status === 'fulfilled' ? `No usable reading from ${WEATHER_STATION.name} right now.`
+        : `The readings from ${WEATHER_STATION.name} could not be loaded.`;
+      renderSummaryWeather({ missing: why });
+      nowHtml = `<div class="weather-missing">${why}</div>`;
+    }
+    document.getElementById('weather-content').innerHTML = `${nowHtml}
       ${windStrip}
       ${(sunrise || sunset) ? `<div class="weather-stats-row" style="margin-top:10px;grid-template-columns:repeat(2,1fr);">
         <div class="wstat"><div class="wk">Sunrise</div><div class="wv">${sunrise || '--'}</div><div class="wd">Oxford, CT</div></div>
         <div class="wstat"><div class="wk">Sunset</div><div class="wv">${sunset || '--'}</div><div class="wd">Oxford, CT</div></div>
       </div>` : ''}
-      <div style="margin-top:10px;text-align:right;">
-        <a href="https://forecast.weather.gov/MapClick.php?CityName=Oxford&state=CT&site=OKX&textField1=41.4370&textField2=-73.1190"
-           target="_blank"
-           style="font-size:.7rem;color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:4px;">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-          More weather info — NWS Oxford, CT
-        </a>
+      <div class="weather-credits">
+        <div><a href="https://forecast.weather.gov/data/obhistory/${WEATHER_STATION.id}.html" target="_blank" rel="noopener">The airport's readings, last 3 days</a>
+          &middot; <a href="https://forecast.weather.gov/MapClick.php?lat=${DOCK_POINT.lat}&lon=${DOCK_POINT.lon}" target="_blank" rel="noopener">NWS forecast for the dock</a></div>
+        <div>Readings: National Weather Service &middot; Forecasts: <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a></div>
       </div>`;
   } catch(e) {
+    state.station = null;
     renderSummaryWeather(null);
     document.getElementById('weather-content').innerHTML =
       '<div style="font-size:.78rem;color:var(--bad);padding:8px 0;">Could not load weather data.</div>';
@@ -2281,18 +2398,21 @@ function setSummary(id, html) {
   if (el) el.innerHTML = html;
 }
 
-// w: { tempF, cond, icon, windMph, gustMph, dir, alert } from loadWeather, or
-// null when the weather could not be loaded.
+// w: { tempF, cond, icon, wind, gustMph, at, alert } - the airport's reading -
+// from loadWeather; { missing: why } when there is no current reading; null
+// when the weather could not be loaded at all.
 function renderSummaryWeather(w) {
   try {
     if (!w) { setSummary('sum-weather', '<div class="summary-line">Weather unavailable</div>'); return; }
+    if (w.missing) { setSummary('sum-weather', `<div class="summary-line">${w.missing}</div>`); return; }
     // The same alert the weather card shows (high wind, rain, storms): a
-    // snapshot reading "Clear sky" while hiding "High wind" would mislead.
+    // snapshot reading "Clear" while hiding "High wind" would mislead.
     const alert = w.alert ? `<div class="summary-alert ${w.alert.cls}">${w.alert.text}</div>` : '';
     setSummary('sum-weather', `
       <div class="summary-big"><span class="wicon">${w.icon}</span>${w.tempF}°F</div>
-      <div class="summary-line">${w.cond}</div>
-      <div class="summary-line">Wind ${w.windMph} mph${w.dir && w.dir !== '--' ? ' ' + w.dir : ''}, gusts ${w.gustMph}</div>${alert}`);
+      ${w.cond ? `<div class="summary-line">${w.cond}</div>` : ''}
+      <div class="summary-line">${w.wind}${w.gustMph !== null ? `, gusts ${w.gustMph}` : ''}</div>
+      <div class="summary-line summary-source">${WEATHER_STATION.name}, ${w.at}</div>${alert}`);
   } catch (e) {
     console.warn('weather summary failed:', e);
   }
@@ -2328,7 +2448,7 @@ function renderSummaryRiver() {
  *
  * WHY IT IS BUILT THIS WAY
  * On 2 Oct 2026 the river was fogged in at dawn while this page said nothing
- * about it. The model the weather card uses (HRRR, Open-Meteo's default here)
+ * about it. The model the weather card used then (HRRR, Open-Meteo's default)
  * forecast a 5°F dew-point spread and clear sky. Seven of eight other major
  * models had the air within 2°F of saturation with light wind - the setup that
  * fogs a river valley - and the apps that warned of fog that night were reading
@@ -2366,7 +2486,10 @@ function renderSummaryRiver() {
  * forecast, not an observation. The camera, and the club's picket-fence rule,
  * are the observation.
  */
-const BOATHOUSE_POINT = { lat: 41.4370, lon: -73.1190 };
+// The point the outlook was calibrated for: in Oxford center, about 5 mi north
+// of the dock. Moving it changes what the numbers above mean - re-run the
+// backtest at the new point first.
+const FOG_POINT = { lat: 41.4370, lon: -73.1190 };
 
 // Exactly the models the calibration above used. Changing this list changes
 // what the numbers above mean - re-run the backtest before editing it.
@@ -2580,7 +2703,7 @@ function fogText(a, label) {
 
 function loadFogOutlook() {
   return once('fog', async () => {
-    const { lat, lon } = BOATHOUSE_POINT;
+    const { lat, lon } = FOG_POINT;
     const getJson = (url) => fetchWithTimeout(url).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
     // Independent sources: an NWS outage must not hide the model outlook, or
     // the other way round.

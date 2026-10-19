@@ -173,10 +173,13 @@ function loadSiteLogic(indexHtmlPath = INDEX_HTML) {
     // River level selection: same staleness rule and forecast fallback as the site.
     'pickRiverLevel', 'parseRiverSeries', 'RIVER_STALE_MS', 'RIVER_FORECAST_MAX_GAP_MS',
     'WMO_CODES', 'WMO_ICONS',
+    // The weather now: the same station, the same parsing and the same words as the site.
+    'WEATHER_STATION', 'DOCK_POINT', 'stationObservationsUrl', 'weatherForecastUrl', 'readStation',
+    'nwsWmo', 'windWords', 'clockTime',
     // Wording: the email must never label a status differently from the site.
     'boatStatusLabel', 'ALLOWED_NOTE_HTML',
     // Fog outlook: same models, thresholds, wording and rule as the website.
-    'BOATHOUSE_POINT', 'FOG_MODELS', 'FOG_RULES', 'FOG_LAUNCH_RULE',
+    'FOG_POINT', 'FOG_MODELS', 'FOG_RULES', 'FOG_LAUNCH_RULE',
     'fogOutlookUrl', 'fogAlertsUrl', 'fogTarget', 'fogAdvisory',
     'assessFogRisk', 'fogText',
   ];
@@ -325,22 +328,13 @@ function withWeatherDescription(weather, logic) {
   const hasCode = weather.code !== undefined && weather.code !== null;
   const resolved = hasCode ? describeWeatherCode(weather.code, logic) : {};
   return Object.assign({}, weather, {
-    cond: resolved.cond || weather.cond || 'Unknown',
+    // The station's own words when it gave some ("Mostly Cloudy"), else the
+    // code's; an empty sky is said by nothing rather than by "Unknown".
+    cond: weather.cond || (hasCode && resolved.cond !== 'Unknown' ? resolved.cond : ''),
     icon: resolved.icon || weather.icon || DEFAULT_WEATHER_ICON,
   });
 }
 
-// Boathouse coordinates — 407 Roosevelt Drive, Oxford CT.
-//
-// Open-Meteo is a gridded forecast model, not a weather station: it interpolates
-// to whatever point you ask for, so this is already a boathouse forecast rather
-// than an airport observation. (Waterbury-Oxford Airport is 4.8 km north; we do
-// not use it.) Sunrise and sunset are computed astronomically from these exact
-// coordinates, so they are precise to the metre; temperature and wind come from
-// a model grid of roughly 1-11 km, so small coordinate changes move them little.
-//
-// To fine-tune, replace these two numbers with the dock's coordinates.
-const BOATHOUSE = { lat: 41.4370, lon: -73.1190 };
 
 /**
  * Formats an Open-Meteo sunrise/sunset value as a local clock time ("5:52 AM").
@@ -385,38 +379,39 @@ function formatLocalClock(value, timeZone = 'America/New_York') {
   return `${h}:${min} ${suffix}`;
 }
 
-async function loadWeather() {
-  const { lat, lon } = BOATHOUSE;
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
-    `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation` +
-    `&daily=sunrise,sunset` +
-    `&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=America%2FNew_York`;
+/**
+ * The weather now, as the website shows it: the readings of the nearest weather
+ * station, Waterbury-Oxford Airport, from the National Weather Service - never
+ * a model's estimate - with sunrise and sunset for the dock. { available: true,
+ * atMs, tempF, windMph, dir, gustMph, humidity, feelsF, cond, code, sunrise,
+ * sunset } when there is a current reading; otherwise { available: false,
+ * missing: why, sunrise, sunset }. The two requests fail on their own.
+ */
+async function loadWeather(logic) {
   try {
-    const data = await fetchJson(url);
-    const c = data.current;
-    // Same rule as the website: no temperature or wind means no weather, never
-    // Math.round(null) - which is 0, and would print "0°F, wind 0 mph". The
-    // secondary values show as "--" when missing.
-    const num = v => typeof v === 'number' && Number.isFinite(v);
-    if (!c || !num(c.temperature_2m) || !num(c.wind_speed_10m)) return { available: false };
-    // daily arrays are indexed by day; [0] is today in the requested timezone.
-    const sunrise = formatLocalClock(data && data.daily && data.daily.sunrise && data.daily.sunrise[0]);
-    const sunset  = formatLocalClock(data && data.daily && data.daily.sunset  && data.daily.sunset[0]);
-    return {
-      available: true,
-      code: c.weather_code,
-      tempF: Math.round(c.temperature_2m),
-      feelsF: num(c.apparent_temperature) ? Math.round(c.apparent_temperature) : '--',
-      windMph: Math.round(c.wind_speed_10m),
-      gustMph: num(c.wind_gusts_10m) ? Math.round(c.wind_gusts_10m) : '--',
-      dir: num(c.wind_direction_10m) ? windDirLabel(c.wind_direction_10m) : '--',
-      precip: num(c.precipitation) ? c.precipitation.toFixed(2) : '--',
-      sunrise,
-      sunset,
-    };
+    return await loadWeatherFrom(logic);
   } catch (e) {
-    return { available: false };
+    return { available: false };      // never a reason for the email not to go
   }
+}
+async function loadWeatherFrom(logic) {
+  const [obs, fc] = await Promise.allSettled([
+    fetchJson(logic.stationObservationsUrl(), 20000, NWS_HEADERS),
+    fetchJson(logic.weatherForecastUrl()),
+  ]);
+  const daily = fc.status === 'fulfilled' && fc.value && fc.value.daily ? fc.value.daily : {};
+  const sunrise = formatLocalClock(Array.isArray(daily.sunrise) ? daily.sunrise[0] : null);
+  const sunset = formatLocalClock(Array.isArray(daily.sunset) ? daily.sunset[0] : null);
+  const name = logic.WEATHER_STATION.name;
+  let r = null;
+  try { r = obs.status === 'fulfilled' ? logic.readStation(obs.value, Date.now()) : null; } catch (e) { r = null; }
+  if (!r || r.stale) {
+    return { available: false, sunrise, sunset,
+      missing: r && r.stale ? `No current reading from ${name}: the last was at ${logic.clockTime(r.atMs)}.`
+        : obs.status === 'fulfilled' ? `No usable reading from ${name} this morning.`
+        : `The readings from ${name} could not be loaded this morning.` };
+  }
+  return Object.assign({ available: true, sunrise, sunset }, r);
 }
 
 // api.weather.gov rejects requests with no User-Agent. NWS asks for a point of
@@ -433,7 +428,7 @@ const NWS_HEADERS = {
  * as null, which the assessment reports as "unavailable" - never as "low".
  */
 async function loadFogInputs(logic) {
-  const { lat, lon } = BOATHOUSE;
+  const { lat, lon } = logic.FOG_POINT;
   const [fc, al] = await Promise.allSettled([
     fetchJson(logic.fogOutlookUrl(lat, lon)),
     fetchJson(logic.fogAlertsUrl(lat, lon), 20000, NWS_HEADERS),
@@ -553,7 +548,13 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
     riverStaleNote,
     // Resolve the condition label and icon here, where the site's own mapping
     // is available, so the email uses the same icons the website shows.
-    weather: withWeatherDescription(weather, logic),
+    weather: weather && weather.available
+      ? Object.assign(withWeatherDescription(weather, logic), {
+          wind: logic.windWords(weather),
+          at: Number.isFinite(weather.atMs) ? logic.clockTime(weather.atMs) : null,
+          tz: Number.isFinite(weather.atMs) ? logic.nyTzAbbr(weather.atMs) : '',
+          station: logic.WEATHER_STATION.name, where: logic.WEATHER_STATION.where })
+      : weather,
     sensorStale,
     sensorAgeMs,
     fog,
@@ -777,20 +778,25 @@ function renderEmailHtml(d) {
   // It renders as dark text on a light card, which needs no colour trickery:
   // the earlier white-on-navy version was invisible whenever the background
   // failed to apply.
-  const weatherBlock = d.weather.available
+  const w = d.weather;
+  const line = (size, color, pad, html) =>
+    `<div style="font-size:${size}px;color:${color};background-color:${C.card};padding-top:${pad}px;">${html}</div>`;
+  const sunLine = (w && (w.sunrise || w.sunset))
+    ? line(13, C.ink, 6, `Sunrise ${esc(w.sunrise || '--')} &nbsp;&middot;&nbsp; Sunset ${esc(w.sunset || '--')}`) : '';
+  const weatherBlock = w && w.available
     ? `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
          <tr>
-           <td style="font-size:26px;line-height:1;padding-right:12px;vertical-align:top;color:${C.ink};background-color:${C.card};">${d.weather.icon || ''}</td>
+           <td style="font-size:26px;line-height:1;padding-right:12px;vertical-align:top;color:${C.ink};background-color:${C.card};">${w.icon || ''}</td>
            <td style="vertical-align:top;font-family:Arial,Helvetica,sans-serif;background-color:${C.card};">
-             <div style="font-size:14px;font-weight:bold;color:${C.ink};background-color:${C.card};">${esc(d.weather.cond)}, ${d.weather.tempF}°F</div>
-             <div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};padding-top:3px;">Feels like ${esc(d.weather.feelsF)}°F &nbsp;&middot;&nbsp; Wind ${d.weather.windMph} mph${d.weather.dir && d.weather.dir !== '--' ? ' ' + esc(d.weather.dir) : ''}, gusts ${esc(d.weather.gustMph)}${d.weather.gustMph === '--' ? '' : ' mph'}</div>
-             <div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};padding-top:2px;">Precipitation ${esc(d.weather.precip)}${d.weather.precip === '--' ? '' : ' in'}</div>
-             ${(d.weather.sunrise || d.weather.sunset) ? `<div style="font-size:13px;color:${C.ink};background-color:${C.card};padding-top:6px;">Sunrise ${esc(d.weather.sunrise || '--')} &nbsp;&middot;&nbsp; Sunset ${esc(d.weather.sunset || '--')}</div>` : ''}
-             ${d.timeLabel ? `<div style="font-size:12px;color:${C.inkSoft};background-color:${C.card};padding-top:6px;">Conditions as of ${esc(d.timeLabel)} ${esc(d.tz || '')}, when this email was prepared &mdash; check again before you leave.</div>` : ''}
+             ${line(14, C.ink, 0, `<strong>${w.cond ? esc(w.cond) + ', ' : ''}${w.tempF}°F</strong>${w.feelsF !== null && w.feelsF !== undefined ? ` <span style="font-weight:normal;color:${C.inkSoft};">(feels like ${w.feelsF}°F)</span>` : ''}`)}
+             ${line(13, C.inkSoft, 3, `${esc(w.wind)}${w.gustMph !== null && w.gustMph !== undefined ? `, gusts to ${w.gustMph} mph in the last hour` : ', no gusts in the last hour'}${w.humidity !== null && w.humidity !== undefined ? ` &nbsp;&middot;&nbsp; Humidity ${w.humidity}%` : ''}`)}
+             ${sunLine}
+             ${line(12, C.inkSoft, 6, `Measured at ${esc(w.station)}, ${esc(w.where)}${w.at ? `, at ${esc(w.at)} ${esc(w.tz || '')}` : ''} &mdash; check again before you leave.`)}
            </td>
          </tr>
        </table>`
-    : `<div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">Weather data unavailable this morning.</div>`;
+    : `<div style="font-size:13px;color:${C.inkSoft};background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">${esc((w && w.missing) || 'Weather data unavailable this morning.')}</div>
+       ${sunLine ? `<div style="font-family:Arial,Helvetica,sans-serif;">${sunLine}</div>` : ''}`;
 
   // ── Assemble ───────────────────────────────────────────────────────────────
   return toAsciiEntities(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;background-color:${C.page};font-family:Arial,Helvetica,sans-serif;">
@@ -1091,7 +1097,7 @@ async function build() {
   const logic = loadSiteLogic();
   const local = loadLocalData();
   const [river, weather, fogInputs] = await Promise.all([
-    loadRiver(logic), loadWeather(), loadFogInputs(logic),
+    loadRiver(logic), loadWeather(logic), loadFogInputs(logic),
   ]);
   const digest = computeDigest(logic, local, river, weather, new Date(), fogInputs);
   return { digest, html: renderEmailHtml(digest), subject: renderSubject(digest) };
@@ -1162,7 +1168,7 @@ module.exports = {
   alreadySentToday, isPrimarySendHour,
   describeWeatherCode, withWeatherDescription, formatLocalClock,
   toAsciiEntities, toAsciiSubject,
-  STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT, LOGO_URL, BOATHOUSE,
+  STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT, LOGO_URL,
   WMO_CODES_FALLBACK, WMO_ICONS_FALLBACK, DEFAULT_WEATHER_ICON,
 };
 

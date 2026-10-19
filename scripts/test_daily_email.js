@@ -1143,17 +1143,53 @@ test('no icon is emitted when weather is unavailable', () => {
   }
 });
 
-async function emailWeatherWith(current) {
-  const realFetch = global.fetch;
-  global.fetch = async () => ({ ok: true, json: async () => ({ current,
-    daily: { sunrise: ['2026-10-03T06:53'], sunset: ['2026-10-03T18:32'] } }) });
-  try { return await M.loadWeather(); } finally { global.fetch = realFetch; }
+// The airport's readings as the National Weather Service sends them, newest
+// first: one every 5 minutes, the newest `ageMin` minutes before `nowMs`.
+// Defaults: 15°C (59°F), 14.8 km/h (9 mph) from 310° (NW), 71% humidity,
+// "Mostly Cloudy"; a gust only if `gustKmh` is given (on the third reading).
+function stationObs(nowMs, o = {}) {
+  const has = (k) => Object.prototype.hasOwnProperty.call(o, k);
+  const q = (value, unitCode) => ({ unitCode, value, qualityControl: 'V' });
+  const features = [];
+  for (let k = 0; k < (o.count || 13); k++) {
+    const p = {
+      timestamp: new Date(nowMs - (has('ageMin') ? o.ageMin : 5) * 60000 - k * 300000).toISOString(),
+      textDescription: has('textDescription') ? o.textDescription : 'Mostly Cloudy',
+      icon: has('icon') ? o.icon : 'https://api.weather.gov/icons/land/day/bkn?size=medium',
+      temperature: q(has('tempC') ? o.tempC : 15, 'wmoUnit:degC'),
+      windSpeed: q(has('windKmh') ? o.windKmh : 14.8, 'wmoUnit:km_h-1'),
+      windDirection: q(has('dirDeg') ? o.dirDeg : 310, 'wmoUnit:degree_(angle)'),
+      windGust: q(k === 2 && has('gustKmh') ? o.gustKmh : null, 'wmoUnit:km_h-1'),
+      relativeHumidity: q(has('rh') ? o.rh : 71.4, 'wmoUnit:percent'),
+      windChill: q(has('windChillC') ? o.windChillC : null, 'wmoUnit:degC'),
+      heatIndex: q(null, 'wmoUnit:degC'),
+    };
+    if (o.each) o.each(k, p);
+    features.push({ properties: p });
+  }
+  return { features };
 }
-const CURRENT_OK = { temperature_2m: 58.4, apparent_temperature: 56.2, weather_code: 3, wind_speed_10m: 9.4,
-  wind_gusts_10m: 23.8, wind_direction_10m: 310, precipitation: 0 };
+// The email's weather from a given station answer (or an Error for an outage),
+// with the requests it made kept in emailWeatherCalls.
+let emailWeatherCalls = [];
+async function emailWeatherWith(obsJson, opts = {}) {
+  const realFetch = global.fetch;
+  emailWeatherCalls = [];
+  global.fetch = async (url, o = {}) => {
+    emailWeatherCalls.push({ url: String(url), headers: o.headers || {} });
+    if (/api\.weather\.gov/.test(url)) {
+      if (obsJson instanceof Error) throw obsJson;
+      return { ok: true, json: async () => obsJson };
+    }
+    if (opts.forecastDown) throw new Error('forecast down');
+    return { ok: true, json: async () => ({ daily: { sunrise: ['2026-10-03T06:53'], sunset: ['2026-10-03T18:32'] } }) };
+  };
+  try { return await M.loadWeather(logic); } finally { global.fetch = realFetch; }
+}
+const OBS_OK = () => stationObs(Date.now(), { gustKmh: 38.3 });
 
 test('every line of the email has a font set - none falls back to the client default (Times)', async () => {
-  const w = await emailWeatherWith(CURRENT_OK);
+  const w = await emailWeatherWith(OBS_OK());
   const html = M.renderEmailHtml(M.computeDigest(logic, { raw: makeRaw(66), history: historyAtTemp(66) },
     { level: 9.5, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() }, w, new Date()));
   // Walk the markup with a stack: each text node must have an ancestor (or
@@ -1175,42 +1211,63 @@ test('every line of the email has a font set - none falls back to the client def
   assert.deepStrictEqual(bare, [], 'text with no font-family on itself or any ancestor');
 });
 
-test('email weather: a missing temperature or wind is "unavailable" - never 0°F or 0 mph', async () => {
+test('email weather: the airport\'s own readings - and a missing temperature or wind is "unavailable", never 0°F or 0 mph', async () => {
+  const ok = await emailWeatherWith(OBS_OK());
+  assert.deepStrictEqual([ok.available, ok.tempF, ok.windMph, ok.gustMph, ok.dir, ok.humidity, ok.cond],
+    [true, 59, 9, 24, 'NW', 71, 'Mostly Cloudy']);
+  const nws = emailWeatherCalls.find(c => /api\.weather\.gov/.test(c.url));
+  assert.strictEqual(nws.url, 'https://api.weather.gov/stations/KOXC/observations?limit=15', 'Waterbury-Oxford Airport');
+  assert.ok(/roworno\.com/.test(nws.headers['User-Agent']) && !/@/.test(nws.headers['User-Agent']), 'NWS wants a User-Agent; no personal address');
+  assert.ok(emailWeatherCalls.some(c => c.url === logic.weatherForecastUrl()), 'sunrise and sunset from the dock\'s forecast');
   // Math.round(null) is 0: an API gap used to print "Overcast, 0°F".
-  for (const k of ['temperature_2m', 'wind_speed_10m']) {
+  for (const k of ['temperature', 'windSpeed']) {
     for (const bad of [null, undefined, 'x', NaN]) {
-      const w = await emailWeatherWith(Object.assign({}, CURRENT_OK, { [k]: bad }));
+      const w = await emailWeatherWith(stationObs(Date.now(), { each: (i, p) => { p[k].value = bad; } }));
       assert.strictEqual(w.available, false, `${k} = ${bad}`);
+      assert.strictEqual(w.missing, 'No usable reading from Waterbury-Oxford Airport this morning.');
     }
   }
-  assert.strictEqual((await emailWeatherWith(null)).available, false, 'no current block at all');
-  const ok = await emailWeatherWith(CURRENT_OK);
-  assert.deepStrictEqual([ok.available, ok.tempF, ok.windMph, ok.gustMph, ok.dir], [true, 58, 9, 24, 'NW']);
+  assert.strictEqual((await emailWeatherWith({ features: [] })).available, false, 'no readings at all');
+  const down = await emailWeatherWith(new Error('NWS down'));
+  assert.deepStrictEqual([down.available, down.missing, down.sunrise], [false, 'The readings from Waterbury-Oxford Airport could not be loaded this morning.', '6:53 AM']);
+  const old = await emailWeatherWith(stationObs(Date.now(), { ageMin: 150 }));
+  assert.strictEqual(old.available, false, 'a reading 2½ hours old is not "now"');
+  assert.ok(/^No current reading from Waterbury-Oxford Airport: the last was at \d{1,2}:\d{2}\s[AP]M\.$/.test(old.missing), old.missing);
+  assert.strictEqual((await emailWeatherWith(OBS_OK(), { forecastDown: true })).available, true, 'no forecast: the reading still comes');
+  assert.deepStrictEqual(Object.assign({}, await M.loadWeather({})), { available: false }, 'a broken copy of the site logic never stops the email');
 });
 
-test('email weather: missing secondary values show "--", and the line still reads cleanly', async () => {
-  const w = await emailWeatherWith(Object.assign({}, CURRENT_OK,
-    { apparent_temperature: null, wind_gusts_10m: null, wind_direction_10m: null, precipitation: null }));
-  assert.deepStrictEqual([w.feelsF, w.gustMph, w.dir, w.precip], ['--', '--', '--', '--']);
-  const digest = M.computeDigest(logic, { raw: makeRaw(66), history: historyAtTemp(66) },
-    { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() }, w, new Date());
-  const html = M.renderEmailHtml(digest);
-  assert.ok(/Wind 9 mph, gusts --</.test(html), html.match(/Wind [^<]*/)[0]);
-  assert.ok(/Feels like --/.test(html) && /Precipitation --</.test(html));
-  assert.ok(!/[^0-9.]0&#176;F|null|undefined|NaN/.test(html), 'no standalone 0°F, no null/undefined/NaN');
-});
-
-test('email weather: says what time the conditions are from (they are 1 AM conditions)', async () => {
-  const w = await emailWeatherWith(CURRENT_OK);
-  const now = etDate('2026-10-03', 1, 4);
+test('email weather: says where and when it was measured, and leaves out what was not', async () => {
+  const w = await emailWeatherWith(stationObs(Date.now(), { textDescription: '', icon: null, dirDeg: null, rh: null }));
+  assert.deepStrictEqual([w.cond, w.code, w.dir, w.gustMph, w.humidity, w.feelsF], [null, null, 'variable', null, null, null]);
+  const now = new Date();
   const digest = M.computeDigest(logic, { raw: makeRaw(66, now), history: historyAtTemp(66) },
     { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: now.getTime() }, w, now);
   const html = M.renderEmailHtml(digest);
-  assert.ok(/Conditions as of 1:04(&#8239;| )AM EDT, when this email was prepared/.test(html),
-    (html.match(/Conditions as of[^<]*/) || ['(missing)'])[0]);
-  const none = M.renderEmailHtml(M.computeDigest(logic, { raw: makeRaw(66, now), history: historyAtTemp(66) },
-    { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: now.getTime() }, { available: false }, now));
-  assert.ok(!/Conditions as of/.test(none), 'no time stamp for weather that is not there');
+  assert.ok(/<strong>59&#176;F<\/strong>/.test(html), 'no sky words: just the temperature');
+  assert.ok(/Wind 9 mph, variable, no gusts in the last hour/.test(html), html.match(/Wind [^<]*/)[0]);
+  assert.ok(!/Humidity|Precipitation|Feels like|feels like/.test(html), 'nothing that was not measured');
+  assert.ok(/Measured at Waterbury-Oxford Airport, on a hilltop 7\.6 mi north of the dock, at \d{1,2}:\d{2}(&#8239;| )[AP]M E[DS]T &mdash; check again before you leave\./.test(html),
+    (html.match(/Measured at[^<]*/) || ['(missing)'])[0]);
+  assert.ok(!/null|undefined|NaN/.test(html));
+  // All of it, when it is all there.
+  const full = await emailWeatherWith(stationObs(Date.now(), { gustKmh: 38.3, tempC: 5, windChillC: 1.7 }));
+  const fh = M.renderEmailHtml(M.computeDigest(logic, { raw: makeRaw(66, now), history: historyAtTemp(66) },
+    { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: now.getTime() }, full, now));
+  assert.ok(/<strong>Mostly Cloudy, 41&#176;F<\/strong> <span[^>]*>\(feels like 35&#176;F\)<\/span>/.test(fh), fh.match(/<strong>Mostly[^\n]*/)[0]);
+  assert.ok(/Wind 9 mph NW, gusts to 24 mph in the last hour &nbsp;&middot;&nbsp; Humidity 71%/.test(fh));
+  assert.ok(/Sunrise 6:53 AM/.test(fh));
+});
+
+test('email weather: no current reading says why, and still gives sunrise and sunset', async () => {
+  const now = new Date();
+  const render = (w) => M.renderEmailHtml(M.computeDigest(logic, { raw: makeRaw(66, now), history: historyAtTemp(66) },
+    { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: now.getTime() }, w, now));
+  const html = render(await emailWeatherWith(stationObs(Date.now(), { ageMin: 300 })));
+  assert.ok(/No current reading from Waterbury-Oxford Airport: the last was at/.test(html));
+  assert.ok(/Sunrise 6:53 AM/.test(html) && !/Measured at/.test(html), 'no "measured" line for a reading that is not shown');
+  assert.ok(/Air<\/div>\s*<div[^>]*>--</.test(html), 'and no air temperature at the top');
+  assert.ok(/Weather data unavailable this morning/.test(render({ available: false })), 'the old wording when nothing came back at all');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1479,14 +1536,13 @@ test('the email omits the line entirely when sun times are unavailable', () => {
     'no placeholder leakage');
 });
 
-test('boathouse coordinates are the shared source for weather', () => {
-  assert.ok(M.BOATHOUSE && typeof M.BOATHOUSE.lat === 'number',
-    'coordinates should be a named constant, not scattered literals');
-  // Sanity: within Connecticut, and not Waterbury-Oxford Airport (41.4786,-73.1352).
-  assert.ok(M.BOATHOUSE.lat > 41 && M.BOATHOUSE.lat < 42, 'latitude out of range');
-  assert.ok(M.BOATHOUSE.lon > -74 && M.BOATHOUSE.lon < -72, 'longitude out of range');
-  const dLat = Math.abs(M.BOATHOUSE.lat - 41.4786);
-  assert.ok(dLat > 0.01, 'coordinates should be the boathouse, not the airport');
+test('one weather station, one dock: the email uses the site\'s own, not a copy', () => {
+  assert.deepStrictEqual([logic.WEATHER_STATION.id, logic.WEATHER_STATION.name], ['KOXC', 'Waterbury-Oxford Airport']);
+  assert.deepStrictEqual([logic.DOCK_POINT.lat, logic.DOCK_POINT.lon], [41.3685422, -73.1478128], 'the dock the club gave');
+  assert.strictEqual(M.BOATHOUSE, undefined, 'no second set of coordinates in the email');
+  const u = new URL(logic.weatherForecastUrl());
+  assert.deepStrictEqual([u.searchParams.get('latitude'), u.searchParams.get('longitude')], ['41.3685422', '-73.1478128']);
+  assert.strictEqual(u.searchParams.get('current'), null, 'a forecast only: nothing from it is shown as "now"');
 });
 
 // ===========================================================================
@@ -1698,9 +1754,60 @@ test('every fog export reaches the email (extraction skips missing names silentl
   for (const fn of ['assessFogRisk', 'fogText', 'fogTarget', 'fogOutlookUrl', 'fogAlertsUrl', 'fogAdvisory']) {
     assert.strictEqual(typeof logic[fn], 'function', `${fn} missing from the email's copy of the site logic`);
   }
-  for (const k of ['FOG_MODELS', 'FOG_RULES', 'FOG_LAUNCH_RULE', 'BOATHOUSE_POINT', 'ALLOWED_NOTE_HTML']) {
+  for (const k of ['FOG_MODELS', 'FOG_RULES', 'FOG_LAUNCH_RULE', 'FOG_POINT', 'ALLOWED_NOTE_HTML',
+    'WEATHER_STATION', 'DOCK_POINT', 'stationObservationsUrl', 'weatherForecastUrl', 'readStation', 'nwsWmo', 'windWords', 'clockTime']) {
     assert.ok(logic[k] !== undefined, `${k} missing`);
   }
+});
+
+test('the airport\'s readings: units, the newest full reading, gusts from its hour, and the NWS quality flags', () => {
+  const now = Date.parse('2026-10-19T14:00:00Z');
+  const R = (o) => logic.readStation(stationObs(now, o), now);
+  assert.deepStrictEqual(Object.assign({}, R({})), { atMs: now - 5 * 60000, tempF: 59, windMph: 9, dir: 'NW', gustMph: null,
+    humidity: 71, feelsF: null, cond: 'Mostly Cloudy', code: 3 });
+  // Units as sent: °F passes through, m/s and knots are converted, anything else is not guessed at.
+  const unit = (key, unitCode, value) => R({ each: (i, p) => { p[key] = { unitCode, value, qualityControl: 'V' }; } });
+  assert.strictEqual(unit('temperature', 'wmoUnit:degF', 50).tempF, 50);
+  assert.strictEqual(unit('windSpeed', 'wmoUnit:m_s-1', 4).windMph, 9);
+  assert.strictEqual(unit('windSpeed', 'wmoUnit:kt', 10).windMph, 12);
+  assert.strictEqual(unit('windSpeed', 'wmoUnit:furlong_fortnight-1', 3), null);
+  // A value the NWS checks rejected or questioned is skipped: the next reading is used.
+  for (const flag of ['X', 'Q', 'B']) {
+    const r = R({ each: (i, p) => { if (i === 0) p.temperature = { unitCode: 'wmoUnit:degC', value: 99, qualityControl: flag }; } });
+    assert.deepStrictEqual([r.tempF, r.atMs], [59, now - 10 * 60000], flag);
+  }
+  // Gusts: the highest in the hour before the reading, none from before that.
+  const gusts = (list) => R({ count: 16, each: (i, p) => { if (list[i]) p.windGust.value = list[i]; } }).gustMph;
+  assert.strictEqual(gusts({ 1: 30, 5: 45, 11: 20 }), 28, 'the highest of the hour');
+  assert.strictEqual(gusts({ 14: 80 }), null, 'a gust 70 minutes before the reading is not in its hour');
+  // Readings dated in the future are ignored; 2 hours old is still current, a moment more is not.
+  assert.strictEqual(logic.readStation(stationObs(now + 20 * 60000, { count: 1 }), now), null);
+  assert.strictEqual(R({ ageMin: 120, count: 1 }).tempF, 59);
+  assert.deepStrictEqual(Object.assign({}, R({ ageMin: 120.01, count: 1 })), { stale: true, atMs: now - 120.01 * 60000 });
+  // Feels like: only when the wind chill or heat index differs from the temperature.
+  assert.strictEqual(R({ windChillC: 14.9 }).feelsF, null);
+  assert.strictEqual(R({ windChillC: 12 }).feelsF, 54);
+  assert.strictEqual(R({ each: (i, p) => { p.heatIndex = { unitCode: 'wmoUnit:degC', value: 35, qualityControl: 'V' }; } }).feelsF, 95);
+  // The sky: from the newest reading in the hour that describes it - not from an older one.
+  assert.strictEqual(R({ each: (i, p) => { if (i < 3) { p.textDescription = ''; p.icon = null; } } }).cond, 'Mostly Cloudy');
+  assert.deepStrictEqual([R({ count: 16, each: (i, p) => { if (i < 14) { p.textDescription = ''; p.icon = null; } } }).cond], [null]);
+  // Exact conversions, and a calm has no direction.
+  assert.deepStrictEqual([R({ windKmh: 100 }).windMph, R({ tempC: -10 }).tempF, R({ tempC: 37 }).tempF], [62, 14, 99]);
+  assert.strictEqual(R({ windKmh: 0, dirDeg: 0 }).dir, null);
+  assert.strictEqual(R({ windKmh: 0.4 }).dir, null, 'under half a mile an hour rounds to calm');
+  // Nonsense: nothing, never a crash.
+  for (const bad of [null, {}, { features: 'x' }, { features: [null, { properties: { timestamp: 'nope' } }] }]) {
+    assert.strictEqual(logic.readStation(bad, now), null, JSON.stringify(bad));
+  }
+});
+
+test('the station\'s sky as the codes the icons and alerts use', () => {
+  const at = (code) => logic.nwsWmo(`https://api.weather.gov/icons/land/day/${code}?size=medium`);
+  assert.deepStrictEqual(['skc', 'few', 'sct', 'bkn', 'ovc', 'fog', 'rain', 'rain_showers', 'tsra', 'snow', 'wind_bkn'].map(at),
+    [0, 1, 2, 3, 3, 45, 63, 80, 95, 73, 3]);
+  assert.strictEqual(logic.nwsWmo('https://api.weather.gov/icons/land/night/tsra_hi,40/rain,20?size=medium'), 95, 'the first of two');
+  assert.deepStrictEqual([at('hot'), logic.nwsWmo(null), logic.nwsWmo('garbage'), logic.nwsWmo('https://x/icons/land/day/__proto__')],
+    [null, null, null, null]);
 });
 
 test('the calibrated configuration is exactly what was backtested', () => {
@@ -1967,9 +2074,8 @@ test('the forecast URL asks for exactly the calibrated models, variables and uni
   assert.strictEqual(new URL(logic.fogAlertsUrl(41.437, -73.119)).hostname, 'api.weather.gov');
 });
 
-test('the email and the site forecast the same point', () => {
-  assert.strictEqual(M.BOATHOUSE.lat, logic.BOATHOUSE_POINT.lat);
-  assert.strictEqual(M.BOATHOUSE.lon, logic.BOATHOUSE_POINT.lon);
+test('the fog outlook stays at the point it was calibrated for', () => {
+  assert.deepStrictEqual([logic.FOG_POINT.lat, logic.FOG_POINT.lon], [41.437, -73.119]);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2345,9 +2451,18 @@ section('13b. Conditions summary and history stats');
 // Temperature History card and follow its range buttons.
 
 const okJson = (body) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
-const WEATHER_NOW = { current: { temperature_2m: 63.4, apparent_temperature: 63, weather_code: 0,
-  wind_speed_10m: 3.2, wind_gusts_10m: 6.1, wind_direction_10m: 190, precipitation: 0 },
-  daily: { sunrise: ['2026-10-03T06:53'], sunset: ['2026-10-03T18:32'] } };
+// The dock's forecast, as far as the weather card needs it without the 24-hour line.
+const WEATHER_FORECAST = { daily: { sunrise: ['2026-10-03T06:53'], sunset: ['2026-10-03T18:32'] } };
+// The site's two weather sources answered: the airport's readings and the
+// dock's forecast (either an Error, for an outage).
+const weatherFetch = (obs, forecast = WEATHER_FORECAST, urls = []) => (url, init) => {
+  urls.push({ url: String(url), init });
+  const answer = (x) => (x instanceof Error ? Promise.reject(x) : okJson(x));
+  if (/api\.weather\.gov\/stations\//.test(url)) return answer(obs);
+  if (/api\.open-meteo\.com/.test(url)) return answer(forecast);
+  return Promise.reject(new Error('unexpected ' + url));
+};
+const TIME = '\\d{1,2}:\\d{2}\\s[AP]M';
 
 test('layout: summary at the top, stats inside the history chart, nothing left in between', () => {
   const html = fsT.readFileSync(INDEX_PATH, 'utf8').replace(/<!--[\s\S]*?-->/g, '');
@@ -2380,23 +2495,57 @@ test('summary water tile: shows the reading, and still turns red when the sensor
   assert.strictEqual(els['current-f'].style.color, 'var(--bad)', 'stale water reading must still be flagged red (the theme\'s red)');
 });
 
-test('summary weather tile: filled by the real weather loader - temp, condition, wind', async () => {
-  const { site, els } = loadSite(Date.now(), () => okJson(WEATHER_NOW));
+test('summary weather tile: the airport\'s reading - temperature, sky, wind, and where and when it was taken', async () => {
+  const now = Date.now();
+  const { site, els } = loadSite(now, weatherFetch(stationObs(now)));
   await site.loadWeather();
   const t = els['sum-weather'].innerHTML;
-  assert.ok(/63°F/.test(t) && /Clear sky/.test(t) && /Wind 3 mph S, gusts 6/.test(t), t);
-  assert.ok(!/summary-alert/.test(t), 'no alert in calm weather');
-  assert.ok(/63°F/.test(els['weather-content'].innerHTML), 'the detailed weather card still renders too');
+  assert.ok(/59°F/.test(t) && /Mostly Cloudy/.test(t) && /Wind 9 mph NW</.test(t), t);
+  assert.ok(new RegExp(`Waterbury-Oxford Airport, ${TIME}`).test(t), t);
+  assert.ok(!/gusts/.test(t), 'no gust reported: none claimed');
+  assert.ok(!/summary-alert/.test(t), 'no alert in a light wind');
+  const card = els['weather-content'].innerHTML;
+  assert.ok(new RegExp(`Measured at Waterbury-Oxford Airport, on a hilltop 7\\.6 mi north of the dock, at ${TIME}\\.`).test(card), card.slice(0, 900));
+  assert.ok(/<div class="wk">Wind<\/div><div class="wv">9<span class="wu">mph<\/span><\/div><div class="wd">From the NW<\/div>/.test(card));
+  assert.ok(/<div class="wk">Gusts<\/div><div class="wv">None<\/div><div class="wd">In the last hour<\/div>/.test(card));
+  assert.ok(/<div class="wk">Humidity<\/div><div class="wv">71<span class="wu">%<\/span><\/div>/.test(card));
+  assert.ok(!/Precip|Feels like|Clear sky/.test(card), 'nothing the station did not measure');
+  assert.ok(/forecast\.weather\.gov\/data\/obhistory\/KOXC\.html/.test(card) && /Readings: National Weather Service/.test(card)
+    && /open-meteo\.com/.test(card), 'where the numbers come from, and the credits');
+});
+
+test('the weather card: the station\'s gusts, wind chill and its own words; calm, and a shifting wind', async () => {
+  const now = Date.now();
+  let { site, els } = loadSite(now, weatherFetch(stationObs(now, { tempC: 5, windChillC: 1.7, gustKmh: 38.3, textDescription: 'Light Rain', icon: 'https://api.weather.gov/icons/land/day/rain?size=medium' })));
+  await site.loadWeather();
+  let card = els['weather-content'].innerHTML;
+  assert.ok(/41°F/.test(card) && /Feels like 35°F/.test(card) && /Light Rain/.test(card), card.slice(0, 700));
+  assert.ok(/<div class="wk">Gusts<\/div><div class="wv">24<span class="wu">mph/.test(card), 'the highest gust in the hour');
+  assert.ok(/Rain — check conditions at the dock/.test(card), 'its rain is still the rain alert');
+  assert.ok(/Wind 9 mph NW, gusts 24/.test(els['sum-weather'].innerHTML));
+  ({ site, els } = loadSite(now, weatherFetch(stationObs(now, { windKmh: 0, dirDeg: 0 }))));
+  await site.loadWeather();
+  assert.ok(/<div class="wv">Calm<\/div><div class="wd">No wind<\/div>/.test(els['weather-content'].innerHTML));
+  assert.ok(/>Calm</.test(els['sum-weather'].innerHTML) && !/from the N|mph N/.test(els['sum-weather'].innerHTML), 'a calm has no direction');
+  ({ site, els } = loadSite(now, weatherFetch(stationObs(now, { dirDeg: null }))));
+  await site.loadWeather();
+  assert.ok(/Variable direction/.test(els['weather-content'].innerHTML) && /Wind 9 mph, variable/.test(els['sum-weather'].innerHTML));
+  // Markup in the station's words stays words.
+  ({ site, els } = loadSite(now, weatherFetch(stationObs(now, { textDescription: '<img src=x onerror=alert(1)>' }))));
+  await site.loadWeather();
+  assert.ok(!/<img src=x/.test(els['weather-content'].innerHTML + els['sum-weather'].innerHTML) && /&lt;img src=x/.test(els['weather-content'].innerHTML));
 });
 
 test('summary weather tile: carries the same alert as the weather card (wind, storms)', async () => {
-  const windy = JSON.parse(JSON.stringify(WEATHER_NOW));
-  windy.current.wind_speed_10m = 22; windy.current.wind_gusts_10m = 31;
-  const { site, els } = loadSite(Date.now(), () => okJson(windy));
+  const now = Date.now();
+  const { site, els } = loadSite(now, weatherFetch(stationObs(now, { windKmh: 35.4, gustKmh: 49.9 })));
   await site.loadWeather();
   assert.ok(/summary-alert danger/.test(els['sum-weather'].innerHTML), els['sum-weather'].innerHTML);
   assert.ok(/High wind/.test(els['sum-weather'].innerHTML));
   assert.ok(/High wind/.test(els['weather-content'].innerHTML), 'and the card below agrees');
+  const storm = loadSite(now, weatherFetch(stationObs(now, { icon: 'https://api.weather.gov/icons/land/day/tsra?size=medium', textDescription: 'Thunderstorm' })));
+  await storm.site.loadWeather();
+  assert.ok(/Severe weather — stay off the water/.test(storm.els['sum-weather'].innerHTML));
 });
 
 test('summary weather tile: an outage says "Weather unavailable" and breaks nothing', async () => {
@@ -2405,6 +2554,36 @@ test('summary weather tile: an outage says "Weather unavailable" and breaks noth
   assert.ok(/Weather unavailable/.test(els['sum-weather'].innerHTML));
   assert.ok(/Could not load weather/.test(els['weather-content'].innerHTML));
   assert.doesNotThrow(() => site.renderSummaryWeather({ get tempF() { throw new Error('boom'); } }));
+});
+
+test('no current reading: the card says why - never an old reading as now - and the forecast still shows', async () => {
+  const now = etDate('2026-10-18', 20, 14).getTime();
+  const fc = Object.assign({}, WEATHER_FORECAST, windDays());
+  // The airport's last reading 2½ hours ago.
+  let { site, els } = loadSite(now, weatherFetch(stationObs(now, { ageMin: 150 }), fc));
+  await site.loadWeather();
+  let card = plainSpaces(els['weather-content'].innerHTML);
+  assert.ok(/No current reading from Waterbury-Oxford Airport: the last was at 5:44 PM\./.test(card), card.slice(0, 300));
+  assert.ok(!/Measured at|59°F/.test(card) && /class="w24"/.test(card) && /Sunrise/.test(card));
+  assert.ok(/No current reading from Waterbury-Oxford Airport/.test(els['sum-weather'].innerHTML));
+  // A day old: the date too.
+  ({ site, els } = loadSite(now, weatherFetch(stationObs(now, { ageMin: 26 * 60 }), fc)));
+  await site.loadWeather();
+  assert.ok(/the last was at 6:14 PM on Oct 17\./.test(plainSpaces(els['weather-content'].innerHTML)));
+  // The station's server down, or answering with nothing usable.
+  ({ site, els } = loadSite(now, weatherFetch(new Error('NWS down'), fc)));
+  await site.loadWeather();
+  assert.ok(/The readings from Waterbury-Oxford Airport could not be loaded\./.test(els['weather-content'].innerHTML) && /class="w24"/.test(els['weather-content'].innerHTML));
+  ({ site, els } = loadSite(now, weatherFetch({ features: [] }, fc)));
+  await site.loadWeather();
+  assert.ok(/No usable reading from Waterbury-Oxford Airport right now\./.test(els['weather-content'].innerHTML));
+  assert.strictEqual(site.state.station, null);
+  // And the other way round: no forecast, the reading still shows.
+  ({ site, els } = loadSite(now, weatherFetch(stationObs(now), new Error('Open-Meteo down'))));
+  await site.loadWeather();
+  card = els['weather-content'].innerHTML;
+  assert.ok(/59°F/.test(card) && /Measured at/.test(card) && !/class="w24"|Sunrise/.test(card));
+  assert.strictEqual(site.state.station.tempF, 59, 'the reading, for the map');
 });
 
 // ── Wind, next 24 hours (in the weather card) ───────────────────────────────
@@ -2539,8 +2718,9 @@ test('wind, next 24 hours: one smooth line through the hours, the gusts dashed a
   assert.deepStrictEqual([...html.matchAll(/<b>(\d+)<\/b>/g)].map(m => +m[1]), cols.map(c => speeds[c]),
     'each the speed of the hour it sits under');
   assert.ok(/Strongest 14 mph, gusts 20 around \d+ [AP]M/.test(html), html.match(/w24-peak">[^<]*/)[0]);
-  assert.ok(/aria-label="Wind for the next 24 hours: 5 to 14 mph, gusts up to 20\. Strongest 14 mph, gusts 20 around \d+ [AP]M, from the NW\."/.test(html));
-  assert.ok(/The line is the wind, the dashed line the gusts/.test(html), 'the key says which line is which');
+  assert.ok(/aria-label="Wind forecast for the dock, next 24 hours: 5 to 14 mph, gusts up to 20\. Strongest 14 mph, gusts 20 around \d+ [AP]M, from the NW\."/.test(html));
+  assert.ok(/Forecast for the dock from weather models, in mph: the line is the wind, the dashed line the gusts/.test(html), 'a forecast, and which line is which');
+  assert.ok(/<span class="wk">Wind forecast, next 24 hours<\/span>/.test(html));
   assert.ok(new RegExp('around ' + '\\d+' + '\u00a0[AP]M').test(site.renderWind24(site.wind24(windDays(), now))),
     'the hour and its AM/PM never split across lines');
   assert.ok(!/NaN|undefined|null|Infinity/.test(html));
@@ -2583,32 +2763,38 @@ test('wind, next 24 hours: a missing hour is bridged, calm shows circles, no gus
   assert.strictEqual(site.renderWind24({ hours: [{ t: now, speed: 5, gust: 7, from: 0, night: false }], peak: null, top: 7 }), '');
 });
 
-test('the weather card asks for two days of hourly wind, as instants, and shows the strip - sunrise still right', async () => {
+test('the weather card asks for the dock\'s forecast - two days of hourly wind, as instants - and the airport\'s readings', async () => {
   const now = etDate('2026-10-18', 20, 14).getTime();
   const urls = [];
-  const data = Object.assign(JSON.parse(JSON.stringify(WEATHER_NOW)), windDays());
-  const { site, els } = loadSite(now, (u) => { urls.push(String(u)); return okJson(data); });
+  const fc = Object.assign({}, WEATHER_FORECAST, windDays());
+  const { site, els } = loadSite(now, weatherFetch(stationObs(now), fc, urls));
   await site.loadWeather();
-  const u = new URL(urls.find(x => /api\.open-meteo\.com/.test(x)));
+  const f = urls.find(x => /api\.open-meteo\.com/.test(x.url));
+  const u = new URL(f.url);
+  assert.deepStrictEqual([u.searchParams.get('latitude'), u.searchParams.get('longitude')], ['41.3685422', '-73.1478128'], 'the dock');
   assert.strictEqual(u.searchParams.get('hourly'), 'wind_speed_10m,wind_gusts_10m,wind_direction_10m');
   assert.deepStrictEqual([u.searchParams.get('forecast_days'), u.searchParams.get('timeformat')], ['2', 'unixtime']);
+  assert.strictEqual(u.searchParams.get('current'), null, 'nothing from the model is shown as now');
+  const st = urls.find(x => /api\.weather\.gov/.test(x.url));
+  assert.strictEqual(st.url, 'https://api.weather.gov/stations/KOXC/observations?limit=15');
+  assert.strictEqual(st.init.headers.Accept, 'application/geo+json');
   const card = plainSpaces(els['weather-content'].innerHTML);
-  assert.ok(/class="w24"/.test(card) && /Wind, next 24 hours/.test(card), 'the strip is in the card');
-  assert.ok(card.indexOf('class="w24"') > card.indexOf('Peak gust') && card.indexOf('class="w24"') < card.indexOf('Sunrise'),
-    'under the wind and gust tiles, above sunrise and sunset');
-  assert.ok(/7:12 AM/.test(card) && /6:08 PM/.test(card), 'sunrise and sunset, given as instants now, still in boathouse time');
+  assert.ok(/class="w24"/.test(card) && /Wind forecast, next 24 hours/.test(card), 'the strip is in the card');
+  assert.ok(card.indexOf('class="w24"') > card.indexOf('Humidity') && card.indexOf('class="w24"') < card.indexOf('Sunrise'),
+    'under the measured tiles, above sunrise and sunset');
+  assert.ok(/7:12 AM/.test(card) && /6:08 PM/.test(card), 'sunrise and sunset, given as instants, in boathouse time');
   // Without hourly wind, or with nonsense, the card is just as before.
   for (const hourly of [undefined, { time: 'x' }, { time: [1, 2], wind_speed_10m: ['a', 'b'] }]) {
-    const d2 = JSON.parse(JSON.stringify(WEATHER_NOW)); if (hourly) d2.hourly = hourly;
-    const r = loadSite(now, () => okJson(d2));
+    const d2 = JSON.parse(JSON.stringify(WEATHER_FORECAST)); if (hourly) d2.hourly = hourly;
+    const r = loadSite(now, weatherFetch(stationObs(now), d2));
     await r.site.loadWeather();
-    assert.ok(!/class="w24"/.test(r.els['weather-content'].innerHTML) && /63°F/.test(r.els['weather-content'].innerHTML), JSON.stringify(hourly));
+    assert.ok(!/class="w24"/.test(r.els['weather-content'].innerHTML) && /59°F/.test(r.els['weather-content'].innerHTML), JSON.stringify(hourly));
   }  // Whatever goes wrong drawing the strip, the card above it still shows.
-  const odd = JSON.parse(JSON.stringify(WEATHER_NOW));
+  const odd = JSON.parse(JSON.stringify(WEATHER_FORECAST));
   odd.hourly = { get time() { throw new Error('boom'); } };
-  const r = loadSite(now, () => okJson(odd));
+  const r = loadSite(now, weatherFetch(stationObs(now), odd));
   await r.site.loadWeather();
-  assert.ok(/63°F/.test(r.els['weather-content'].innerHTML) && !/Could not load/.test(r.els['weather-content'].innerHTML));
+  assert.ok(/59°F/.test(r.els['weather-content'].innerHTML) && !/Could not load/.test(r.els['weather-content'].innerHTML));
 });
 
 test('summary river tile: filled by the real river loader - level, gauge, restriction', async () => {
@@ -2996,24 +3182,25 @@ test('a chart library of a different shape cannot break the range buttons or the
   assert.ok(els.__logged.some(l => /temperature chart/.test(String(l[1]))), 'the failure is logged, not swallowed silently');
 });
 
-test('weather: a missing temperature is "unavailable", never 0°F; missing extras show "--"', async () => {
-  const w = JSON.parse(JSON.stringify(WEATHER_NOW));
-  w.current.temperature_2m = null;
-  let { site, els } = loadSite(Date.now(), () => okJson(w));
+test('weather: a missing temperature or wind is never 0°F or 0 mph; a missing extra is left out or "--"', async () => {
+  const now = Date.now();
+  let { site, els } = loadSite(now, weatherFetch(stationObs(now, { each: (i, p) => { p.temperature.value = null; } })));
   await site.loadWeather();
-  assert.ok(/Weather unavailable/.test(els['sum-weather'].innerHTML));
+  assert.ok(/No usable reading from Waterbury-Oxford Airport/.test(els['sum-weather'].innerHTML));
   assert.ok(!/0°F/.test(els['sum-weather'].innerHTML + els['weather-content'].innerHTML));
-  const w2 = JSON.parse(JSON.stringify(WEATHER_NOW));
-  w2.current.wind_gusts_10m = null; w2.current.wind_direction_10m = null; w2.current.precipitation = null;
-  w2.current.apparent_temperature = undefined;
-  ({ site, els } = loadSite(Date.now(), () => okJson(w2)));
+  // The newest reading lacks the wind: the one before it, which has both, is used.
+  ({ site, els } = loadSite(now, weatherFetch(stationObs(now, { each: (i, p) => { if (i === 0) p.windSpeed.value = null; } }))));
+  await site.loadWeather();
+  assert.strictEqual(site.state.station.atMs, now - 10 * 60000);
+  ({ site, els } = loadSite(now, weatherFetch(stationObs(now, { rh: null, textDescription: '', icon: null }))));
   await site.loadWeather();
   const sum = els['sum-weather'].innerHTML, card = els['weather-content'].innerHTML;
-  assert.ok(/63°F/.test(sum) && /Wind 3 mph, gusts --/.test(sum), sum);
-  assert.ok(/Feels like --°F/.test(card) && !/NaN|null|undefined/.test(card), card.slice(0, 400));
-  ({ site, els } = loadSite(Date.now(), () => reply({ error: true, reason: 'quota' }, 429)));
+  assert.ok(/59°F/.test(sum) && /Wind 9 mph NW</.test(sum), sum);
+  assert.ok(/<div class="wk">Humidity<\/div><div class="wv">--<\/div>/.test(card) && !/NaN|null|undefined/.test(card + sum), card.slice(0, 400));
+  assert.ok(/&#127777;/.test(card), 'no sky reported: the thermometer, not a made-up sun');
+  ({ site, els } = loadSite(now, (u) => (/weather\.gov/.test(u) ? reply({ error: true }, 429) : okJson(WEATHER_FORECAST))));
   await site.loadWeather();
-  assert.ok(/Weather unavailable/.test(els['sum-weather'].innerHTML), 'an HTTP error is an outage');
+  assert.ok(/The readings from Waterbury-Oxford Airport could not be loaded/.test(els['sum-weather'].innerHTML), 'an HTTP error is an outage');
 });
 
 test('one request per source at a time: a slow network cannot pile up overlapping refreshes', async () => {
@@ -3061,16 +3248,17 @@ test('returning to the tab after more than a minute refreshes everything; a quic
     [/^data\.json/, () => reply(makeRaw(66, new Date(t - 60000)))],
     [/^history\.json/, () => reply(histUpTo(t - 60000, 66))],
     [/api\.open-meteo\.com.*models=/, () => reply(FOG_FX.dry.response)],
-    [/api\.open-meteo\.com/, () => reply(WEATHER_NOW)],
+    [/api\.open-meteo\.com/, () => reply(WEATHER_FORECAST)],
+    [/api\.weather\.gov\/stations\//, () => reply(stationObs(t))],
     [/api\.weather\.gov/, () => reply({ features: [] })],
     [/stageflow/, (u) => reply(riverSeries(t, 3, /observed$/.test(u) ? 'observed' : 'forecast'))],
   ]);
   const { site, els } = loadSite(() => t, net.fetch);
-  const counts = () => ['data\\.json', 'forecast\\?latitude.*current=', 'models=', 'weather\\.gov', 'stageflow/observed']
+  const counts = () => ['data\\.json', 'forecast\\?latitude=41\\.3685', 'models=', 'alerts/active', 'stageflow/observed', 'stations/KOXC']
     .map(p => net.count(new RegExp(p)));
   els.__fire('window', 'DOMContentLoaded');
   await settle();
-  assert.deepStrictEqual(counts(), [1, 1, 1, 1, 1], 'page load fetches every source once');
+  assert.deepStrictEqual(counts(), [1, 1, 1, 1, 1, 1], 'page load fetches every source once');
   const away = async (ms) => {
     els.__document.visibilityState = 'hidden'; els.__fire('document', 'visibilitychange');
     t += ms;
@@ -3078,15 +3266,15 @@ test('returning to the tab after more than a minute refreshes everything; a quic
     await settle();
   };
   await away(30000);
-  assert.deepStrictEqual(counts(), [1, 1, 1, 1, 1], 'back after 30 s: nothing refetched');
+  assert.deepStrictEqual(counts(), [1, 1, 1, 1, 1, 1], 'back after 30 s: nothing refetched');
   await away(8 * HOUR);
-  assert.deepStrictEqual(counts(), [2, 2, 2, 2, 2], 'back after a night away: everything refreshed');
+  assert.deepStrictEqual(counts(), [2, 2, 2, 2, 2, 2], 'back after a night away: everything refreshed');
   els.__fire('window', 'pageshow', { persisted: false });
   await settle();
-  assert.deepStrictEqual(counts(), [2, 2, 2, 2, 2], 'an ordinary page show changes nothing');
+  assert.deepStrictEqual(counts(), [2, 2, 2, 2, 2, 2], 'an ordinary page show changes nothing');
   els.__fire('window', 'pageshow', { persisted: true });
   await settle();
-  assert.deepStrictEqual(counts(), [3, 3, 3, 3, 3], 'restored from the back/forward cache: refreshed');
+  assert.deepStrictEqual(counts(), [3, 3, 3, 3, 3, 3], 'restored from the back/forward cache: refreshed');
 });
 
 test('data-gap banner: whole minutes (never "6h 60m"), days once it is days, boathouse time', () => {
@@ -3732,7 +3920,7 @@ test('loadFogInputs: both sources fetched, NWS gets a User-Agent, one failure do
     const nws = calls.find(c => /api\.weather\.gov/.test(c.url));
     assert.ok(nws && /roworno\.com/.test(nws.headers['User-Agent']), 'NWS rejects requests without a User-Agent');
     assert.ok(!/@/.test(nws.headers['User-Agent']), 'no personal address in the User-Agent');
-    assert.ok(calls.some(c => c.url === logic.fogOutlookUrl(M.BOATHOUSE.lat, M.BOATHOUSE.lon)));
+    assert.ok(calls.some(c => c.url === logic.fogOutlookUrl(logic.FOG_POINT.lat, logic.FOG_POINT.lon)), 'the site\'s own fog point');
     assert.strictEqual(r.alerts, null, 'a failed source comes back null');
     assert.ok(r.response && r.response.hourly, 'the other source still arrives');
   } finally {
