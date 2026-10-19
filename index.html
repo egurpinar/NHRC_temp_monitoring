@@ -1516,16 +1516,37 @@ document.addEventListener('DOMContentLoaded', () => { setTimeout(initScrubber, 5
 // are on the water. GitHub Actions scheduling is best-effort and can be sparse
 // (sometimes only 1–2 readings in a window, occasionally a full miss).
 //
-// GAP-TOLERANT confirmation: confirm the 3 MOST RECENT mornings that actually
+// GAP-TOLERANT confirmation: confirm the most recent mornings that actually
 // have readings, all at/above threshold (peak reading rounded to 0.5°F).
 //   - A morning with NO data is SKIPPED — it neither confirms nor breaks the
 //     streak (so one missed Actions run can't force the most-restrictive zone).
 //   - A morning WITH data but below threshold BREAKS the streak (water cooled).
-//   - We look back up to 14 days to find 3 qualifying mornings.
-// Returns: { confirmed: N, noData: bool, confirmedDays: [...] }
-//   confirmed = number of qualifying recent mornings found (0–3)
-//   noData    = true if fewer than 3 mornings had data in the lookback window
-//               AND the streak did not break on a cold morning
+//   - We look back up to 14 days to find the qualifying mornings.
+// How many mornings it takes depends on the time of year: see morningsNeeded().
+// Returns: { confirmed, needed, noData, brokeOnCold, coldMorning, confirmedDays }
+//   confirmed   = number of qualifying recent mornings found (0–needed)
+//   needed      = mornings it takes right now (3 March–July, 1 August–February)
+//   noData      = true if fewer than `needed` mornings had data in the lookback
+//                 window AND the streak did not break on a cold morning
+//   coldMorning = the morning that broke the streak, if one did
+
+// How many mornings in a row must read at or above a line before its
+// restrictions lift. Safety Committee, October 2026:
+//   March - July, while the water warms: THREE. In May 2026 the water sat
+//   between 59 and 61°F for twelve days; three mornings kept singles from
+//   opening and closing with every warm morning.
+//   August - February, while it cools: ONE. The water is not about to warm up
+//   behind a good reading, and three in a row would end the season for Tier 1
+//   and 2 singles at the first cool morning.
+// Restrictions still come back at once whenever a reading is at or below a
+// line, all year: see the current temp cap in getEffectiveLevel().
+const CONFIRM_SEASON = { fromMonth: 3, toMonth: 7 };   // March through July, inclusive
+function morningsNeeded(when) {
+  const month = parseInt(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', month: 'numeric',
+  }).format(when), 10);
+  return month >= CONFIRM_SEASON.fromMonth && month <= CONFIRM_SEASON.toMonth ? 3 : 1;
+}
 
 // Helper: get UTC ms for a given NY calendar date at a specific hour:minute
 function nyWindowBound(y, m, d, hour, minute) {
@@ -1562,15 +1583,17 @@ function nyTzAbbr(ts) {
 function checkMorningStreak(threshold) {
   // Morning window: 5:00 AM – 11:00 AM America/New_York (hardcoded for Oxford, CT boathouse).
   //
-  // GAP-TOLERANT streak: we confirm the 3 MOST RECENT mornings that actually have
-  // readings, all at/above threshold. A morning with NO data is SKIPPED (it neither
-  // confirms nor breaks the streak) — this prevents a single missed GitHub Actions run
-  // from incorrectly forcing the most-restrictive zone. A morning that HAS data but is
-  // too cold DOES break the streak (the water genuinely cooled).
+  // GAP-TOLERANT streak: we confirm the MOST RECENT mornings that actually have
+  // readings (3 March–July, 1 August–February), all at/above threshold. A morning
+  // with NO data is SKIPPED (it neither confirms nor breaks the streak) — this
+  // prevents a single missed GitHub Actions run from incorrectly forcing the
+  // most-restrictive zone. A morning that HAS data but is too cold DOES break the
+  // streak (the water genuinely cooled).
   //
-  // We look back up to MAX_LOOKBACK_DAYS to find 3 qualifying mornings. If we can't find
-  // 3 mornings with data in that window (and didn't break on a cold morning), we report
-  // noData:true so the UI can explain that the streak can't be confirmed.
+  // We look back up to MAX_LOOKBACK_DAYS to find the qualifying mornings. If we can't
+  // find enough mornings with data in that window (and didn't break on a cold
+  // morning), we report noData:true so the UI can explain that the streak can't be
+  // confirmed.
   //
   // IMPORTANT: history.json can lag behind data.json by up to 30 min due to GitHub Pages
   // CDN caching. To avoid missing today's morning reading, we supplement the history
@@ -1579,7 +1602,8 @@ function checkMorningStreak(threshold) {
   const MORNING_START_H = 5,  MORNING_START_M = 0;
   const MORNING_END_H   = 11, MORNING_END_M   = 0;  // widened from 9:30 to 11:00 AM
   const MAX_LOOKBACK_DAYS = 14;
-  const NEEDED = 3;
+  const now = new Date();
+  const NEEDED = morningsNeeded(now);
 
   const hist = state.allHistory.slice(); // copy so we can supplement without mutation
 
@@ -1592,9 +1616,7 @@ function checkMorningStreak(threshold) {
     }
   }
 
-  if (!hist.length) return { confirmed: 0, noData: true, confirmedDays: [] };
-
-  const now = new Date();
+  if (!hist.length) return { confirmed: 0, needed: NEEDED, noData: true, brokeOnCold: false, coldMorning: null, confirmedDays: [] };
 
   // Get today's date in New York
   const nyTodayStr = new Intl.DateTimeFormat('en-CA', {
@@ -1605,6 +1627,7 @@ function checkMorningStreak(threshold) {
 
   let confirmed     = 0;
   let brokeOnCold   = false;
+  let coldMorning   = null; // the morning that broke the streak, for the rules card
   const confirmedDays = []; // [{date, time, tempF, tempFRounded}] for display, most-recent first
 
   for (let daysAgo = 0; daysAgo <= MAX_LOOKBACK_DAYS && confirmed < NEEDED; daysAgo++) {
@@ -1643,15 +1666,19 @@ function checkMorningStreak(threshold) {
     } else {
       // A morning WITH data was too cold — the water genuinely cooled. Break the streak.
       brokeOnCold = true;
+      coldMorning = {
+        date:  new Date(peakReading.ts).toLocaleDateString('en-US', {timeZone:'America/New_York', weekday:'short', month:'short', day:'numeric'}),
+        tempF: morningMax,
+      };
       break;
     }
   }
 
-  // noData only when we couldn't gather 3 warm mornings AND it wasn't due to a cold break
-  // (i.e. we ran out of lookback days without enough morning data to decide).
+  // noData only when we couldn't gather enough warm mornings AND it wasn't due to a cold
+  // break (i.e. we ran out of lookback days without enough morning data to decide).
   const noData = (confirmed < NEEDED && !brokeOnCold);
 
-  return { confirmed, noData, confirmedDays };
+  return { confirmed, needed: NEEDED, noData, brokeOnCold, coldMorning, confirmedDays };
 }
 
 // The override is typed by hand. A typo ('cold', 'Winter') must not break the
@@ -1681,9 +1708,10 @@ function getEffectiveLevel(tempF) {
   //    If it's 45°F right now, conditions cannot be better than Four Oar no matter
   //    what the history says.
   //
-  // 2. EARNED ZONE: what the 3 most recent mornings with data (5–11 AM) have confirmed.
-  //    Even if it's 55°F today, if we haven't had 3 mornings above 40°F we stay
-  //    in Winter Rowing.
+  // 2. EARNED ZONE: what the most recent mornings with data (5–11 AM) have confirmed:
+  //    three of them March–July, one August–February (morningsNeeded).
+  //    In April, even if it's 55°F today, if we haven't had 3 mornings above 40°F
+  //    we stay in Winter Rowing.
   //
   // Effective zone = whichever is COLDER of the two.
 
@@ -1696,34 +1724,38 @@ function getEffectiveLevel(tempF) {
   else if (tempF <= 60) tempCap = 'coldWater';
   else                  tempCap = 'normal';
 
-  // ── 2. Earned zone from 3-morning streak checks ──────────────────────
+  // ── 2. Earned zone from the morning streak checks ────────────────────
   const hist = state.allHistory;
 
   // No histSpanDays guard — let checkMorningStreak handle missing days naturally.
   // If any morning window has no data it returns noData:true and the streak stops.
   let earned, streakInfo;
 
+  // What the rules card needs to explain a zone that has not lifted yet.
+  const streakAt = (s, threshold) => ({ confirmed: s.confirmed, needed: s.needed, noData: s.noData,
+    coldMorning: s.coldMorning, threshold, confirmedDays: s.confirmedDays });
+
   if (!hist.length) {
     earned     = 'winter';
-    streakInfo = { insufficient: true };
+    streakInfo = { insufficient: true, needed: morningsNeeded(new Date()) };
   } else {
     const s40 = checkMorningStreak(40);
-    if (s40.confirmed < 3) {
+    if (s40.confirmed < s40.needed) {
       earned     = 'winter';
-      streakInfo = { confirmed: s40.confirmed, noData: s40.noData, threshold: 40, confirmedDays: s40.confirmedDays };
+      streakInfo = streakAt(s40, 40);
     } else {
       const s50 = checkMorningStreak(50);
-      if (s50.confirmed < 3) {
+      if (s50.confirmed < s50.needed) {
         earned     = 'fourOar';
-        streakInfo = { confirmed: s50.confirmed, noData: s50.noData, threshold: 50, confirmedDays: s50.confirmedDays };
+        streakInfo = streakAt(s50, 50);
       } else {
         const s60 = checkMorningStreak(60);
-        if (s60.confirmed < 3) {
+        if (s60.confirmed < s60.needed) {
           earned     = 'coldWater';
-          streakInfo = { confirmed: s60.confirmed, noData: s60.noData, threshold: 60, confirmedDays: s60.confirmedDays };
+          streakInfo = streakAt(s60, 60);
         } else {
           earned     = 'normal';
-          streakInfo = {};
+          streakInfo = { needed: s60.needed };
         }
       }
     }
@@ -1793,18 +1825,37 @@ function renderRowingStatus(tempF) {
   // confirmation to lift" (or "3-day confirmed") and drop the zone's rules.
   const BY_COMMITTEE = ' (set by the Safety Committee)';
 
+  // How a zone lifts, at this time of year: three mornings in a row March–July,
+  // one morning August–February (morningsNeeded).
+  const needed = eff.needed || 3;
+  const lifting = (thr) => needed === 1
+    ? `They lift once a morning reads ${thr}°F or more (August–February one morning is enough; March–July it takes three in a row).`
+    : `They lift after three mornings in a row at ${thr}°F or more (March–July; August–February one morning is enough).`;
+  // The rule line while a zone is waiting to lift.
+  const awaitingRule = (name, thr) => needed === 1
+    ? `${name} — lifts when a morning reads ${thr}°F or more`
+    : `${name} — awaiting 3-morning confirmation to lift`;
+
   // Helper to build the "awaiting" message for any zone
   function awaitingMsg(zone, eff) {
     const thr  = eff.threshold;
-    const need = 3 - (eff.confirmed || 0);
+    const need = needed - (eff.confirmed || 0);
     const thrLabel = thr === 40 ? '40°F (exit Winter Rowing)' :
                      thr === 50 ? '50°F (exit Four Oar Rule)' :
                                   '60°F (no temperature restrictions)';
     if (eff.insufficient) {
-      return `Winter Rowing restrictions remain in effect. Current temp is above threshold but <strong>fewer than 3 mornings of data</strong> (5–11 AM) have been collected. Cannot confirm the 3-morning streak yet.`;
+      return needed === 1
+        ? `Winter Rowing restrictions remain in effect. Current temp is above threshold but <strong>no morning readings</strong> (5–11 AM) have been collected yet. Cannot confirm a qualifying morning yet.`
+        : `Winter Rowing restrictions remain in effect. Current temp is above threshold but <strong>fewer than 3 mornings of data</strong> (5–11 AM) have been collected. Cannot confirm the 3-morning streak yet.`;
     }
     if (eff.noData) {
-      return `Winter Rowing restrictions remain in effect. <strong>Fewer than 3 mornings (5–11 AM ET) have readings</strong> in the recent period due to data gaps. Cannot confirm the 3-morning streak. Check the thermometer at the dock.`;
+      return needed === 1
+        ? `Winter Rowing restrictions remain in effect. <strong>No morning (5–11 AM ET) has readings</strong> in the recent period due to data gaps. Cannot confirm a qualifying morning. Check the thermometer at the dock.`
+        : `Winter Rowing restrictions remain in effect. <strong>Fewer than 3 mornings (5–11 AM ET) have readings</strong> in the recent period due to data gaps. Cannot confirm the 3-morning streak. Check the thermometer at the dock.`;
+    }
+    // The latest morning was too cold: say so, rather than that the mornings are warm.
+    if (!eff.confirmed && eff.coldMorning) {
+      return `Restrictions remain in effect: the latest morning reading (5–11 AM) was below ${thr}°F — <strong>${eff.coldMorning.tempF.toFixed(1)}°F on ${eff.coldMorning.date}</strong>. ${lifting(thr)}`;
     }
     const daysList = (eff.confirmedDays && eff.confirmedDays.length)
       ? `<div style="margin-top:10px;border-top:1px solid rgba(var(--ink),0.08);padding-top:10px;">
@@ -1818,7 +1869,7 @@ function renderRowingStatus(tempF) {
            ).join('')}
          </div>`
       : '';
-    return `Restrictions remain in effect. The most recent mornings (5–11 AM) are above ${thrLabel}, but only <strong>${eff.confirmed} of 3 mornings</strong> confirmed so far. Need ${need} more qualifying morning${need===1?'':'s'}.${daysList}`;
+    return `Restrictions remain in effect. The most recent mornings (5–11 AM) are above ${thrLabel}, but only <strong>${eff.confirmed} of ${needed} mornings</strong> confirmed so far. Need ${need} more qualifying morning${need===1?'':'s'}.${daysList}`;
   }
 
   if (eff.zone === 'winter') {
@@ -1831,7 +1882,7 @@ function renderRowingStatus(tempF) {
       rule  = 'WINTER ROWING in effect (water < 40°F)';
       notes = zoneRules;
     } else {
-      rule  = 'WINTER ROWING — awaiting 3-morning confirmation to lift';
+      rule  = awaitingRule('WINTER ROWING', 40);
       notes = awaitingMsg('winter', eff) + ' <strong>Eight Oar Rule remains in effect.</strong>';
     }
   } else if (eff.zone === 'fourOar') {
@@ -1844,7 +1895,7 @@ function renderRowingStatus(tempF) {
       rule  = 'FOUR OAR RULE in effect (water 40–50°F)';
       notes = zoneRules;
     } else {
-      rule  = 'FOUR OAR RULE — awaiting 3-morning confirmation to lift';
+      rule  = awaitingRule('FOUR OAR RULE', 50);
       notes = awaitingMsg('fourOar', eff) + ' Four Oar restrictions remain in effect.';
     }
   } else if (eff.zone === 'coldWater') {
@@ -1857,7 +1908,7 @@ function renderRowingStatus(tempF) {
       rule  = 'COLD WATER restrictions apply (water 51–60°F)';
       notes = zoneRules;
     } else {
-      rule  = 'COLD WATER — awaiting 3-morning confirmation to lift';
+      rule  = awaitingRule('COLD WATER', 60);
       notes = awaitingMsg('coldWater', eff);
     }
   } else {
@@ -1866,7 +1917,7 @@ function renderRowingStatus(tempF) {
     // conditions "normal": the page knows the water temperature, not whether
     // there is fog, wind or debris on the river.
     rule  = isOverride ? 'No temperature restrictions' + BY_COMMITTEE
-                       : 'No temperature restrictions (water > 60°F, 3-day confirmed)';
+                       : `No temperature restrictions (water > 60°F, ${needed === 1 ? 'morning reading confirmed' : '3-day confirmed'})`;
     notes = 'Buddy Boat advised in Spring and Fall. Carry a cell phone and marine whistle. Wear Hi-Viz tops.';
   }
 

@@ -6,7 +6,7 @@
  *
  * DESIGN NOTE — WHY THIS EXTRACTS LOGIC FROM index.html
  * ------------------------------------------------------
- * The rowing-status rules (temperature zones, 3-morning streak confirmation,
+ * The rowing-status rules (temperature zones, morning streak confirmation,
  * flood restrictions, tier tables) are SAFETY-CRITICAL. If this script
  * reimplemented them, the email and the website could silently drift apart
  * after any future edit to index.html — and members could be told they may row
