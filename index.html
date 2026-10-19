@@ -1544,27 +1544,30 @@ document.addEventListener('DOMContentLoaded', () => { setTimeout(initScrubber, 5
 // How many mornings it takes depends on the time of year: see morningsNeeded().
 // Returns: { confirmed, needed, noData, brokeOnCold, coldMorning, confirmedDays }
 //   confirmed   = number of qualifying recent mornings found (0–needed)
-//   needed      = mornings it takes right now (3 March–July, 1 August–February)
+//   needed      = mornings it takes right now (1 June 1–November 15, 3 otherwise)
 //   noData      = true if fewer than `needed` mornings had data in the lookback
 //                 window AND the streak did not break on a cold morning
 //   coldMorning = the morning that broke the streak, if one did
 
 // How many mornings in a row must read at or above a line before its
 // restrictions lift. Safety Committee, October 2026:
-//   March - July, while the water warms: THREE. In May 2026 the water sat
-//   between 59 and 61°F for twelve days; three mornings kept singles from
-//   opening and closing with every warm morning.
-//   August - February, while it cools: ONE. The water is not about to warm up
-//   behind a good reading, and three in a row would end the season for Tier 1
-//   and 2 singles at the first cool morning.
+//   June 1 - November 15: ONE. Three in a row would close Tier 1 and 2
+//   singles for days at a time while the water hovers around 60°F in the fall.
+//   November 16 - May 31: THREE in a row. A single mild morning in winter
+//   must not lift anything, and in spring (May 2026 sat between 59 and 61°F
+//   for twelve days) three mornings keep singles from opening and closing
+//   with every warm morning.
 // Restrictions still come back at once whenever a reading is at or below a
 // line, all year: see the current temp cap in getEffectiveLevel().
-const CONFIRM_SEASON = { fromMonth: 3, toMonth: 7 };   // March through July, inclusive
+const ONE_MORNING_SEASON = { startMonth: 6, startDay: 1, endMonth: 11, endDay: 15 };   // inclusive, boathouse calendar
 function morningsNeeded(when) {
-  const month = parseInt(new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York', month: 'numeric',
-  }).format(when), 10);
-  return month >= CONFIRM_SEASON.fromMonth && month <= CONFIRM_SEASON.toMonth ? 3 : 1;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', month: 'numeric', day: 'numeric',
+  }).formatToParts(when);
+  const part = (type) => parseInt(parts.find(p => p.type === type).value, 10);
+  const day = part('month') * 100 + part('day');                // e.g. 1115 for November 15
+  const S = ONE_MORNING_SEASON;
+  return day >= S.startMonth * 100 + S.startDay && day <= S.endMonth * 100 + S.endDay ? 1 : 3;
 }
 
 // Helper: get UTC ms for a given NY calendar date at a specific hour:minute
@@ -1603,7 +1606,7 @@ function checkMorningStreak(threshold) {
   // Morning window: 5:00 AM – 11:00 AM America/New_York (hardcoded for Oxford, CT boathouse).
   //
   // GAP-TOLERANT streak: we confirm the MOST RECENT mornings that actually have
-  // readings (3 March–July, 1 August–February), all at/above threshold. A morning
+  // readings (1 June 1–November 15, 3 otherwise), all at/above threshold. A morning
   // with NO data is SKIPPED (it neither confirms nor breaks the streak) — this
   // prevents a single missed GitHub Actions run from incorrectly forcing the
   // most-restrictive zone. A morning that HAS data but is too cold DOES break the
@@ -1728,7 +1731,7 @@ function getEffectiveLevel(tempF) {
   //    what the history says.
   //
   // 2. EARNED ZONE: what the most recent mornings with data (5–11 AM) have confirmed:
-  //    three of them March–July, one August–February (morningsNeeded).
+  //    one of them June 1–November 15, three the rest of the year (morningsNeeded).
   //    In April, even if it's 55°F today, if we haven't had 3 mornings above 40°F
   //    we stay in Winter Rowing.
   //
@@ -1844,12 +1847,12 @@ function renderRowingStatus(tempF) {
   // confirmation to lift" (or "3-day confirmed") and drop the zone's rules.
   const BY_COMMITTEE = ' (set by the Safety Committee)';
 
-  // How a zone lifts, at this time of year: three mornings in a row March–July,
-  // one morning August–February (morningsNeeded).
+  // How a zone lifts, at this time of year: one morning June 1–November 15,
+  // three mornings in a row the rest of the year (morningsNeeded).
   const needed = eff.needed || 3;
   const lifting = (thr) => needed === 1
-    ? `They lift once a morning reads ${thr}°F or more (August–February one morning is enough; March–July it takes three in a row).`
-    : `They lift after three mornings in a row at ${thr}°F or more (March–July; August–February one morning is enough).`;
+    ? `They lift once a morning reads ${thr}°F or more (June 1–November 15 one morning is enough; the rest of the year it takes three in a row).`
+    : `They lift after three mornings in a row at ${thr}°F or more (one morning is enough only June 1–November 15).`;
   // The rule line while a zone is waiting to lift.
   const awaitingRule = (name, thr) => needed === 1
     ? `${name} — lifts when a morning reads ${thr}°F or more`
