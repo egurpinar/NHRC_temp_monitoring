@@ -19,7 +19,7 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (243 tests): the email, and the website's script run against a fake network and clock |
+| `test_daily_email.js` | Test suite (240 tests): the email, and the website's script run against a fake network and clock |
 | `test_site_theme.js` | The website's light and dark themes (20 tests): contrast of every colour where it is used (WCAG AA), dark kept as the original design, the switch, the device default, the charts |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
