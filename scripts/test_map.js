@@ -663,24 +663,51 @@ test('every popup fits a phone\'s map: no wider than 240 px, kept clear of the e
   for (const x of withPopups) assert.deepStrictEqual(x.popupOptions, { maxWidth: 240, autoPanPadding: [12, 12] }, x.kind);
 });
 
-test('the boathouse is the NHRC logo, centred on the dock the club gave, above every hazard picture', async () => {
+test('the boathouse is the NHRC logo itself - no disc, no rings - bigger, centred on the dock the club gave, above every hazard picture', async () => {
   const p = await started();
   const dock = dockMarker(p.leaflet.made);
   const io = dock.o.icon.iconOptions;
-  assert.strictEqual(io.iconUrl, 'NHRC_logo.svg', 'the site\'s own logo file');
-  assert.deepStrictEqual([io.iconSize, io.iconAnchor], [[58, 58], [29, 29]], 'its middle is the dock');
+  assert.strictEqual(io.iconUrl, 'map/nhrc-map.png');
+  assert.deepStrictEqual([io.iconSize, io.iconAnchor, io.popupAnchor], [[64, 54], [32, 27], [0, -27]], 'its middle is the dock');
   assert.deepStrictEqual([dock.o.title, dock.o.alt, dock.o.keyboard, dock.o.zIndexOffset, dock.o.pane],
     ['NHRC boathouse dock', 'NHRC boathouse dock', true, 1000, 'hazards']);
   assert.strictEqual(dock.popup().textContent, 'NHRC boathouse dock');
   assert.deepStrictEqual([W.DOCK.lat, W.DOCK.lon], [41.3685422, -73.1478128]);
-  assert.ok(fs.existsSync(path.join(ROOT, W.LOGO_URL)), 'the file is there, next to the page');
-  assert.strictEqual(W.LOGO_URL, 'NHRC_logo.svg');
-  // Shrunk with the lake in view, still centred and still bigger than the hazards.
-  for (const [cls, px] of [['hz-mid', 48], ['hz-far', 38]]) {
-    const rule = HTML.match(new RegExp(`\\.${cls} \\.leaflet-marker-icon\\.dock-icon\\{([^}]*)\\}`))[1];
-    assert.ok(rule.includes(`width:${px}px!important`) && rule.includes(`margin-left:-${px / 2}px!important`) && rule.includes(`margin-top:-${px / 2}px!important`), cls);
+  assert.strictEqual(W.LOGO_URL, 'map/nhrc-map.png');
+  // The picture: the club's logo, whole (nothing on its edge), its background clear, the shape
+  // of the logo (wider than high), small to load.
+  const png = fs.readFileSync(path.join(ROOT, W.LOGO_URL));
+  assert.ok(png.length < 12000, `${png.length} bytes`);
+  const img = readPng(png);
+  assert.deepStrictEqual([img.width, img.height], [160, 136]);
+  assert.ok(wholeInside(img), 'the logo reaches the edge of its picture: it would look cut off');
+  assert.ok(Math.abs(io.iconSize[0] / io.iconSize[1] - img.width / img.height) < 0.03, 'shown in its own proportions');
+  // Its black letters keep a white edge: the middle of the "H" is black, with white round it.
+  const at = (x, y) => [...img.rgba.slice((y * img.width + x) * 4, (y * img.width + x) * 4 + 4)];
+  const dark = [], light = [];
+  for (let i = 0; i < img.width * img.height; i++) {
+    const [r, g, b, a] = at(i % img.width, Math.floor(i / img.width));
+    if (a > 250 && r + g + b < 60) dark.push(i);
+    if (a > 250 && r > 245 && g > 245 && b > 245) light.push(i);
   }
-  assert.ok(/<img class="key-logo" src="NHRC_logo\.svg" alt=""\/>NHRC boathouse dock/.test(HTML), 'the key shows the logo too');
+  assert.ok(dark.length > 200 && light.length > 1500, `${dark.length} black, ${light.length} white pixels`);
+  // On the map: no disc, no ring, nothing to cut it; a shadow to lift it off the photos.
+  const rule = (sel) => HTML.match(new RegExp(`\\n${sel}\\{([^}]*)\\}`))[1];
+  const base = rule('\\.leaflet-marker-icon\\.dock-icon');
+  assert.ok(/object-fit:contain/.test(base) && /drop-shadow/.test(base), base);
+  assert.ok(!/border|background|box-shadow|padding|clip|overflow/.test(base), base);
+  // Shrunk with more of the lake in view, still centred and still bigger than the hazards and Yale's.
+  for (const [cls, w, h] of [['hz-mid', 54, 46], ['hz-far', 44, 38]]) {
+    const r = rule(`\\.${cls} \\.leaflet-marker-icon\\.dock-icon`);
+    assert.ok(r.includes(`width:${w}px!important`) && r.includes(`height:${h}px!important`)
+      && r.includes(`margin-left:-${w / 2}px!important`) && r.includes(`margin-top:-${h / 2}px!important`), cls);
+    assert.ok(!/border|padding/.test(r), r);
+  }
+  // The key shows the same picture, also without a disc.
+  assert.ok(/<img class="key-logo" src="map\/nhrc-map\.png" alt=""\/>NHRC boathouse dock/.test(HTML), 'the key shows the logo too');
+  assert.ok(!/border|background|radius|box-shadow/.test(rule('\\.key-logo')), rule('\\.key-logo'));
+  // The header keeps the site's own logo file.
+  assert.ok(/NHRC_logo\.svg/.test(HTML));
 });
 
 const yaleMarker = (made) => made.layers.find((x) => x.kind === 'marker' && x.o.icon.iconOptions.className === 'yale-icon');
@@ -689,25 +716,44 @@ const yaleMarker = (made) => made.layers.find((x) => x.kind === 'marker' && x.o.
 function readPng(buf) {
   const zlib = require('zlib');
   assert.strictEqual(buf.slice(0, 8).toString('hex'), '89504e470d0a1a0a', 'a PNG');
-  let at = 8, width, height, depth, type;
+  let at = 8, width, height, depth, type, plte = null, trns = Buffer.alloc(0);
   const idat = [];
   while (at < buf.length) {
     const len = buf.readUInt32BE(at), kind = buf.slice(at + 4, at + 8).toString('ascii'), data = buf.slice(at + 8, at + 8 + len);
     if (kind === 'IHDR') { width = data.readUInt32BE(0); height = data.readUInt32BE(4); depth = data[8]; type = data[9]; assert.strictEqual(data[12], 0, 'not interlaced'); }
+    if (kind === 'PLTE') plte = data;
+    if (kind === 'tRNS') trns = data;
     if (kind === 'IDAT') idat.push(data);
     at += 12 + len;
   }
-  assert.deepStrictEqual([depth, type], [8, 6], 'RGBA, 8 bits a channel: its background can be clear');
-  const raw = zlib.inflateSync(Buffer.concat(idat)), bpp = 4, stride = width * bpp, rgba = Buffer.alloc(height * stride);
+  // RGBA, or a palette with its transparency: either way 8 bits, so its background can be clear.
+  assert.ok(depth === 8 && (type === 6 || (type === 3 && plte && trns.length)), `depth ${depth}, colour type ${type}`);
+  const bpp = type === 6 ? 4 : 1, stride = width * bpp;
+  const raw = zlib.inflateSync(Buffer.concat(idat)), px = Buffer.alloc(height * stride);
   for (let y = 0; y < height; y++) {
     const f = raw[y * (stride + 1)], line = raw.slice(y * (stride + 1) + 1, (y + 1) * (stride + 1));
     for (let x = 0; x < stride; x++) {
-      const a = x >= bpp ? rgba[y * stride + x - bpp] : 0, b = y ? rgba[(y - 1) * stride + x] : 0, c = x >= bpp && y ? rgba[(y - 1) * stride + x - bpp] : 0;
+      const a = x >= bpp ? px[y * stride + x - bpp] : 0, b = y ? px[(y - 1) * stride + x] : 0, c = x >= bpp && y ? px[(y - 1) * stride + x - bpp] : 0;
       const pr = () => { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); return pa <= pb && pa <= pc ? a : pb <= pc ? b : c; };
-      rgba[y * stride + x] = (line[x] + [0, a, b, (a + b) >> 1, f === 4 ? pr() : 0][f]) & 255;
+      px[y * stride + x] = (line[x] + [0, a, b, (a + b) >> 1, f === 4 ? pr() : 0][f]) & 255;
     }
   }
+  if (type === 6) return { width, height, rgba: px };
+  const rgba = Buffer.alloc(width * height * 4);
+  for (let i = 0; i < width * height; i++) {
+    const k = px[i];
+    plte.copy(rgba, i * 4, k * 3, k * 3 + 3);
+    rgba[i * 4 + 3] = k < trns.length ? trns[k] : 255;
+  }
   return { width, height, rgba };
+}
+
+/** True when nothing of a picture lies on its edge: what it shows is whole, not cut off. */
+function wholeInside(img) {
+  const alpha = (x, y) => img.rgba[(y * img.width + x) * 4 + 3];
+  for (let x = 0; x < img.width; x++) if (alpha(x, 0) || alpha(x, img.height - 1)) return false;
+  for (let y = 0; y < img.height; y++) if (alpha(0, y) || alpha(img.width - 1, y)) return false;
+  return true;
 }
 
 test('the Yale Gilder Boathouse: Yale\'s Y where the club gave it, whole, smaller than the club\'s own, in the key and the whole-lake view', async () => {
@@ -734,24 +780,22 @@ test('the Yale Gilder Boathouse: Yale\'s Y where the club gave it, whole, smalle
   const img = readPng(png);
   assert.deepStrictEqual([img.width, img.height], [128, 128]);
   const alpha = (x, y) => img.rgba[(y * img.width + x) * 4 + 3];
-  for (let i = 0; i < 128; i++) {
-    for (const [x, y] of [[i, 0], [i, 127], [0, i], [127, i]]) assert.strictEqual(alpha(x, y), 0, `the Y reaches the edge at ${x},${y}`);
-  }
+  assert.ok(wholeInside(img), 'the Y reaches the edge of its picture: it would look cut off');
+  assert.strictEqual(alpha(0, 0), 0);
   const at = (x, y) => [...img.rgba.slice((y * img.width + x) * 4, (y * img.width + x) * 4 + 4)];
   assert.deepStrictEqual(at(64, 100), [0, 53, 107, 255], 'Yale blue, solid, in the stem');
   // Shown whole on the map and in the key: no circle, no ring, nothing to cut it.
   const rule = (sel) => HTML.match(new RegExp(`\\n${sel}\\{([^}]*)\\}`))[1];
   const base = rule('\\.leaflet-marker-icon\\.yale-icon');
   assert.ok(/object-fit:contain/.test(base) && /drop-shadow/.test(base), base);
-  for (const r of [base, rule('\\.key-logo\\.key-yale')]) assert.ok(!/border-radius:(?!0)|clip|overflow|border:\d+px solid/.test(r), r);
-  assert.ok(/border-radius:0/.test(rule('\\.key-logo\\.key-yale')) && /background:none/.test(rule('\\.key-logo\\.key-yale')), 'the key\'s white disc is not used for the Y');
+  for (const r of [base, rule('\\.key-logo')]) assert.ok(!/border|radius|clip|overflow|background/.test(r), r);
   // Shrunk with more of the lake in view, still centred.
   for (const [cls, px] of [['hz-mid', 34], ['hz-far', 28]]) {
     const r = rule(`\\.${cls} \\.leaflet-marker-icon\\.yale-icon`);
     assert.ok(r.includes(`width:${px}px!important`) && r.includes(`height:${px}px!important`)
       && r.includes(`margin-left:-${px / 2}px!important`) && r.includes(`margin-top:-${px / 2}px!important`), cls);
   }
-  assert.ok(/<img class="key-logo key-yale" src="map\/yale-y\.png" alt=""\/>Yale Gilder Boathouse/.test(HTML), 'the key shows it too');
+  assert.ok(/<img class="key-logo" src="map\/yale-y\.png" alt=""\/>Yale Gilder Boathouse/.test(HTML), 'the key shows it too');
   // "Whole lake" takes in both boathouses; the first view, before the outline arrives, has Yale's too.
   const fit = p.run.map.views.filter((v) => v[0] === 'fit').slice(-1)[0][1];
   assert.ok(fit.pts.some((c) => c[0] === W.YALE.lat && c[1] === W.YALE.lon), 'the whole lake takes in the Yale boathouse');

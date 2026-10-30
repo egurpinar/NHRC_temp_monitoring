@@ -314,16 +314,15 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .map-sw{width:14px;height:14px;border-radius:3px;display:inline-block;border:1px solid rgba(var(--ink),.25);}
 .map-dot{width:12px;height:12px;border-radius:50%;display:inline-block;border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.35);}
 /* The boathouse: the club's logo on white, in the header's navy and gold rings - clear at every zoom. */
-.leaflet-marker-icon.dock-icon{box-sizing:border-box;padding:5px;background:#fff;border:3px solid #0d1f3c;border-radius:50%;box-shadow:0 0 0 3px #f0b429,0 2px 8px rgba(0,0,0,.55);object-fit:contain;}
-.hz-mid .leaflet-marker-icon.dock-icon{width:48px!important;height:48px!important;margin-left:-24px!important;margin-top:-24px!important;padding:4px;}
-.hz-far .leaflet-marker-icon.dock-icon{width:38px!important;height:38px!important;margin-left:-19px!important;margin-top:-19px!important;padding:3px;border-width:2px;}
+.leaflet-marker-icon.dock-icon{object-fit:contain;filter:drop-shadow(0 1px 2px rgba(0,0,0,.7));}
+.hz-mid .leaflet-marker-icon.dock-icon{width:54px!important;height:46px!important;margin-left:-27px!important;margin-top:-23px!important;}
+.hz-far .leaflet-marker-icon.dock-icon{width:44px!important;height:38px!important;margin-left:-22px!important;margin-top:-19px!important;}
 .leaflet-marker-icon.dock-icon:focus-visible{outline:3px solid var(--focus);outline-offset:4px;}
 .leaflet-marker-icon.yale-icon{object-fit:contain;filter:drop-shadow(0 1px 2px rgba(0,0,0,.75)) drop-shadow(0 0 1px rgba(0,0,0,.6));}
 .hz-mid .leaflet-marker-icon.yale-icon{width:34px!important;height:34px!important;margin-left:-17px!important;margin-top:-17px!important;}
 .hz-far .leaflet-marker-icon.yale-icon{width:28px!important;height:28px!important;margin-left:-14px!important;margin-top:-14px!important;}
 .leaflet-marker-icon.yale-icon:focus-visible{outline:3px solid var(--focus);outline-offset:4px;}
-.key-logo{width:20px;height:20px;box-sizing:border-box;padding:2px;background:#fff;border:1.5px solid #0d1f3c;border-radius:50%;box-shadow:0 0 0 1.5px #f0b429;object-fit:contain;}
-.key-logo.key-yale{background:none;border:0;border-radius:0;box-shadow:none;padding:0;}
+.key-logo{width:22px;height:20px;object-fit:contain;}
 /* The hazards' pictures on the map: a keyboard can reach them too. */
 .leaflet-marker-icon.hz-icon:focus-visible{outline:3px solid var(--focus);outline-offset:1px;border-radius:50%;}
 .weather-feels{font-size:.72rem;color:var(--muted);margin-top:2px;}
@@ -623,8 +622,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         <span><i class="map-dot" style="background:#E65100"></i>Orange: do not row / danger</span>
         <span><i class="map-dot" style="background:#FFD600"></i>Yellow: caution</span>
         <span id="hazard-key"></span>
-        <span><img class="key-logo" src="NHRC_logo.svg" alt=""/>NHRC boathouse dock</span>
-        <span><img class="key-logo key-yale" src="map/yale-y.png" alt=""/>Yale Gilder Boathouse</span>
+        <span><img class="key-logo" src="map/nhrc-map.png" alt=""/>NHRC boathouse dock</span>
+        <span><img class="key-logo" src="map/yale-y.png" alt=""/>Yale Gilder Boathouse</span>
       </div>
 
       <div class="note-text">
@@ -723,7 +722,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 <script id="leaflet-js" src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" async
         onerror="this.dataset.failed='1'"></script>
-<script src="map/wind-map.js?v=46be423392" async></script>
+<script src="map/wind-map.js?v=cf2c41e649" async></script>
 <script>
 // ─────────────────────────────────────────────────────────────────────────
 // MANUAL ZONE OVERRIDE — Safety Committee use only

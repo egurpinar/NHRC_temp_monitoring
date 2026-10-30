@@ -20,8 +20,11 @@
 
   // ── Settings ───────────────────────────────────────────────────────────────
   const DOCK = { lat: 41.3685422, lon: -73.1478128 };   // the NHRC dock, as the club gave it
-  /** The club's logo (the site's own file), for the dock. */
-  const LOGO_URL = 'NHRC_logo.svg';
+  /**
+   * The club's logo for the dock: the site's own (NHRC_logo.svg), whole, with a thin
+   * white edge so its black letters read on the photos (map/nhrc-map.png).
+   */
+  const LOGO_URL = 'map/nhrc-map.png';
   /** The Yale Gilder Boathouse, at the foot of the course, as the club gave it: 41°19'39.6"N 73°06'14.2"W. */
   const YALE = { lat: 41.3276667, lon: -73.1039444, name: 'Yale Gilder Boathouse' };
   /** Yale's Y, from the file the club supplied: the whole Y, the rest of the picture clear (map/yale-y.png). */
@@ -796,10 +799,10 @@
     state.badge = badge.getContainer ? badge.getContainer() : null;
     L.control.zoom({ position: 'topright' }).addTo(map);
 
-    // The boathouse: the club's logo on white in the header's navy and gold rings, centred on the
-    // dock, above every hazard's picture.
+    // The boathouse: the club's logo itself - no disc, no rings - centred on the dock, above every
+    // hazard's picture.
     const dock = L.marker([DOCK.lat, DOCK.lon], {
-      icon: L.icon({ iconUrl: LOGO_URL, iconSize: [58, 58], iconAnchor: [29, 29], popupAnchor: [0, -29], className: 'dock-icon' }),
+      icon: L.icon({ iconUrl: LOGO_URL, iconSize: [64, 54], iconAnchor: [32, 27], popupAnchor: [0, -27], className: 'dock-icon' }),
       title: 'NHRC boathouse dock', alt: 'NHRC boathouse dock', keyboard: true, zIndexOffset: 1000, pane: 'hazards' });
     dock.bindPopup(() => el(doc, 'strong', '', 'NHRC boathouse dock'), POPUP).addTo(map);
     // The Yale Gilder Boathouse, at the foot of the course: Yale's Y, whole - not cut to a circle -
