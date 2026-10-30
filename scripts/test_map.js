@@ -659,7 +659,7 @@ test('a name or colour can never get into a picture as markup', () => {
 test('every popup fits a phone\'s map: no wider than 240 px, kept clear of the edges', async () => {
   const p = await started();
   const withPopups = p.leaflet.made.layers.filter((x) => x.popup);
-  assert.strictEqual(withPopups.length, 9 + 12 + 1, 'the lanes and areas, the pictures, the dock');
+  assert.strictEqual(withPopups.length, 9 + 12 + 2, 'the lanes and areas, the pictures, the two boathouses');
   for (const x of withPopups) assert.deepStrictEqual(x.popupOptions, { maxWidth: 240, autoPanPadding: [12, 12] }, x.kind);
 });
 
@@ -681,6 +681,93 @@ test('the boathouse is the NHRC logo, centred on the dock the club gave, above e
     assert.ok(rule.includes(`width:${px}px!important`) && rule.includes(`margin-left:-${px / 2}px!important`) && rule.includes(`margin-top:-${px / 2}px!important`), cls);
   }
   assert.ok(/<img class="key-logo" src="NHRC_logo\.svg" alt=""\/>NHRC boathouse dock/.test(HTML), 'the key shows the logo too');
+});
+
+const yaleMarker = (made) => made.layers.find((x) => x.kind === 'marker' && x.o.icon.iconOptions.className === 'yale-icon');
+
+/** A PNG's pixels (8-bit RGBA, as map/yale-y.png is saved): { width, height, rgba }. */
+function readPng(buf) {
+  const zlib = require('zlib');
+  assert.strictEqual(buf.slice(0, 8).toString('hex'), '89504e470d0a1a0a', 'a PNG');
+  let at = 8, width, height, depth, type;
+  const idat = [];
+  while (at < buf.length) {
+    const len = buf.readUInt32BE(at), kind = buf.slice(at + 4, at + 8).toString('ascii'), data = buf.slice(at + 8, at + 8 + len);
+    if (kind === 'IHDR') { width = data.readUInt32BE(0); height = data.readUInt32BE(4); depth = data[8]; type = data[9]; assert.strictEqual(data[12], 0, 'not interlaced'); }
+    if (kind === 'IDAT') idat.push(data);
+    at += 12 + len;
+  }
+  assert.deepStrictEqual([depth, type], [8, 6], 'RGBA, 8 bits a channel: its background can be clear');
+  const raw = zlib.inflateSync(Buffer.concat(idat)), bpp = 4, stride = width * bpp, rgba = Buffer.alloc(height * stride);
+  for (let y = 0; y < height; y++) {
+    const f = raw[y * (stride + 1)], line = raw.slice(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let x = 0; x < stride; x++) {
+      const a = x >= bpp ? rgba[y * stride + x - bpp] : 0, b = y ? rgba[(y - 1) * stride + x] : 0, c = x >= bpp && y ? rgba[(y - 1) * stride + x - bpp] : 0;
+      const pr = () => { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); return pa <= pb && pa <= pc ? a : pb <= pc ? b : c; };
+      rgba[y * stride + x] = (line[x] + [0, a, b, (a + b) >> 1, f === 4 ? pr() : 0][f]) & 255;
+    }
+  }
+  return { width, height, rgba };
+}
+
+test('the Yale Gilder Boathouse: Yale\'s Y where the club gave it, whole, smaller than the club\'s own, in the key and the whole-lake view', async () => {
+  const p = await started();
+  const yale = yaleMarker(p.leaflet.made);
+  assert.ok(yale, 'there is a Yale marker');
+  // 41°19'39.6"N 73°06'14.2"W, as the club gave it.
+  assert.ok(Math.abs(W.YALE.lat - (41 + 19 / 60 + 39.6 / 3600)) < 1e-6, String(W.YALE.lat));
+  assert.ok(Math.abs(W.YALE.lon + (73 + 6 / 60 + 14.2 / 3600)) < 1e-6, String(W.YALE.lon));
+  assert.deepStrictEqual(yale.coords, [W.YALE.lat, W.YALE.lon]);
+  const io = yale.o.icon.iconOptions;
+  assert.strictEqual(io.iconUrl, 'map/yale-y.png');
+  assert.deepStrictEqual([io.iconSize, io.iconAnchor, io.popupAnchor], [[40, 40], [20, 20], [0, -20]], 'its middle is the boathouse');
+  const dock = dockMarker(p.leaflet.made);
+  assert.ok(io.iconSize[0] < dock.o.icon.iconOptions.iconSize[0], 'smaller than the club\'s own');
+  assert.deepStrictEqual([yale.o.title, yale.o.alt, yale.o.keyboard, yale.o.pane], ['Yale Gilder Boathouse', 'Yale Gilder Boathouse', true, 'hazards']);
+  assert.ok(yale.o.zIndexOffset > 0 && yale.o.zIndexOffset < dock.o.zIndexOffset, 'above the hazards\' pictures, below the club\'s dock');
+  assert.strictEqual(yale.popup().textContent, 'Yale Gilder Boathouse');
+  assert.deepStrictEqual(yale.popupOptions, W.POPUP);
+  // The picture: the file the club supplied, square, its background clear - and the Y
+  // whole: nothing of it on the picture's edge, as it would be had it been cut.
+  const png = fs.readFileSync(path.join(ROOT, W.YALE_LOGO_URL));
+  assert.ok(png.length < 8000, `${png.length} bytes`);
+  const img = readPng(png);
+  assert.deepStrictEqual([img.width, img.height], [128, 128]);
+  const alpha = (x, y) => img.rgba[(y * img.width + x) * 4 + 3];
+  for (let i = 0; i < 128; i++) {
+    for (const [x, y] of [[i, 0], [i, 127], [0, i], [127, i]]) assert.strictEqual(alpha(x, y), 0, `the Y reaches the edge at ${x},${y}`);
+  }
+  const at = (x, y) => [...img.rgba.slice((y * img.width + x) * 4, (y * img.width + x) * 4 + 4)];
+  assert.deepStrictEqual(at(64, 100), [0, 53, 107, 255], 'Yale blue, solid, in the stem');
+  // Shown whole on the map and in the key: no circle, no ring, nothing to cut it.
+  const rule = (sel) => HTML.match(new RegExp(`\\n${sel}\\{([^}]*)\\}`))[1];
+  const base = rule('\\.leaflet-marker-icon\\.yale-icon');
+  assert.ok(/object-fit:contain/.test(base) && /drop-shadow/.test(base), base);
+  for (const r of [base, rule('\\.key-logo\\.key-yale')]) assert.ok(!/border-radius:(?!0)|clip|overflow|border:\d+px solid/.test(r), r);
+  assert.ok(/border-radius:0/.test(rule('\\.key-logo\\.key-yale')) && /background:none/.test(rule('\\.key-logo\\.key-yale')), 'the key\'s white disc is not used for the Y');
+  // Shrunk with more of the lake in view, still centred.
+  for (const [cls, px] of [['hz-mid', 34], ['hz-far', 28]]) {
+    const r = rule(`\\.${cls} \\.leaflet-marker-icon\\.yale-icon`);
+    assert.ok(r.includes(`width:${px}px!important`) && r.includes(`height:${px}px!important`)
+      && r.includes(`margin-left:-${px / 2}px!important`) && r.includes(`margin-top:-${px / 2}px!important`), cls);
+  }
+  assert.ok(/<img class="key-logo key-yale" src="map\/yale-y\.png" alt=""\/>Yale Gilder Boathouse/.test(HTML), 'the key shows it too');
+  // "Whole lake" takes in both boathouses; the first view, before the outline arrives, has Yale's too.
+  const fit = p.run.map.views.filter((v) => v[0] === 'fit').slice(-1)[0][1];
+  assert.ok(fit.pts.some((c) => c[0] === W.YALE.lat && c[1] === W.YALE.lon), 'the whole lake takes in the Yale boathouse');
+  assert.ok(fit.pts.some((c) => c[0] === W.DOCK.lat && c[1] === W.DOCK.lon), 'and the club\'s');
+  assert.ok(W.LAKE_BOUNDS[0][0] < W.YALE.lat && W.YALE.lon < W.LAKE_BOUNDS[1][1]);
+});
+
+test('the boathouses widen the whole-lake view only once there is a map to show: no outline, no bounds', () => {
+  const L = fakeEnv().leaflet;
+  const m = L.map({});
+  assert.strictEqual(W.drawHazards(L, m, { folders: [] }, () => null, [[W.YALE.lat, W.YALE.lon]]).bounds, null);
+  const one = W.drawHazards(L, m, { folders: [{ name: 'Hazards', features: [{ name: 'Rock', type: 'point', coords: [41.35, -73.13] }] }] },
+    () => null, [[W.YALE.lat, W.YALE.lon]]);
+  assert.deepStrictEqual(one.bounds.pts, [[41.35, -73.13], [W.YALE.lat, W.YALE.lon]]);
+  const none = W.drawHazards(L, m, { folders: [{ name: 'Hazards', features: [{ name: 'Rock', type: 'point', coords: [41.35, -73.13] }] }] }, () => null);
+  assert.deepStrictEqual(none.bounds.pts, [[41.35, -73.13]], 'without landmarks, as before');
 });
 
 test('the streaks cover the whole map, not only the course: when it opens, once the lanes arrive, after a drag, and as they drift', async () => {
@@ -909,7 +996,7 @@ test('"Whole lake" works even before the map\'s outline has arrived; "Boathouse"
   assert.deepStrictEqual(buttons.map((b) => [b.tagName, b.type, b.textContent]), [['BUTTON', 'button', 'Boathouse'], ['BUTTON', 'button', 'Whole lake'], ['BUTTON', 'button', 'Street map']]);
   buttons[1].click();
   assert.deepStrictEqual(p.run.map.views.slice(-1)[0], ['fit', W.LAKE_BOUNDS]);
-  assert.deepStrictEqual(p.run.map.fitOptions, { paddingTopLeft: [20, 20], paddingBottomRight: [20, 34] }, 'the lake\'s far end clear of the credits line');
+  assert.deepStrictEqual(p.run.map.fitOptions, { paddingTopLeft: [20, 20], paddingBottomRight: [30, 44] }, 'the lake\'s far end - the Yale boathouse - clear of the credits line');
   buttons[0].click();
   assert.deepStrictEqual(p.run.map.views.slice(-1)[0], ['view', [W.DOCK.lat, W.DOCK.lon], 16]);
 });

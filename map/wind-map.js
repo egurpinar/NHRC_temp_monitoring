@@ -22,6 +22,10 @@
   const DOCK = { lat: 41.3685422, lon: -73.1478128 };   // the NHRC dock, as the club gave it
   /** The club's logo (the site's own file), for the dock. */
   const LOGO_URL = 'NHRC_logo.svg';
+  /** The Yale Gilder Boathouse, at the foot of the course, as the club gave it: 41°19'39.6"N 73°06'14.2"W. */
+  const YALE = { lat: 41.3276667, lon: -73.1039444, name: 'Yale Gilder Boathouse' };
+  /** Yale's Y, from the file the club supplied: the whole Y, the rest of the picture clear (map/yale-y.png). */
+  const YALE_LOGO_URL = 'map/yale-y.png';
   // The rowable lake, from the shallows above the boathouse to the power lines
   // above the Derby dam: the first view, until the map's own outline arrives.
   const LAKE_BOUNDS = [[41.3262, -73.1565], [41.3770, -73.1035]];
@@ -343,11 +347,12 @@
    * Draws the club's map with Leaflet `L` on `map`: lanes and areas, then
    * hazards on top, each with its picture. Returns { lanes, bounds, count,
    * kinds }: `kinds` is one { kind, color } for each sort of hazard on the
-   * map, for the key. Names and descriptions are only ever set as text,
-   * never as markup. Every corner is drawn where the committee put it
-   * (no smoothing).
+   * map, for the key. `bounds` takes in the `landmarks` too ([lat, lon] each:
+   * the boathouses), so the whole lake shows them. Names and descriptions are
+   * only ever set as text, never as markup. Every corner is drawn where the
+   * committee put it (no smoothing).
    */
-  function drawHazards(L, map, data, popupFor) {
+  function drawHazards(L, map, data, popupFor, landmarks = []) {
     const lanes = [];
     const pts = [];
     const seenKinds = new Map();
@@ -395,7 +400,7 @@
     }
     group.addTo(map);
     const kinds = KIND_ORDER.filter((k) => seenKinds.has(k)).map((k) => ({ kind: k, color: seenKinds.get(k) }));
-    return { lanes, bounds: pts.length ? L.latLngBounds(pts) : null, count, kinds };
+    return { lanes, bounds: pts.length ? L.latLngBounds(pts.concat(landmarks)) : null, count, kinds };
   }
 
   // ── The moving wind ────────────────────────────────────────────────────────
@@ -733,7 +738,8 @@
     const map = L.map(mapBox, { zoomSnap: 0.5, scrollWheelZoom: false, zoomControl: false,
       center: [(LAKE_BOUNDS[0][0] + LAKE_BOUNDS[1][0]) / 2, (LAKE_BOUNDS[0][1] + LAKE_BOUNDS[1][1]) / 2], zoom: 13 });
     state.map = map;
-    const FIT = { paddingTopLeft: [20, 20], paddingBottomRight: [20, 34] };   // clear of the credits line
+    // Clear of the edges, and the Yale boathouse at the lake's far end clear of the credits line.
+    const FIT = { paddingTopLeft: [20, 20], paddingBottomRight: [30, 44] };
     // The whole lake in view. A map with no size yet would zoom all the way in on
     // the middle of the lake - the woods by the river - so it waits until its box
     // has one. On roworno.com it often has none at first: the page shows its cards
@@ -796,6 +802,12 @@
       icon: L.icon({ iconUrl: LOGO_URL, iconSize: [58, 58], iconAnchor: [29, 29], popupAnchor: [0, -29], className: 'dock-icon' }),
       title: 'NHRC boathouse dock', alt: 'NHRC boathouse dock', keyboard: true, zIndexOffset: 1000, pane: 'hazards' });
     dock.bindPopup(() => el(doc, 'strong', '', 'NHRC boathouse dock'), POPUP).addTo(map);
+    // The Yale Gilder Boathouse, at the foot of the course: Yale's Y, whole - not cut to a circle -
+    // smaller than the club's own, also above the hazards.
+    const yale = L.marker([YALE.lat, YALE.lon], {
+      icon: L.icon({ iconUrl: YALE_LOGO_URL, iconSize: [40, 40], iconAnchor: [20, 20], popupAnchor: [0, -20], className: 'yale-icon' }),
+      title: YALE.name, alt: YALE.name, keyboard: true, zIndexOffset: 900, pane: 'hazards' });
+    yale.bindPopup(() => el(doc, 'strong', '', YALE.name), POPUP).addTo(map);
 
     // Below the map: the two views, and photos or street map.
     const tools = $('map-tools');
@@ -827,7 +839,7 @@
 
     const drawn = loadMapData().then((data) => {
       if (!data) return;
-      const out = drawHazards(L, map, data, popupFor);
+      const out = drawHazards(L, map, data, popupFor, [[DOCK.lat, DOCK.lon], [YALE.lat, YALE.lon]]);
       state.lanes = out.lanes;
       state.bounds = out.bounds;
       if (out.bounds) fitLake();
@@ -854,7 +866,7 @@
   }
 
   const api = {
-    DOCK, LOGO_URL, LAKE_BOUNDS, TZ, HOURS_AHEAD, PLAY, FORECAST_URL, MAP_DATA_URL, TILES, PHOTO_FAILS, POPUP, REFRESH_MS,
+    DOCK, LOGO_URL, YALE, YALE_LOGO_URL, LAKE_BOUNDS, TZ, HOURS_AHEAD, PLAY, FORECAST_URL, MAP_DATA_URL, TILES, PHOTO_FAILS, POPUP, REFRESH_MS,
     hazardKind, KIND_WORDS, KIND_ORDER, GLYPHS, glyphColor, iconSvg, iconUrl, areaMiddle, ARROW_STEP,
     compass, bearing, distance, angleBetween, windOnBoat, laneEdge, windShares, mostlyText, slotLabel,
     forecastSlots, withStation, slotName, sourceText, STATION_MAX_AGE_MS, windText, conditionsText, arrowRotation, isCalm, courseText, laneText, laneDirection,
