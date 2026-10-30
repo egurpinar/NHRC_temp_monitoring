@@ -18,3 +18,7 @@ camera/*ring-token*
 *.jpeg
 !nhrc_email_logo.png
 node_modules/
+
+# What the Mac's hourly Pi check writes (camera/pi_check.sh): the Pis' reports,
+# with home-network addresses and logs. Never committed.
+.pi-health/

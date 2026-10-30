@@ -5455,6 +5455,7 @@ test('a check-in never carries the token or the secret in its body', async () =>
 
 test('no address of the home network in anything published: the README, the code, the scripts, the website', () => {
   const files = ['README.md', 'snapshot_service.js', 'cloudflare_worker.js', 'timelapse_export.sh', 'timelapse_to_icloud.sh',
+    'pi_health.sh', 'pi_check.sh', 'test_pi_check.js',
     'nhrc-camera.service', 'test_snapshot_service.js', path.join('..', 'index.html')];
   const lan = /\b(192\.168|10\.\d{1,3}|172\.(1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b/;
   for (const f of files) {

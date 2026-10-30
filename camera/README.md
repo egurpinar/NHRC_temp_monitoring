@@ -1062,6 +1062,93 @@ journalctl -u nhrc-camera -n 50           # what the Pi has been doing
   permissions on the token file, re-run `ring-auth-cli`, and if push
   notifications are also broken, delete the client in Ring Control Center first.
 
+## If a Pi freezes
+
+In October 2026 both Pis froze completely, a few days apart - Pi-hole, the
+camera, everything - and stayed down until they were unplugged: the standby on
+18 October while it was only standing by, the main Pi on 22 October, for 7½
+days (the standby ran the cameras meanwhile). No log said why: the journal was
+kept in memory only, and lost at the restart. Three settings on each Pi turn a
+freeze into a restart within a couple of minutes, and keep the logs from
+before it:
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d /etc/systemd/system.conf.d
+printf '[Journal]\nStorage=persistent\nSystemMaxUse=64M\nSyncIntervalSec=1m\n' | sudo tee /etc/systemd/journald.conf.d/90-nhrc.conf
+sudo systemctl restart systemd-journald
+sudo journalctl --flush
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+printf '[Manager]\nRuntimeWatchdogSec=14s\n' | sudo tee /etc/systemd/system.conf.d/90-nhrc-watchdog.conf
+sudo systemctl daemon-reexec
+printf 'kernel.panic = 10\n' | sudo tee /etc/sysctl.d/90-nhrc-panic.conf
+sudo sysctl -p /etc/sysctl.d/90-nhrc-panic.conf
+```
+
+- **The logs are kept on the SD card**, 64 MB at most, so after a restart
+  `journalctl -b -1` shows what came before it. The `systemd-tmpfiles` line
+  lets your own user read them, as before, without sudo.
+- **The hardware watchdog.** systemd tells the Pi's watchdog chip every few
+  seconds that all is well; when that stops - a frozen Pi - the chip restarts
+  the Pi 14 seconds later (the Pi Zero's chip allows 15 at most).
+- **A kernel crash restarts the Pi after 10 seconds**, instead of leaving it
+  stopped for good (the default, 0).
+
+To check them: `systemctl show -p RuntimeWatchdogUSec` says `14s`,
+`cat /proc/sys/kernel/panic` says `10`, and `ls /var/log/journal` shows a folder.
+
+What the Pi itself remembers: in `last -x reboot shutdown`, a `reboot` line
+with no `shutdown` line before it is a restart without a clean shutdown - a
+freeze, or a power cut. The Pi has no clock of its own and saves the time every
+hour at :17 (`fake-hwclock`), so such a restart is stamped with the last save
+before the failure: `Oct 22 15:16` there means it stopped between 15:17 and
+16:17. Pi-hole's database knows when it stopped answering:
+`.pi-health/` (next section) lists every gap of over an hour.
+
+## Checking the Pis from the Mac
+
+Your Mac can ask both Pis how they are, every hour, and keep their answers in
+this repository's folder, in `.pi-health/` - never committed (`.gitignore`) -
+where Claude can read them, and you too, without anyone pasting commands:
+
+- `.pi-health/emre@pihole2.txt` - the latest report from that Pi, whole: its
+  restarts and whether they were clean, the protections above, power
+  (under-voltage), memory, the SD card's free space and file-system errors,
+  Wi-Fi, Pi-hole (every gap of over an hour in the DNS queries it answered in
+  the last 14 days, and its log), the camera service (restarts, takeovers,
+  memory during the day's captures, its last lines, the timelapse days), kernel
+  warnings, and the last lines from before the last restart.
+- `.pi-health/history.log` - one line per Pi per check: its summary, or why it
+  did not answer.
+
+A notification says when one Pi answers but the other has not for two checks
+in a row (it may have frozen), when it answers again, and when a Pi has
+restarted without a clean shutdown since the last check. When neither answers,
+the Mac is taken to be away from home, and nothing is said.
+
+The Mac uses a key of its own, which each Pi lets run the report
+(`camera/pi_health.sh`, installed as `/usr/local/bin/nhrc-pi-health`) and
+nothing else: no shell, no other command, no files, no forwarding. The report
+changes nothing on the Pi, never prints a secret (not the env file, not the
+Ring token), and gives each of its steps a minute at most.
+
+To set it up, on the Mac, in this repository's folder - the Pis by address if
+their names do not resolve. It asks once for each Pi's password, or your key's
+passphrase:
+
+```bash
+bash camera/pi_check.sh install emre@pihole2 emre@STANDBY-PI
+```
+
+It needs sudo without a password on the Pis (Raspberry Pi OS gives its first
+user that). If macOS asks whether "NHRC Pi Check" may find devices on your
+local network, or use files in your Documents folder, click Allow. Then:
+
+```bash
+bash camera/pi_check.sh run          # check now, without waiting for the hour
+bash camera/pi_check.sh update       # after pi_health.sh changes: put it on the Pis again
+bash camera/pi_check.sh uninstall    # stop the hourly check
+```
+
 ---
 
 ## Security analysis
@@ -1269,3 +1356,23 @@ the first version); and against real ssh servers, the Mac's key copying the
 days from both Pis and being refused a command, a shell, scp and sftp. The macOS parts - the app, the schedule, the permission prompts -
 can only run on a Mac: its install ends with a first copy, and the log says how
 it went.
+
+The Mac's hourly check of the Pis has its own tests (a few seconds):
+
+```bash
+node camera/test_pi_check.js
+```
+
+The Pi's report against stand-ins for each of the Pi's tools: the summary,
+clean and unclean restarts, values that look wrong shown as `?`, only the
+kernel lines that matter, root only through `sudo -n`, a step that hangs cut
+off, no secret ever printed, any other request refused. The Mac's side against
+two pretend Pis and a stand-in ssh: the report put on each Pi byte for byte
+with the key beside it (never twice, other keys untouched, nothing when sudo
+wants a password), each check's report and history line, the notifications (a
+Pi missing twice while the other answers, back again, an unclean restart - and
+none with the Mac away from home), one check at a time, the history's length.
+Then with a real ssh server: the report arrives, the test stand-ins cannot be
+slipped in over ssh, and the key gets no other command, shell, scp, sftp or
+port forwarding. The macOS parts can only run on a Mac: its install ends with
+a first check, and `.pi-health/history.log` says how it went.
