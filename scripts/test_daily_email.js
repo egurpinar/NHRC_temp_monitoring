@@ -2285,8 +2285,15 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
   els.__logged = logged;
   const blobs = { made: 0, live: new Set(), revoked: [] };
   els.__blobs = blobs;
+  // Scripts the page adds (the chart library): each its own element, kept in
+  // order, for a test to load or fail.
+  const scripts = [];
+  els.__scripts = scripts;
+  const newScript = () => ({ tagName: 'SCRIPT', src: '', async: true, onload: null, onerror: null });
   const document = { getElementById: el, querySelectorAll: (sel) => (/#range-btns/.test(sel) ? rangeButtons : []),
-    querySelector: () => null, addEventListener: on('document'), createElement: () => el('__created'),
+    querySelector: (sel) => (opts.querySelector ? opts.querySelector(sel, el) : null), addEventListener: on('document'),
+    createElement: (tag) => (String(tag).toLowerCase() === 'script' ? newScript() : el('__created')),
+    head: { appendChild: (s) => { scripts.push(s); return s; } },
     visibilityState: 'visible', body: el('__body') };
   els.__document = document;
   const sandbox = {
@@ -2294,7 +2301,10 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     window: { addEventListener: on('window') }, fetch: fetchImpl || (() => new Promise(() => {})),
     // Shaped like Chart.js where the page touches it: data and options come
     // from the config it was built with.
-    Chart: opts.Chart || function (ctx, cfg) { return { data: cfg && cfg.data, options: (cfg && cfg.options) || {}, destroy() {}, update() {} }; },
+    // opts.Chart: undefined is the library not loaded yet (it loads on demand).
+    Chart: Object.prototype.hasOwnProperty.call(opts, 'Chart') && opts.Chart === undefined ? undefined
+      : opts.Chart || function (ctx, cfg) { return { data: cfg && cfg.data, options: (cfg && cfg.options) || {}, destroy() {}, update() {} }; },
+    IntersectionObserver: opts.IntersectionObserver,
     moment: {},
     setInterval: opts.setInterval || (() => 0), setTimeout: opts.setTimeout || (() => 0), clearTimeout: opts.clearTimeout || (() => {}),
     AbortController: opts.AbortController,
@@ -2310,6 +2320,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     },
     Intl, Date: FixedDate, Math, JSON, isNaN, parseInt, parseFloat, Number, Array, Object, String,
   };
+  els.__sandbox = sandbox;
   const ctx = vmT.createContext(sandbox);
   vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, getEffectiveLevel, morningsNeeded, wind24, renderWind24, wireWind24, smoothPath, renderFogOutlook, renderFloodGrid, renderDashboard,' +
     ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData,' +
@@ -2318,7 +2329,8 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     ' cameraCaption, cameraMissingMessage, CAMERA_SNAPSHOT_URL, nearestReading, downloadCSV, withGapBreaks,' +
     ' checkCameraForNewPhoto, newestReading, mergeHistory, normalizeHistory, readingTime, WATER_LATEST_URL, WATER_RECENT_URL,' +
     ' ARCHIVE_REFRESH_MS, loadNwsAlerts, loadNwsForecast, renderNwsOutlook, nwsOutlook, nwsAlertsUrl, nwsPointsUrl,' +
-    ' NWS_ALERTS_KEEP_MS, NWS_FORECAST_KEEP_MS };',
+    ' NWS_ALERTS_KEEP_MS, NWS_FORECAST_KEEP_MS, loadChartLibs, chartsWhenReady, watchChartsNear, chartLibs, CHART_LIBS,' +
+    ' CHART_LIBS_RETRY_MS, CHART_NEAR_MARGIN, initRiverChart, get chart() { return chart; }, get riverChart() { return riverChart; } };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -4745,6 +4757,114 @@ test('phone: the header logo is an 11 KB picture, three times its shown size - n
   assert.ok(png.length <= 16 * 1024, `${png.length} bytes`);
   // Shown at most 96px x 78% across - 75 CSS pixels - so 240 covers a 3x screen.
   assert.ok(/\.header-logo-wrap\{width:clamp\(72px,12vw,96px\)/.test(html) && /\.header-logo-wrap img\{width:78%;height:78%;object-fit:contain;\}/.test(html));
+});
+
+// The chart library as it arrives on a page: a stand-in Chart that records what it drew.
+function arriveChartLibs(els, ok = true) {
+  const drawn = [];
+  if (ok) {
+    els.__sandbox.Chart = function (ctx, cfg) { drawn.push(cfg); return { data: cfg.data, options: cfg.options || {}, destroy() {}, update() {} }; };
+    els.__sandbox.moment = function () {};
+    els.__scripts.forEach(s => s.onload && s.onload());
+  } else {
+    els.__scripts[0].onerror();
+  }
+  return drawn;
+}
+
+test('phone: no chart library in <head> - nothing on the page waits for it', () => {
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8');
+  const head = html.slice(0, html.indexOf('</head>')).replace(/<!--[\s\S]*?-->/g, '');
+  assert.ok(!/<script[^>]+src=/i.test(head), 'no external script in <head>');
+  assert.ok(!/chart\.umd|moment\.min|chartjs-adapter/.test(head));
+  const css = head.match(/<link rel="stylesheet" href="https:\/\/unpkg\.com\/leaflet@1\.9\.4\/dist\/leaflet\.css"[^>]*>/)[0];
+  assert.ok(/media="print" onload="this\.media='all'"/.test(css), 'the map\'s styles do not hold up the page either');
+});
+
+test('phone: the chart library loads once, in order, when a chart is near - then both charts are drawn', async () => {
+  const t = Date.now();
+  const net = fakeNet([[/^data\.json/, () => reply(makeRaw(66, new Date(t - 60000)))], [/^history\.json/, () => reply(histUpTo(t - 60000, 66))],
+    [/stageflow\/(observed|forecast)$/, (u) => reply(riverSeries(t, 3, /observed$/.test(u) ? 'observed' : 'forecast'))]]);
+  let near = null;
+  class IO { constructor(cb, o) { this.cb = cb; this.o = o; this.watched = []; near = this; } observe(e) { this.watched.push(e); } disconnect() { this.off = true; } }
+  const { site, els } = loadSite(t, net.fetch, { Chart: undefined, IntersectionObserver: IO,
+    querySelector: (sel, el) => (sel === '.chart-card' ? el('__chart-card') : null) });
+  site.watchChartsNear();
+  await site.loadData();
+  await site.loadRiverData();
+  assert.strictEqual(els.__scripts.length, 0, 'nothing loaded while the charts are far down the page');
+  assert.ok(/Loading the chart/.test(els['chart-single-msg'].innerHTML), els['chart-single-msg'].innerHTML);
+  assert.strictEqual(near.o.rootMargin, site.CHART_NEAR_MARGIN);
+  assert.deepStrictEqual(near.watched.map(e => e.id), ['__chart-card', 'river-content'], 'the cards, not the hidden charts');
+  near.cb([{ isIntersecting: false }]);
+  assert.strictEqual(els.__scripts.length, 0);
+  near.cb([{ isIntersecting: true }]);
+  assert.ok(near.off, 'watched once');
+  assert.deepStrictEqual(els.__scripts.map(s => [s.src.replace(/^.*\/ajax\/libs\//, ''), s.async]),
+    [['Chart.js/4.4.1/chart.umd.min.js', false], ['moment.js/2.29.4/moment.min.js', false], ['chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js', false]],
+    'all three, run in order');
+  const drawn = arriveChartLibs(els);
+  await settle();
+  assert.strictEqual(drawn.length, 2, 'the temperature chart and the river chart');
+  assert.ok(site.chart && site.riverChart);
+  assert.strictEqual(els['chart-single-msg'].style.display, 'none');
+  site.loadChartLibs();
+  assert.strictEqual(els.__scripts.length, 3, 'never loaded twice');
+});
+
+test('phone: the chart library cannot load - each chart says so, the rest of the page is untouched, and it is tried again after 5 minutes', async () => {
+  let t = Date.now();
+  const net = fakeNet([[/^data\.json/, () => reply(makeRaw(66, new Date(t - 60000)))], [/^history\.json/, () => reply(histUpTo(t - 60000, 66))],
+    [/stageflow\/(observed|forecast)$/, (u) => reply(riverSeries(t, 9.5, /observed$/.test(u) ? 'observed' : 'forecast'))]]);
+  const { site, els } = loadSite(() => t, net.fetch, { Chart: undefined });
+  site.watchChartsNear();                       // no IntersectionObserver: at once
+  await site.loadData();
+  await site.loadRiverData();
+  arriveChartLibs(els, false);
+  await settle();
+  assert.ok(/Chart unavailable/.test(els['chart-single-msg'].innerHTML), els['chart-single-msg'].innerHTML);
+  assert.ok(/Chart unavailable/.test(els['river-chart__parent'].innerHTML));
+  assert.strictEqual(els['min-val'].textContent, '66.0°F', 'the stats');
+  assert.ok(/9\.5 ft/.test(els['sum-river'].innerHTML) && /Allowed/.test(els['tiers-grid'].innerHTML), 'the river and the rules');
+  const tried = els.__scripts.length;
+  await site.loadData();
+  els.__rangeButtons.find(b => b.dataset.d === '7').handlers.click();   // the chart is drawn again
+  await settle();
+  assert.strictEqual(els.__scripts.length, tried, 'not again at the next refresh, nor at a click');
+  assert.ok(/Chart unavailable/.test(els['chart-single-msg'].innerHTML));
+  t += site.CHART_LIBS_RETRY_MS + 1000;
+  site.chartsWhenReady();
+  assert.strictEqual(els.__scripts.length, tried + 3, 'tried again after 5 minutes');
+});
+
+test('phone: the page starts watching for the charts when it opens', async () => {
+  const t = Date.now();
+  const net = fakeNet([[/^data\.json/, () => reply(makeRaw(66, new Date(t - 60000)))], [/^history\.json/, () => reply(histUpTo(t - 60000, 66))]]);
+  let watching = 0;
+  class IO { constructor() { watching += 1; } observe() {} disconnect() {} }
+  const { els } = loadSite(t, net.fetch, { Chart: undefined, IntersectionObserver: IO });
+  els.__fire('window', 'DOMContentLoaded');
+  await settle();
+  assert.strictEqual(watching, 1, 'one watcher, for both charts');
+  assert.strictEqual(els.__scripts.length, 0, 'and nothing loaded until a chart is near');
+  // Where the browser cannot watch, the library loads as soon as a chart is drawn.
+  const p = loadSite(t, net.fetch, { Chart: undefined });
+  p.els.__fire('window', 'DOMContentLoaded');
+  await settle();
+  assert.strictEqual(p.els.__scripts.length, 3);
+});
+
+test('phone: a chart library that never answers counts as failed after 30 s', async () => {
+  const t = Date.now();
+  const timers = [];
+  const { site, els } = loadSite(t, null, { Chart: undefined, setTimeout: (fn, ms) => { timers.push({ fn, ms }); return timers.length; } });
+  const p = site.loadChartLibs();
+  assert.strictEqual(els.__scripts.length, 3);
+  const deadline = timers.find(x => x.ms === 30000);
+  assert.ok(deadline, 'a 30 s deadline');
+  deadline.fn();
+  assert.strictEqual(await p, false);
+  assert.ok(site.chartLibs.failedAt > 0);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

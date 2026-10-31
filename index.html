@@ -27,11 +27,12 @@
 })();
 </script>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js"></script>
+<!-- No chart library here: it loads once a chart is near the screen (loadChartLibs),
+     so the summary never waits for it. -->
+<!-- The map's styles load without holding up the page (media="print" until they
+     are in): they come from another server, and the map is far down the page. -->
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" media="print" onload="this.media='all'"/>
 <style>
 /* COLOURS. Two themes, one set of names. The names come from the original
    dark design, which is the dark theme (a few colours brightened for
@@ -740,7 +741,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 <script id="leaflet-js" src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" async
         onerror="this.dataset.failed='1'"></script>
-<script src="map/wind-map.js?v=cf2c41e649" async></script>
+<script src="map/wind-map.js?v=a2c5c51ae6" async></script>
 <script>
 // ─────────────────────────────────────────────────────────────────────────
 // MANUAL ZONE OVERRIDE — Safety Committee use only
@@ -1020,6 +1021,99 @@ const state = {
 };
 let chart = null;
 
+/* ── THE CHART LIBRARY, WHEN A CHART IS NEAR ──────────────────────────────────
+ * Chart.js, moment and their date adapter - about 90 KB over the network, from
+ * a CDN - used to load in <head>, and nothing on the page showed until they
+ * had: on one bar of signal at the boathouse, the summary waited for a chart
+ * library. They now load once a chart is within a screen of being seen (both
+ * are well down a phone's page), or at once where the browser cannot tell.
+ * Until then a chart says it is loading; if they fail it says so, and nothing
+ * else on the page is touched. A failure is tried again after 5 minutes, at a
+ * refresh - not at every one.
+ */
+const CHART_LIBS = [
+  'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js',
+  'https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js',
+];
+const CHART_LIBS_TIMEOUT_MS = 30000;
+const CHART_LIBS_RETRY_MS = 5 * 60000;
+const CHART_NEAR_MARGIN = '800px 0px';
+const chartLibs = { promise: null, failedAt: 0, near: false };
+const CHART_UNAVAILABLE = 'Chart unavailable &mdash; the charting library did not load.';
+
+function chartLibsLoaded() { return typeof Chart !== 'undefined'; }
+
+/** The chart library, loaded once: resolves true when it is in, false when it could not be. */
+function loadChartLibs() {
+  if (chartLibsLoaded()) return Promise.resolve(true);
+  if (chartLibs.promise) return chartLibs.promise;
+  if (chartLibs.failedAt && Date.now() - chartLibs.failedAt < CHART_LIBS_RETRY_MS) return Promise.resolve(false);
+  chartLibs.promise = new Promise((resolve) => {
+    let left = CHART_LIBS.length, settled = false;
+    const done = (ok) => {
+      if (settled) return;
+      settled = true;
+      if (!ok) { chartLibs.failedAt = Date.now(); chartLibs.promise = null; }
+      resolve(ok);
+    };
+    try {
+      for (const src of CHART_LIBS) {
+        const s = document.createElement('script');
+        s.src = src;
+        s.async = false;          // run in this order: the adapter needs the other two
+        s.onload = () => { left -= 1; if (left === 0) done(chartLibsLoaded()); };
+        s.onerror = () => done(false);
+        document.head.appendChild(s);
+      }
+    } catch (e) { done(false); }
+    setTimeout(() => done(false), CHART_LIBS_TIMEOUT_MS);
+  });
+  return chartLibs.promise;
+}
+
+/**
+ * Called by a chart that cannot be drawn yet: once a chart is near (or the
+ * browser cannot tell), the library is loaded and both charts are drawn from
+ * the page's data as it is then. Never throws.
+ */
+function chartsWhenReady() {
+  if (!chartLibs.near) return;
+  loadChartLibs().then((ok) => {
+    try {
+      if (ok) {
+        updateChart();
+        if (document.getElementById('river-chart')) initRiverChart(state.riverObserved, state.riverForecast, state.riverLevel);
+      } else {
+        const msg = document.getElementById('chart-single-msg'), wrap = document.getElementById('chart-wrap');
+        if (msg && wrap && !chart) {
+          msg.style.display = 'block'; wrap.style.display = 'none';
+          msg.innerHTML = `<span>${CHART_UNAVAILABLE} The readings and rules on this page are unaffected.</span>`;
+        }
+        const canvas = document.getElementById('river-chart');
+        if (canvas && canvas.parentElement && !riverChart) {
+          canvas.parentElement.innerHTML = `<div class="river-unavailable">${CHART_UNAVAILABLE} The level and restrictions shown are unaffected.</div>`;
+        }
+      }
+    } catch (e) { console.warn('charts could not be drawn:', e); }
+  });
+}
+
+/** Watches for either chart's card coming near the screen; without IntersectionObserver, now. */
+function watchChartsNear() {
+  const go = () => { chartLibs.near = true; chartsWhenReady(); };
+  try {
+    // The cards, not the charts: a chart not drawn yet is hidden, and a hidden
+    // element is never "near".
+    const cards = [document.querySelector('.chart-card'), document.getElementById('river-content')].filter(Boolean);
+    if (typeof IntersectionObserver !== 'function' || !cards.length) { go(); return; }
+    const seen = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) { seen.disconnect(); go(); }
+    }, { rootMargin: CHART_NEAR_MARGIN });
+    cards.forEach(c => seen.observe(c));
+  } catch (e) { go(); }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // LIGHT / DARK
 // ─────────────────────────────────────────────────────────────────────────
@@ -1125,6 +1219,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // A problem with the switch must never keep the readings from loading.
   try { initThemeToggle(); } catch (e) { console.warn('light/dark switch unavailable:', e); }
   refreshAll();
+  watchChartsNear();
   setInterval(loadData, 60_000);
   setInterval(loadWeather, 600_000);
   // Thirty minutes: the models update hourly at most. (The switch from "this
@@ -1659,9 +1754,20 @@ function renderChartData(subset) {
   singleMsg.style.display = 'none';
   chartWrap.style.display = 'block';
 
-  // Chart.js and its date adapter come from a CDN. If either fails to load,
-  // say so in place of the chart rather than throwing into whoever called
+  // Chart.js and its date adapter come from a CDN, loaded once the chart is
+  // near (chartsWhenReady): until then the chart says it is loading. If they
+  // fail, say so in place of the chart rather than throwing into whoever called
   // this - the history loader and the range buttons both do.
+  if (!chart && !chartLibsLoaded()) {
+    singleMsg.style.display = 'block';
+    chartWrap.style.display = 'none';
+    const failed = chartLibs.failedAt && Date.now() - chartLibs.failedAt < CHART_LIBS_RETRY_MS;
+    singleMsg.innerHTML = failed
+      ? `<span>${CHART_UNAVAILABLE} The readings and rules on this page are unaffected.</span>`
+      : '<span>Loading the chart&hellip;</span>';
+    chartsWhenReady();
+    return;
+  }
   if (!chart) {
     try { initChart(); }
     catch (e) {
@@ -3691,6 +3797,18 @@ function renderFloodGrid(levelFt) {
 // river loader must not see an exception: it used to catch one here and
 // declare the river data unavailable while the rules applied the level anyway.
 function initRiverChart(obs, fc, currentLevel) {
+  // The library comes once a chart is near (chartsWhenReady), which draws this
+  // then; until it does, the space stays empty.
+  if (!chartLibsLoaded()) {
+    const failed = chartLibs.failedAt && Date.now() - chartLibs.failedAt < CHART_LIBS_RETRY_MS;
+    const canvas = document.getElementById('river-chart');
+    if (failed && canvas && canvas.parentElement) {
+      canvas.parentElement.innerHTML = `<div class="river-unavailable">${CHART_UNAVAILABLE} The level and restrictions shown are unaffected.</div>`;
+    } else {
+      chartsWhenReady();
+    }
+    return;
+  }
   try {
     drawRiverChart(obs, fc, currentLevel);
   } catch (e) {

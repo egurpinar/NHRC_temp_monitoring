@@ -37,6 +37,8 @@
   /** The loop through the hours: how long each hour shows, and how long now holds before it starts again. */
   const PLAY = { frameMs: 1000, holdNowMs: 2500 };
   const REFRESH_MS = 15 * 60 * 1000;
+  /** How far below (or above) the screen the map's box may be when it starts: about a screen. */
+  const NEAR_MARGIN = '800px 0px';
   const MAP_DATA_URL = 'map/hazard-map.json';
   const FORECAST_URL = 'https://api.open-meteo.com/v1/forecast'
     + `?latitude=${DOCK.lat}&longitude=${DOCK.lon}`
@@ -869,7 +871,7 @@
   }
 
   const api = {
-    DOCK, LOGO_URL, YALE, YALE_LOGO_URL, LAKE_BOUNDS, TZ, HOURS_AHEAD, PLAY, FORECAST_URL, MAP_DATA_URL, TILES, PHOTO_FAILS, POPUP, REFRESH_MS,
+    DOCK, LOGO_URL, YALE, YALE_LOGO_URL, LAKE_BOUNDS, TZ, HOURS_AHEAD, PLAY, FORECAST_URL, MAP_DATA_URL, TILES, PHOTO_FAILS, POPUP, REFRESH_MS, NEAR_MARGIN,
     hazardKind, KIND_WORDS, KIND_ORDER, GLYPHS, glyphColor, iconSvg, iconUrl, areaMiddle, ARROW_STEP,
     compass, bearing, distance, angleBetween, windOnBoat, laneEdge, windShares, mostlyText, slotLabel,
     forecastSlots, withStation, slotName, sourceText, STATION_MAX_AGE_MS, windText, conditionsText, arrowRotation, isCalm, courseText, laneText, laneDirection,
@@ -887,9 +889,22 @@
         if (s) s.textContent = 'The map could not be started. Reload the page to try again.';
       }
     };
+    // The map starts when its box comes within a screen or so of being seen.
+    // On a phone it is far down the page, and its photos were most of what the
+    // page downloaded on opening, for everyone, whether they scrolled to it or
+    // not. Without IntersectionObserver it starts at once, as it used to.
+    const whenNear = (fn) => {
+      const box = root.document.getElementById('hazard-map');
+      if (!box || typeof root.IntersectionObserver !== 'function') { fn(); return; }
+      const seen = new root.IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting)) { seen.disconnect(); fn(); }
+      }, { rootMargin: NEAR_MARGIN });
+      seen.observe(box);
+    };
     const start = () => {
-      if (root.document.readyState === 'loading') root.document.addEventListener('DOMContentLoaded', go);
-      else go();
+      const ready = () => whenNear(go);
+      if (root.document.readyState === 'loading') root.document.addEventListener('DOMContentLoaded', ready);
+      else ready();
     };
     start.once = (() => { let done = false; return () => { if (!done) { done = true; start(); } }; })();
     // Leaflet loads on its own (async), so it may still be on its way: wait for

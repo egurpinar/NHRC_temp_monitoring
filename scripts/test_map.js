@@ -1175,6 +1175,40 @@ test('Leaflet cannot be loaded (blocked or offline): the wind in words, and a pl
   assert.strictEqual(p.$('wind-line').textContent, '12 mph from the NW, gusts 19');
 });
 
+/** The map script run as the page runs it - not as a module - with the stand-in browser; IO: an IntersectionObserver or none. */
+function asPageScript(IO) {
+  const env = fakeEnv();
+  const root = Object.assign(env.window, { document: env.document, L: env.leaflet, fetch: env.fetch, NHRCWindMap: undefined });
+  if (IO) root.IntersectionObserver = IO;
+  const realNow = Date.now;
+  Date.now = () => NOW;
+  try { require('vm').runInNewContext(fs.readFileSync(path.join(ROOT, 'map', 'wind-map.js'), 'utf8'), root); } finally { Date.now = realNow; }
+  return env;
+}
+
+test('on a phone the map starts only when its box comes near the screen - its photos are most of what the page used to download', () => {
+  const made = [];
+  class IO { constructor(cb, o) { this.cb = cb; this.o = o; this.watched = []; made.push(this); } observe(e) { this.watched.push(e); } disconnect() { this.off = true; } }
+  const env = asPageScript(IO);
+  const watcher = made[0];   // the page's own; the map makes another once it runs, for its moving wind
+  assert.strictEqual(env.leaflet.made.maps.length, 0, 'not started while far away');
+  assert.strictEqual(env.fetched.length, 0, 'nothing fetched yet: no forecast, no hazard map, no photos');
+  assert.deepStrictEqual(watcher.watched, [env.document.byId['hazard-map']]);
+  assert.strictEqual(watcher.o.rootMargin, W.NEAR_MARGIN);
+  assert.strictEqual(W.NEAR_MARGIN, '800px 0px', 'about a screen ahead');
+  watcher.cb([{ isIntersecting: false }]);
+  assert.strictEqual(env.leaflet.made.maps.length, 0);
+  watcher.cb([{ isIntersecting: true }]);
+  assert.strictEqual(env.leaflet.made.maps.length, 1, 'started');
+  assert.ok(watcher.off, 'and watched no more');
+  assert.ok(env.fetched.includes(W.MAP_DATA_URL));
+});
+
+test('without IntersectionObserver the map starts at once, as it always did', () => {
+  const env = asPageScript(null);
+  assert.strictEqual(env.leaflet.made.maps.length, 1);
+});
+
 test('the forecast refreshes every 15 minutes, and when a tab comes back after longer', async () => {
   const p = await started();
   assert.deepStrictEqual(p.window.timers.map((t) => t[1]), [15 * 60 * 1000]);
