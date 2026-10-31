@@ -772,7 +772,7 @@ const ZONE_OVERRIDE = null;
 const CAMERA_SNAPSHOT_URL = 'https://nhrc-camera.gurpinar-emre.workers.dev/latest.jpg';
 
 // The water sensor's readings, which the same Worker takes every 15 minutes (its
-// Cron Trigger): the latest, in data.json's shape, and the last 14 days. The
+// Cron Trigger): the latest, in data.json's shape, and the last 16 days. The
 // page reads these first. GitHub's scheduler, which took the readings before,
 // skipped or delayed so many runs that the reading was over 45 minutes old 41%
 // of the time between 5 and 11 AM (October 2026). data.json and history.json,
@@ -1014,8 +1014,11 @@ const state = {
   historyFetchedAt: 0,      // when the history was last requested (ms)
   archive: [],              // history.json, as the page keeps it
   archiveFetchedAt: 0,      // when history.json was last downloaded (ms)
-  recent: [],               // the Worker's last 14 days, as the page keeps them
-  recentOk: false,          // the Worker's 14 days came with the last history request
+  recent: [],               // the Worker's last 16 days, as the page keeps them
+  recentOk: false,          // the Worker's days came with the last history request
+  recentCovers: false,      // ... and held a reading in every morning the rules read (rulesCoveredBy)
+  archiveWanted: false,     // the archive is needed for what someone asked for (a long range, the CSV)
+  archiveFailed: false,     // ... and could not be downloaded the last time it was asked for
   riverEstimateTs: null,    // time of the forecast point used when riverLevelIsEstimate
   inFlight: {},             // loader name -> true while its request is outstanding
 };
@@ -1299,7 +1302,7 @@ function newestReading(...raws) {
 }
 
 /**
- * history.json's entries - or the Worker's 14 days, which are the same - as
+ * history.json's entries - or the Worker's 16 days, which are the same - as
  * the page keeps them: { ts (ms), tempF }, in time order. parseFloat, not the
  * raw value: a reading stored as a string would otherwise survive the NaN
  * check and break every .toFixed() downstream.
@@ -1313,7 +1316,7 @@ function normalizeHistory(list) {
 }
 
 /**
- * The archive and the Worker's 14 days together: one reading per moment, in
+ * The archive and the Worker's 16 days together: one reading per moment, in
  * time order. The Worker's fill what the archive does not have yet - the last
  * hours, and any gap GitHub's scheduler left.
  */
@@ -1399,40 +1402,128 @@ function historyNeedsRefresh(raw) {
   return state.allHistory[state.allHistory.length - 1].ts < fetchedTs - 1000;
 }
 
-// history.json (the archive, over 1 MB and growing) is downloaded again only
-// this often while the Worker's 14 days keep the newest readings coming - and
-// every time the history is behind when they do not.
+/* ── THE HISTORY: THE WORKER'S DAYS FIRST, THE ARCHIVE WHEN IT IS NEEDED ───────
+ * history.json, the archive, is over 1 MB (about 100 KB over the network) and
+ * grows every day. The Worker's 16 days (about 11 KB) hold everything the page
+ * shows on opening: the rules' 14 mornings, the 24-hour chart, the stats. So
+ * the archive is downloaded only when it is needed:
+ *   - the Worker's days do not hold a reading in every morning the rules read
+ *     (rulesCoveredBy) - the Worker is new, or missed a morning, or is down;
+ *   - someone picks 30 days, 3 months or all time, or downloads the CSV.
+ * While unsure - the first time - it is asked for alongside the Worker's days,
+ * and stopped if they turn out to be enough. Once loaded it is downloaded
+ * again at most every 30 minutes, and merged with the Worker's days as before.
+ */
 const ARCHIVE_REFRESH_MS = 30 * 60_000;
 
-async function loadHistory() {
+/** history.json, stoppable: { promise (the list, or null), cancel() }. */
+function fetchArchive() {
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  let cancelled = false, timer = null;
+  const promise = (async () => {
+    try {
+      if (ctrl) timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+      const res = await fetch(`history.json?_=${Date.now()}`, ctrl ? { signal: ctrl.signal } : {});
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } catch (e) {
+      if (!cancelled) console.warn('history.json:', e && e.message ? e.message : e);
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  })();
+  return { promise, cancel: () => { cancelled = true; if (ctrl) ctrl.abort(); } };
+}
+
+/** The chart ranges the Worker's days cannot fill: 30 days, 3 months, all time. */
+function rangeNeedsArchive(range) { return range === 0 || range > 14; }
+
+/** Whether what is shown needs the archive, and it is not here (yet). */
+function archivePending() {
+  return !state.archive.length && rangeNeedsArchive(state.currentRange);
+}
+
+function loadHistory() {
+  return once('history', loadHistoryNow);
+}
+async function loadHistoryNow() {
   state.historyFetchedAt = Date.now();
   try {
-    const needArchive = !state.archive.length || !state.recentOk || Date.now() - state.archiveFetchedAt > ARCHIVE_REFRESH_MS;
-    const [archive, recent] = await Promise.all([
-      needArchive ? fetchJsonOrNull(`history.json?_=${Date.now()}`) : Promise.resolve(null),
-      fetchJsonOrNull(WATER_RECENT_URL, WORKER_TIMEOUT_MS),
-    ]);
-    if (Array.isArray(archive) && archive.length) {
-      state.archive = normalizeHistory(archive);
-      state.archiveFetchedAt = Date.now();
-    }
-    const days = normalizeHistory(recent);
+    // Fresh enough only while the Worker's days bring the newest readings:
+    // without them the archive is the only source, and asked for whenever the
+    // history is behind - as before the Worker.
+    const archiveAge = Date.now() - state.archiveFetchedAt;
+    const fresh = () => state.archive.length > 0 && state.recentOk && archiveAge <= ARCHIVE_REFRESH_MS;
+    const needed = () => !fresh() && (state.archiveWanted || !state.recentCovers);
+    // Started now if it will probably be needed; stopped below if it is not.
+    let req = needed() ? archiveRequest() : null;
+    const days = normalizeHistory(await fetchJsonOrNull(WATER_RECENT_URL, WORKER_TIMEOUT_MS));
     state.recentOk = days.length > 0;
     if (state.recentOk) state.recent = days;
-    const merged = mergeHistory(state.archive, state.recent);
-    if (!merged.length) return;
-    state.allHistory = merged;
-    updateInfoBar();
-    updateFreshnessWarnings();
-    updateStats();
-    // Re-render rowing status now that history is available.
-    // This covers the case where loadHistory is called independently
-    // (e.g. future background refreshes) after renderDashboard already ran.
-    if (state.lastTempF !== null) renderRowingStatus(state.lastTempF);
-    // Last: the chart depends on a library from a CDN, and nothing above may
-    // wait on it (renderChartData also guards itself).
-    updateChart();
+    state.recentCovers = state.recentOk && rulesCoveredBy(state.recent, Date.now());
+    if (needed()) {
+      if (!req) req = archiveRequest();
+      keepArchive(await req.promise);
+    } else if (req && !state.archiveWanted) {
+      req.cancel();
+    }
+    showHistory();
   } catch(e) { console.error('history:', e); }
+}
+
+// The history.json request on its way, shared: a range button or the CSV can
+// wait for the one the history loader started rather than start another.
+let archiveInFlight = null;
+function archiveRequest() {
+  if (archiveInFlight) return archiveInFlight;
+  const req = fetchArchive();
+  // Forgotten once answered - or at once when stopped, so whoever asks next
+  // starts a new one rather than waiting on a stopped one.
+  const forget = () => { if (archiveInFlight === shared) archiveInFlight = null; };
+  const shared = { promise: req.promise.then((v) => { forget(); return v; }), cancel: () => { forget(); req.cancel(); } };
+  archiveInFlight = shared;
+  return shared;
+}
+function keepArchive(list) {
+  if (!Array.isArray(list) || !list.length) return false;
+  state.archive = normalizeHistory(list);
+  state.archiveFetchedAt = Date.now();
+  state.archiveFailed = false;
+  return true;
+}
+
+/** The history as the page now has it, everywhere it shows. */
+function showHistory() {
+  const merged = mergeHistory(state.archive, state.recent);
+  if (!merged.length) return;
+  state.allHistory = merged;
+  updateInfoBar();
+  updateFreshnessWarnings();
+  updateStats();
+  // Re-render rowing status now that history is available.
+  // This covers the case where loadHistory is called independently
+  // (e.g. future background refreshes) after renderDashboard already ran.
+  if (state.lastTempF !== null) renderRowingStatus(state.lastTempF);
+  // Last: the chart depends on a library from a CDN, and nothing above may
+  // wait on it (renderChartData also guards itself).
+  updateChart();
+}
+
+/**
+ * The archive, for a range of 30 days or more, or the CSV: downloaded if it is
+ * not here yet, then shown. Resolves true when it is here. Never throws.
+ */
+async function ensureArchive() {
+  state.archiveWanted = true;
+  if (state.archive.length) return true;
+  try {
+    if (keepArchive(await archiveRequest().promise)) { showHistory(); return true; }
+  } catch (e) { console.warn('history.json:', e); }
+  state.archiveFailed = true;
+  updateStats();
+  updateChart();
+  return false;
 }
 
 // Labels for the chart's range buttons (data-d values), used by the stats.
@@ -1529,8 +1620,10 @@ function updateInfoBar() {
   document.getElementById('info-dot').className = ageMs > 45*60000 ? 'dot-warn' : 'dot-live';
   document.getElementById('info-last').textContent =
     `Last reading: ${fmtET(last.ts)} (${ageMins<2?'just now':ageMins+' min ago'})`;
+  // Without the archive the count is the Worker's days only, and says so.
+  const days = Math.max(1, Math.round((Date.now() - state.allHistory[0].ts) / 86400000));
   document.getElementById('info-count').textContent =
-    `${state.allHistory.length.toLocaleString()} readings`;
+    `${state.allHistory.length.toLocaleString()} readings${state.archive.length ? '' : ` in the last ${days} days`}`;
 }
 
 function renderDashboard(tempC, raw) {
@@ -1606,6 +1699,11 @@ document.querySelectorAll('#range-btns .rb:not(.rb-csv)').forEach(btn => {
     document.querySelectorAll('#range-btns .rb').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active');
     state.currentRange = parseInt(btn.dataset.d);
+    // 30 days and more need the archive: asked for here, shown when it comes.
+    if (rangeNeedsArchive(state.currentRange) && !state.archive.length) {
+      state.archiveFailed = false;
+      ensureArchive();
+    }
     updateStats();   // first: it needs no chart library
     updateChart();
   });
@@ -1625,7 +1723,13 @@ document.querySelectorAll('#river-range-btns .rb').forEach(btn => {
 });
 
 /* ── CSV DOWNLOAD ── */
-function downloadCSV() {
+// Every reading: the archive is downloaded first if the page has only the
+// Worker's days.
+async function downloadCSV() {
+  if (!state.archive.length) {
+    showToast('Loading the full history…');
+    if (!(await ensureArchive())) { showToast('The full history could not be loaded. Try again in a moment.'); return; }
+  }
   const hist = state.allHistory;
   if (!hist.length) { showToast('No history data yet'); return; }
   const rows = ['Timestamp (UTC),Temperature (°F),Temperature (°C)'];
@@ -1691,7 +1795,9 @@ function withGapBreaks(points, thresholdMs = GAP_BREAK_MS) {
 
 function getSubset() {
   const hist = state.allHistory;
-  if (!hist.length) return [];
+  // 30 days or more without the archive would be the Worker's 16 days under a
+  // longer label: nothing, and the chart says why (renderChartData).
+  if (!hist.length || archivePending()) return [];
   if (state.currentRange === 0) return hist;
   const cutoff = Date.now() - state.currentRange*86400000;
   return hist.filter(h => h.ts >= cutoff);
@@ -1747,7 +1853,9 @@ function renderChartData(subset) {
   if (subset.length === 0) {
     singleMsg.style.display = 'block';
     chartWrap.style.display = 'none';
-    singleMsg.innerHTML = `<span>No data collected yet.</span>`;
+    singleMsg.innerHTML = !archivePending() ? '<span>No data collected yet.</span>'
+      : state.archiveFailed ? '<span>The full history could not be loaded. Pick the range again to retry.</span>'
+      : '<span>Loading the full history&hellip;</span>';
     return;
   }
 
@@ -1925,6 +2033,35 @@ function morningsNeeded() {
 }
 
 // Helper: get UTC ms for a given NY calendar date at a specific hour:minute
+// The mornings the rules read (checkMorningStreak): 5:00 to 11:00 AM boathouse
+// time - widened from 9:30 - today's and the 14 before it.
+const MORNING_WINDOW = Object.freeze({ startH: 5, startM: 0, endH: 11, endM: 0, lookbackDays: 14 });
+
+/**
+ * Whether these readings hold at least one in every morning the rules read
+ * that has begun. If so, the rules reach the same verdict from them as from
+ * the whole archive, or a stricter one - never a laxer one: a morning they hold
+ * fewer readings of can only have a lower highest reading, so it confirms no
+ * more than it would; and no morning is passed over for want of readings the
+ * archive has (checkMorningStreak skips a morning with none, so a cold morning
+ * missing from these could otherwise lift a restriction too soon).
+ */
+function rulesCoveredBy(hist, nowMs = Date.now()) {
+  if (!Array.isArray(hist) || !hist.length) return false;
+  const W = MORNING_WINDOW;
+  const [y, m, d] = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(nowMs)).split('-').map(Number);
+  for (let daysAgo = 0; daysAgo <= W.lookbackDays; daysAgo++) {
+    const noon = new Date(Date.UTC(y, m - 1, d - daysAgo, 12, 0, 0));
+    const ty = noon.getUTCFullYear(), tm = noon.getUTCMonth() + 1, td = noon.getUTCDate();
+    const start = nyWindowBound(ty, tm, td, W.startH, W.startM);
+    if (start > nowMs) continue;                       // this morning has not begun
+    const end = Math.min(nyWindowBound(ty, tm, td, W.endH, W.endM), nowMs + 1);
+    if (!hist.some(h => h && h.ts >= start && h.ts < end)) return false;
+  }
+  return true;
+}
+
 function nyWindowBound(y, m, d, hour, minute) {
   // Find offset by checking what hour it is in NY at noon UTC on that date
   const noonUTC = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
@@ -1975,9 +2112,9 @@ function checkMorningStreak(threshold) {
   // CDN caching. To avoid missing today's morning reading, we supplement the history
   // with the current live reading (state.lastTempF / state.lastFetchedAt) from data.json.
 
-  const MORNING_START_H = 5,  MORNING_START_M = 0;
-  const MORNING_END_H   = 11, MORNING_END_M   = 0;  // widened from 9:30 to 11:00 AM
-  const MAX_LOOKBACK_DAYS = 14;
+  const MORNING_START_H = MORNING_WINDOW.startH, MORNING_START_M = MORNING_WINDOW.startM;
+  const MORNING_END_H   = MORNING_WINDOW.endH,   MORNING_END_M   = MORNING_WINDOW.endM;
+  const MAX_LOOKBACK_DAYS = MORNING_WINDOW.lookbackDays;
   const now = new Date();
   const NEEDED = morningsNeeded(now);
 

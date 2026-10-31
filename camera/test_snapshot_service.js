@@ -1460,7 +1460,7 @@ async function cron(e, when = Date.now()) {
 const stored = (e, key) => { const o = e.BUCKET.stored(key); return o ? JSON.parse(new TextDecoder().decode(o.bytes)) : null; };
 const W_BASE = 'https://nhrc-camera.example.workers.dev';
 
-test('Worker water: a reading is kept as the latest, in data.json\'s shape, and among the last 14 days', async () => {
+test('Worker water: a reading is kept as the latest, in data.json\'s shape, and among the last 16 days', async () => {
   const e = waterEnv();
   const when = Date.UTC(2026, 9, 30, 11, 15, 0, 412);
   await withGovee(goveeAnswer(56.94), () => cron(e, when));
@@ -1509,7 +1509,7 @@ test('Worker water: Govee is asked for the club\'s sensor, with the key in a hea
   }
 });
 
-test('Worker water: readings gather, in time order, for 14 days; the same moment is never kept twice', async () => {
+test('Worker water: readings gather, in time order, for 16 days - the rules\' 14 mornings back from 5 AM - and the same moment is never kept twice', async () => {
   const e = waterEnv();
   const t0 = Date.UTC(2026, 9, 1, 12, 0);
   await withGovee(goveeAnswer(55), () => cron(e, t0));
@@ -1517,12 +1517,14 @@ test('Worker water: readings gather, in time order, for 14 days; the same moment
   await withGovee(goveeAnswer(57), () => cron(e, t0 + 15 * 60000));      // the same trigger, run twice
   let days = stored(e, 'water/recent.json');
   assert.deepStrictEqual(days.map((x) => [x.ts, x.tempF]), [['2026-10-01T12:00:00Z', 55], ['2026-10-01T12:15:00Z', 57]]);
-  await withGovee(goveeAnswer(58), () => cron(e, t0 + 14 * 86400000 + 60000));
+  await withGovee(goveeAnswer(58), () => cron(e, t0 + 16 * 86400000 - 60000));
+  assert.deepStrictEqual(stored(e, 'water/recent.json').map((x) => x.tempF), [55, 57, 58], 'kept for all of 16 days');
+  await withGovee(goveeAnswer(58), () => cron(e, t0 + 16 * 86400000 + 60000));
   days = stored(e, 'water/recent.json');
-  assert.deepStrictEqual(days.map((x) => x.tempF), [57, 58], 'past 14 days, the Worker lets a reading go');
-  await withGovee(goveeAnswer(59), () => cron(e, t0 + 14 * 86400000 + 16 * 60000));
-  assert.deepStrictEqual(stored(e, 'water/recent.json').map((x) => x.tempF), [58, 59]);
-  assert.strictEqual(stored(e, 'water/latest.json').fetchedAt, '2026-10-15T12:16:00Z');
+  assert.deepStrictEqual(days.map((x) => x.tempF), [57, 58, 58], 'past 16 days, the Worker lets a reading go');
+  await withGovee(goveeAnswer(59), () => cron(e, t0 + 16 * 86400000 + 16 * 60000));
+  assert.deepStrictEqual(stored(e, 'water/recent.json').map((x) => x.tempF), [58, 58, 59]);
+  assert.strictEqual(stored(e, 'water/latest.json').fetchedAt, '2026-10-17T12:16:00Z');
 });
 
 test('Worker water: an answer that holds no reading changes nothing, and /status says why', async () => {
@@ -1573,7 +1575,7 @@ test('Worker water: without its Govee key the Worker asks nothing and says so', 
   assert.strictEqual(stored(e, 'water/poll.json').error, 'GOVEE_API_KEY is not set on this Worker');
 });
 
-test('Worker water: a storage error reading the 14 days never replaces them with one reading', async () => {
+test('Worker water: a storage error reading the 16 days never replaces them with one reading', async () => {
   const e = waterEnv();
   await withGovee(goveeAnswer(55), () => cron(e, Date.UTC(2026, 9, 30, 10, 0)));
   await withGovee(goveeAnswer(56), () => cron(e, Date.UTC(2026, 9, 30, 10, 15)));
@@ -1592,7 +1594,7 @@ test('Worker water: a storage error reading the 14 days never replaces them with
   assert.deepStrictEqual(stored(e, 'water/recent.json').map((x) => x.tempF), [59]);
 });
 
-test('Worker water: the website reads the latest and the 14 days from anywhere, cached for a minute', async () => {
+test('Worker water: the website reads the latest and the 16 days from anywhere, cached for a minute', async () => {
   const e = waterEnv();
   let r = await (await worker()).fetch(new Request(`${W_BASE}/water/latest.json`), e);
   assert.strictEqual(r.status, 404, 'no reading yet');

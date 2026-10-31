@@ -102,8 +102,9 @@ no snapshot has been uploaded yet.
 ### The water sensor, every 15 minutes
 
 The same Worker reads the club's Govee water sensor every 15 minutes and keeps
-the readings - the latest, and the last 14 days. The website and the morning
-email read them from here first. GitHub's scheduler used to take the readings
+the readings - the latest, and the last 16 days (the rowing rules read the
+mornings of the last 14 days, so the website needs nothing older to apply
+them). The website and the morning email read them from here first. GitHub's scheduler used to take the readings
 and skipped or delayed so many runs that, in late October 2026, the reading on
 the website was more than 45 minutes old 41% of the time between 5 and 11 AM.
 GitHub now only archives the readings into `history.json` (and polls the
@@ -145,7 +146,7 @@ https://nhrc-camera.<account>.workers.dev/status
 
 The key never appears in anything the Worker serves.
 
-Each run needs about 2 ms of CPU with the full 14 days stored (measured in
+Each run needs about 2 ms of CPU with the full 16 days stored (measured in
 Node, which runs the same JavaScript engine), within the free plan's 10 ms per
 Cron Trigger, and writes three small files to R2: about 9,000 writes a month.
 

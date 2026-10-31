@@ -4,7 +4,7 @@
 # SINCE NOVEMBER 2026: THE CLOUDFLARE WORKER TAKES THE READINGS
 # ---------------------------------------------------------------
 # The camera's Cloudflare Worker reads the sensor every 15 minutes on its own
-# Cron Trigger, which runs on time, and keeps the last 14 days. The website and
+# Cron Trigger, which runs on time, and keeps the last 16 days. The website and
 # the morning email read it first. This job now copies the Worker's readings
 # into history.json - filling any gap GitHub's scheduler left - and stops: one
 # short run per trigger, instead of a three-hour loop. Only when the Worker

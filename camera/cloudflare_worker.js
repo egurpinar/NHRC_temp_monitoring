@@ -45,8 +45,9 @@
  * ─── The water sensor ───────────────────────────────────────────────────────
  * Every 15 minutes a Cron Trigger has the Worker read the club's Govee water
  * sensor and keep the reading: GET /water/latest.json (the shape of the site's
- * data.json) and /water/recent.json (the last 14 days, as history.json has
- * them). The website and the morning email read these first. GitHub's
+ * data.json) and /water/recent.json (the last 16 days, as history.json has
+ * them: the rowing rules look back 14 mornings, so the website needs nothing
+ * older to apply them). The website and the morning email read these first. GitHub's
  * scheduler used to take the readings, and skipped or delayed so many runs that
  * in late October 2026 the reading on the website was more than 45 minutes old
  * 41% of the time between 5 and 11 AM; GitHub now only archives the readings
@@ -331,8 +332,12 @@ const hexId = (v) => (typeof v === 'string' && /^[0-9a-f]{8,32}$/.test(v) ? v : 
 const WATER_LATEST = 'water/latest.json';
 const WATER_RECENT = 'water/recent.json';
 const WATER_POLL = 'water/poll.json';
-/** What the Worker keeps; the website and the archive on GitHub have the rest. */
-const WATER_KEEP_MS = 14 * 24 * 3600 * 1000;
+/**
+ * What the Worker keeps; the archive on GitHub has the rest. 16 days: the rowing
+ * rules look at today's morning and the 14 before it, from 5 AM - up to 15 and
+ * a half days back - so the website can apply them from these alone.
+ */
+const WATER_KEEP_MS = 16 * 24 * 3600 * 1000;
 const GOVEE_URL = 'https://openapi.api.govee.com/router/api/v1/device/state';
 // The sensor in the water since 29 August 2026. Each unit has its own id; the
 // repository's "List Govee Devices" workflow finds a new one, which then goes
@@ -419,7 +424,7 @@ async function pollSensor(env, when = Date.now()) {
 }
 
 /**
- * The reading, into the last 14 days and as the latest. The days first: a
+ * The reading, into the last 16 days and as the latest. The days first: a
  * reader who sees the latest finds it among the days. A storage error reading
  * the days is thrown - they are never replaced by one reading.
  */
@@ -453,7 +458,7 @@ async function storeReading(env, rawF, at) {
   await env.BUCKET.put(WATER_LATEST, JSON.stringify(latest), { httpMetadata: { contentType: 'application/json' } });
 }
 
-/** The latest reading, or the last 14 days, for anyone - the website reads them from another origin. */
+/** The latest reading, or the last 16 days, for anyone - the website reads them from another origin. */
 async function handleWater(request, env, key) {
   const headers = { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'X-Content-Type-Options': 'nosniff' };
   let object;

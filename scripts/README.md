@@ -37,7 +37,7 @@ newest reading wins:
 
 - **The Cloudflare Worker** (`camera/cloudflare_worker.js`) reads the Govee
   sensor every 15 minutes on its own Cron Trigger and serves the latest reading
-  (`/water/latest.json`, in `data.json`'s shape) and the last 14 days
+  (`/water/latest.json`, in `data.json`'s shape) and the last 16 days
   (`/water/recent.json`). The page and the email read these first.
 - **The repository's** `data.json` and `history.json` - the archive. The
   `Fetch Govee Temperature` workflow (`scripts/fetch_temp.sh`) copies the
@@ -45,11 +45,28 @@ newest reading wins:
   the Worker cannot be reached, or has had no reading for 45 minutes, does it
   poll the sensor itself, in its old three-hour loop.
 
-The page merges the Worker's 14 days into `history.json`'s archive, so the
+The page merges the Worker's 16 days with `history.json`'s archive, so the
 chart, the CSV and the 3-morning rule have the newest readings even before
-GitHub archives them; the archive itself is downloaded again only every 30
-minutes while the Worker keeps up. Without the Worker, everything is exactly as
-before: `data.json` and `history.json`, refreshed whenever they are behind.
+GitHub archives them. The archive (over 1 MB, about 100 KB over the network)
+is downloaded only when it is needed:
+
+- the Worker's days do not hold a reading in every morning the rules read -
+  the Worker is new, missed a morning, or is down (`rulesCoveredBy()`);
+- someone picks 30 days, 3 months or all time, or downloads the CSV.
+
+The first time, while that is not yet known, it is asked for alongside the
+Worker's days and stopped if they are enough. Once loaded it is downloaded
+again at most every 30 minutes while the Worker keeps up. Without the Worker,
+everything is exactly as before: `data.json` and `history.json`, refreshed
+whenever they are behind.
+
+**Why the rules can use the Worker's days alone.** A morning they hold fewer
+readings of than the archive can only have a lower highest reading, so it
+confirms no more than it would - the rules can come out stricter, never
+laxer. A morning with no reading at all is different: the rules pass over it,
+so a cold morning missing from the Worker's days could lift a restriction too
+soon. That is why every morning must hold a reading before the archive is
+left out. A test checks this on 400 random histories.
 
 Why: GitHub's scheduler skipped or delayed so many runs that, in late October
 2026, the reading on the website was more than 45 minutes old 24% of the time -

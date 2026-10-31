@@ -2330,7 +2330,8 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     ' checkCameraForNewPhoto, newestReading, mergeHistory, normalizeHistory, readingTime, WATER_LATEST_URL, WATER_RECENT_URL,' +
     ' ARCHIVE_REFRESH_MS, loadNwsAlerts, loadNwsForecast, renderNwsOutlook, nwsOutlook, nwsAlertsUrl, nwsPointsUrl,' +
     ' NWS_ALERTS_KEEP_MS, NWS_FORECAST_KEEP_MS, loadChartLibs, chartsWhenReady, watchChartsNear, chartLibs, CHART_LIBS,' +
-    ' CHART_LIBS_RETRY_MS, CHART_NEAR_MARGIN, initRiverChart, get chart() { return chart; }, get riverChart() { return riverChart; } };',
+    ' CHART_LIBS_RETRY_MS, CHART_NEAR_MARGIN, initRiverChart, get chart() { return chart; }, get riverChart() { return riverChart; },' +
+    ' __rulesCoveredBy: rulesCoveredBy, __MORNING_WINDOW: MORNING_WINDOW, ensureArchive, loadHistory };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -2973,7 +2974,7 @@ function bandedHistory(now) {
 test('history stats follow the chart range, and say which range', () => {
   const now = Date.now();
   const { site, els } = loadSite(now);
-  site.state.allHistory = bandedHistory(now);
+  site.state.allHistory = site.state.archive = bandedHistory(now);   // the archive is here
   const expect = { 1: ['24h', 72, 74], 7: ['7 days', 60, 74], 30: ['30 days', 50, 74], 90: ['3 months', 40, 74], 0: ['all time', 30, 74] };
   for (const [range, [label, min, max]] of Object.entries(expect)) {
     site.state.currentRange = Number(range);
@@ -3032,7 +3033,7 @@ test('history stats: "all time" survives the full 525,600-reading history cap', 
   const { site, els } = loadSite(now);
   const big = new Array(525600);
   for (let i = 0; i < big.length; i++) big[i] = { ts: now - (big.length - i) * 60000, tempF: 50 + (i % 200) / 10 };
-  site.state.allHistory = big;
+  site.state.allHistory = site.state.archive = big;
   site.state.currentRange = 0;
   assert.doesNotThrow(() => site.updateStats());
   assert.strictEqual(els['min-val'].textContent, '50.0°F');
@@ -3445,8 +3446,8 @@ test('chart scrubber: the nearest READING, never a gap-break point (it used to t
 test('CSV download: UTF-8 marked for Excel, boathouse date in the name, link attached while clicked', () => {
   const now = etDate('2026-10-03', 23, 30).getTime();   // already Oct 4 in UTC
   const { site, els } = loadSite(now);
-  site.state.allHistory = [{ ts: now - 2 * HOUR, tempF: 65.4 }, { ts: now - HOUR, tempF: 65.25 }];
-  site.downloadCSV();
+  site.state.allHistory = site.state.archive = [{ ts: now - 2 * HOUR, tempF: 65.4 }, { ts: now - HOUR, tempF: 65.25 }];
+  site.downloadCSV();   // the archive is here: nothing to wait for
   const text = els.__blobParts.join('');
   assert.ok(text.startsWith('\ufeffTimestamp (UTC),Temperature (°F),Temperature (°C)\n'), JSON.stringify(text.slice(0, 60)));
   assert.strictEqual(text.trim().split('\n').length, 3);
@@ -4852,6 +4853,218 @@ test('phone: the page starts watching for the charts when it opens', async () =>
   p.els.__fire('window', 'DOMContentLoaded');
   await settle();
   assert.strictEqual(p.els.__scripts.length, 3);
+});
+
+// ── The Worker's days first, the archive when it is needed ──
+
+/** Readings every 15 minutes, `days` back from endMs; skip(ts) leaves some out. */
+function quarterHours(endMs, days, tempAt = () => 66, skip = () => false) {
+  const out = [];
+  for (let ts = endMs - days * 86400000; ts <= endMs; ts += 15 * 60000) if (!skip(ts)) out.push({ ts, tempF: tempAt(ts) });
+  return out;
+}
+/** Boathouse date and hour of an instant. */
+function etParts(ms) {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(ms));
+  const g = t => p.find(x => x.type === t).value;
+  return { ymd: `${g('year')}-${g('month')}-${g('day')}`, hour: +g('hour') };
+}
+
+test('rules: the Worker\'s 16 days hold every morning the rules read, at any hour, across daylight saving; 14 days would not', () => {
+  const { site } = loadSite(Date.now());
+  const cover = (nowMs, days) => site.__rulesCoveredBy(quarterHours(nowMs, days), nowMs);
+  for (const day of ['2026-10-31', '2026-11-01', '2026-11-02', '2026-03-08', '2026-07-15']) {
+    for (let h = 0; h < 24; h++) {
+      let now;
+      try { now = etDate(day, h, 7).getTime(); } catch (e) { continue; }   // 2:07 AM does not happen on 8 March
+      assert.strictEqual(cover(now, 16), true, `${day} ${h}:07 with 16 days`);
+    }
+  }
+  // 14 days stop short of the oldest morning once the day is past 5 AM.
+  assert.strictEqual(cover(etDate('2026-10-31', 12).getTime(), 14), false);
+  assert.strictEqual(site.__MORNING_WINDOW.lookbackDays, 14);
+});
+
+test('rules: a morning missing from the Worker\'s days - or today\'s, begun with no reading yet - means the archive is needed', () => {
+  const { site } = loadSite(Date.now());
+  const now = etDate('2026-10-31', 12).getTime();
+  const missing = (ymd) => quarterHours(now, 16, () => 60, ts => { const e = etParts(ts); return e.ymd === ymd && e.hour >= 5 && e.hour < 11; });
+  assert.strictEqual(site.__rulesCoveredBy(missing('2026-10-24'), now), false, 'a whole morning a week ago');
+  assert.strictEqual(site.__rulesCoveredBy(missing('2026-10-17'), now), false, 'the oldest morning the rules read');
+  assert.strictEqual(site.__rulesCoveredBy(missing('2026-10-16'), now), true, 'a morning older than the rules read');
+  // One reading in a morning is enough to hold it.
+  const one = quarterHours(now, 16, () => 60, ts => { const e = etParts(ts); return e.ymd === '2026-10-24' && e.hour >= 5 && e.hour < 11 && e.hour !== 8; });
+  assert.strictEqual(site.__rulesCoveredBy(one, now), true);
+  // 5:07 AM: today's morning has begun - and has no reading yet.
+  const early = etDate('2026-10-31', 5, 7).getTime();
+  assert.strictEqual(site.__rulesCoveredBy(quarterHours(etDate('2026-10-31', 4, 59).getTime(), 16), early), false);
+  // 3 AM: today's morning has not begun; it is not asked for.
+  const night = etDate('2026-10-31', 3).getTime();
+  assert.strictEqual(site.__rulesCoveredBy(quarterHours(night, 16), night), true);
+  for (const bad of [null, [], 'x', [{}]]) assert.strictEqual(site.__rulesCoveredBy(bad, now), false);
+});
+
+test('SAFETY rules: from the Worker\'s days the rules are never laxer than from the whole archive - 400 random histories', () => {
+  // The archive may hold readings the Worker missed (GitHub polls the sensor
+  // when the Worker falls behind). Whenever the Worker's days hold a reading in
+  // every morning the rules read, the zone they give is the archive's, or a
+  // stricter one. Seeded, so a failure can be replayed.
+  let seed = 20261031;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  let clockNow = 0;
+  const { site } = loadSite(() => clockNow);              // the page's clock follows each case
+  const STRICT = { winter: 3, fourOar: 2, coldWater: 1, normal: 0 };
+  const zoneFrom = (hist, nowMs, tempF) => {
+    site.state.allHistory = hist; site.state.lastTempF = tempF; site.state.lastFetchedAt = new Date(nowMs);
+    return site.getEffectiveLevel(tempF).zone;
+  };
+  let compared = 0, stricter = 0;
+  const same = new Set();
+  for (let i = 0; i < 400; i++) {
+    const day = ['2026-10-31', '2026-11-01', '2026-11-20', '2026-05-12', '2026-08-02'][Math.floor(rnd() * 5)];
+    const now = etDate(day, Math.floor(rnd() * 24) === 2 ? 3 : Math.floor(rnd() * 24), Math.floor(rnd() * 60)).getTime();
+    clockNow = now;
+    const base = 38 + rnd() * 30, swing = rnd() * 8;
+    const full = quarterHours(now, 16, (ts) => Math.round((base + swing * Math.sin(ts / 9e6) + rnd() * 2) * 10) / 10,
+      () => rnd() < 0.03);                                   // the archive has its own small gaps
+    const sub = full.filter(() => rnd() > rnd() * 0.6);      // the Worker misses up to 60% of them
+    if (!site.__rulesCoveredBy(sub, now)) continue;          // the page would fetch the archive
+    const tempF = full[full.length - 1].tempF;
+    const a = zoneFrom(full, now, tempF), b = zoneFrom(sub, now, tempF);
+    assert.ok(STRICT[b] >= STRICT[a], `case ${i} (${day}): the Worker's days gave ${b}, the archive ${a}`);
+    compared++; if (STRICT[b] > STRICT[a]) stricter++; else if (a !== 'winter') same.add(a);
+  }
+  assert.ok(compared > 100, `${compared} compared`);
+  assert.ok(same.size >= 2, `the zones compared vary: ${[...same]}`);
+});
+
+test('SAFETY rules: why the check exists - a cold morning missing from the Worker\'s days would lift a restriction early', () => {
+  const now = etDate('2026-10-31', 12).getTime();
+  const { site } = loadSite(now);
+  // Warm (61°F) mornings, but yesterday's was cold (55°F): the archive breaks the streak there.
+  const tempAt = (ts) => (etParts(ts).ymd === '2026-10-30' ? 55 : 61);
+  const full = quarterHours(now, 16, tempAt);
+  const sub = full.filter(h => !(etParts(h.ts).ymd === '2026-10-30' && etParts(h.ts).hour >= 5 && etParts(h.ts).hour < 11));
+  const realNow = Date.now; Date.now = () => now;
+  try {
+    site.state.lastTempF = 61; site.state.lastFetchedAt = new Date(now);
+    site.state.allHistory = full;
+    const fromArchive = site.getEffectiveLevel(61).zone;
+    site.state.allHistory = sub;
+    const fromGap = site.getEffectiveLevel(61).zone;
+    const STRICT = { winter: 3, fourOar: 2, coldWater: 1, normal: 0 };
+    assert.ok(STRICT[fromGap] < STRICT[fromArchive], `without that morning the rules would be laxer: ${fromGap}, not ${fromArchive}`);
+    assert.strictEqual(site.__rulesCoveredBy(sub, now), false, 'so with that gap the page fetches the archive');
+  } finally { Date.now = realNow; }
+});
+
+/** A page whose history.json can be held, answered, or stopped. */
+function archivePage(clock, { worker, archive }) {
+  const ctl = { calls: 0, aborted: 0, release: null };
+  const fetch = (url, opts = {}) => {
+    url = String(url);
+    if (url === W_RECENT) return worker === undefined ? offline() : reply(typeof worker === 'function' ? worker() : worker);
+    if (url === W_LATEST) return offline();
+    if (/^data\.json/.test(url)) return reply(makeRaw(64, new Date(typeof clock === 'function' ? clock() : clock)));
+    if (/^history\.json/.test(url)) {
+      ctl.calls++;
+      return new Promise((resolve, reject) => {
+        if (opts.signal) opts.signal.addEventListener('abort', () => { ctl.aborted++; reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); });
+        const answer = () => (archive === null ? resolve({ ok: false, status: 503, json: () => Promise.resolve({}) })
+          : resolve({ ok: true, status: 200, json: () => Promise.resolve(typeof archive === 'function' ? archive() : archive) }));
+        ctl.release = answer;
+        if (!ctl.hold) answer();
+      });
+    }
+    return Promise.reject(new Error('unexpected ' + url));
+  };
+  const p = loadSite(clock, fetch, { AbortController });
+  return Object.assign(p, { ctl });
+}
+const iso = (list) => list.map(h => ({ ts: new Date(h.ts).toISOString().replace(/\.\d{3}Z$/, 'Z'), tempF: h.tempF, tempC: 18 }));
+
+test('phone: with the Worker\'s 16 days, history.json is stopped the first time and never asked for again', async () => {
+  let t = etDate('2026-10-31', 9).getTime();
+  const p = archivePage(() => t, { worker: () => iso(quarterHours(t, 16, () => 64)), archive: () => iso(quarterHours(t - HOUR, 400, () => 60)) });
+  p.ctl.hold = true;                                        // the archive is slower than the Worker's days
+  await p.site.loadData();
+  assert.deepStrictEqual([p.ctl.calls, p.ctl.aborted], [1, 1], 'asked for while unsure, then stopped');
+  assert.strictEqual(p.site.state.archive.length, 0);
+  assert.strictEqual(p.site.state.recentCovers, true);
+  assert.ok(/^\d{1,3}(,\d{3})* readings in the last 16 days$/.test(p.els['info-count'].textContent), p.els['info-count'].textContent);
+  assert.ok(/No temperature restrictions|COLD|Cold|restriction/i.test(p.els['rule-banner'].innerHTML), 'the rules were applied');
+  for (let i = 0; i < 4; i++) { t += 15 * 60000; await p.site.loadData(); }
+  assert.strictEqual(p.ctl.calls, 1, 'and never again');
+});
+
+test('phone: a new Worker (3 days) - the archive is downloaded and merged, as before', async () => {
+  const t = etDate('2026-10-31', 9).getTime();
+  const p = archivePage(t, { worker: iso(quarterHours(t, 3, () => 64)), archive: iso(quarterHours(t - 6 * HOUR, 30, () => 60)) });
+  await p.site.loadData();
+  assert.deepStrictEqual([p.ctl.calls, p.ctl.aborted], [1, 0]);
+  assert.ok(p.site.state.archive.length > 2000);
+  assert.ok(p.site.state.allHistory[0].ts <= t - 29 * 86400000, 'the archive\'s 30 days are in');
+  assert.ok(/^[\d,]+ readings$/.test(p.els['info-count'].textContent), p.els['info-count'].textContent);
+});
+
+test('phone: 30 days, 3 months, all time - the page says it is loading the full history, then shows it; a failure says so, and a click tries again', async () => {
+  const t = etDate('2026-10-31', 9).getTime();
+  let archive = null;
+  const p = archivePage(t, { worker: iso(quarterHours(t, 16, () => 64)), archive: () => archive });
+  await p.site.loadData();
+  const click = (d) => p.els.__rangeButtons.find(b => b.dataset.d === d).handlers.click();
+  p.ctl.hold = true;
+  click('30');
+  assert.ok(/Loading the full history/.test(p.els['chart-single-msg'].innerHTML), p.els['chart-single-msg'].innerHTML);
+  assert.strictEqual(p.els['min-val'].textContent, '--', 'no 16-day numbers under a 30-day label');
+  p.ctl.release();                                          // history.json answers 503
+  await settle();
+  assert.ok(/The full history could not be loaded/.test(p.els['chart-single-msg'].innerHTML));
+  archive = iso(quarterHours(t - HOUR, 90, (ts) => (ts < t - 20 * 86400000 ? 50 : 64)));
+  p.ctl.hold = false;
+  click('90');
+  await settle();
+  assert.strictEqual(p.els['min-val'].textContent, '50.0°F', 'the archive\'s older, colder readings are in');
+  assert.strictEqual(p.els['min-label'].textContent, 'Min (3 months)');
+  click('1');
+  assert.strictEqual(p.els['min-val'].textContent, '64.0°F');
+  const before = p.ctl.calls;
+  click('0');
+  await settle();
+  assert.strictEqual(p.ctl.calls, before, 'kept: not downloaded again');
+});
+
+test('phone: each of 30 days, 3 months and all time asks for the archive; 24h and 7 days do not', async () => {
+  const t = etDate('2026-10-31', 9).getTime();
+  for (const [d, needs] of [['30', true], ['90', true], ['0', true], ['7', false], ['1', false]]) {
+    const p = archivePage(t, { worker: iso(quarterHours(t, 16, () => 64)), archive: iso(quarterHours(t - HOUR, 40, () => 60)) });
+    await p.site.loadData();
+    p.ctl.hold = true;
+    const before = p.ctl.calls;
+    p.els.__rangeButtons.find(b => b.dataset.d === d).handlers.click();
+    assert.strictEqual(p.ctl.calls - before, needs ? 1 : 0, `range ${d}`);
+    assert.strictEqual(/Loading the full history/.test(p.els['chart-single-msg'].innerHTML), needs, `range ${d}`);
+  }
+});
+
+test('phone: Download CSV with only the Worker\'s days downloads the archive first, then every reading', async () => {
+  const t = etDate('2026-10-31', 9).getTime();
+  const p = archivePage(t, { worker: iso(quarterHours(t, 16, () => 64)), archive: iso(quarterHours(t - HOUR, 40, () => 60)) });
+  await p.site.loadData();
+  const n16 = p.site.state.allHistory.length;
+  await p.site.downloadCSV();
+  const rows = p.els.__blobParts.join('').trim().split('\n').length - 1;
+  assert.ok(rows > n16 * 2, `${rows} rows, not just the Worker's ${n16}`);
+  assert.strictEqual(p.els['__created'].clicked, 1);
+});
+
+test('phone: Download CSV when the archive cannot be loaded says so, and downloads nothing', async () => {
+  const t = etDate('2026-10-31', 9).getTime();
+  const p = archivePage(t, { worker: iso(quarterHours(t, 16, () => 64)), archive: null });
+  await p.site.loadData();
+  await p.site.downloadCSV();
+  assert.ok(!p.els.__blobParts, 'no file');
+  assert.ok(/could not be loaded/.test(p.els['toast'].textContent || p.els['toast'].innerHTML), p.els['toast'].textContent);
 });
 
 test('phone: a chart library that never answers counts as failed after 30 s', async () => {
