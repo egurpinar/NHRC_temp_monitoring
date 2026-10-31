@@ -1,0 +1,15 @@
+{
+  "name": "NHRC Rowing Conditions",
+  "short_name": "NHRC",
+  "description": "Water temperature, river level, weather and the club's rowing rules for the New Haven Rowing Club on Lake Housatonic.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0d1f3c",
+  "theme_color": "#0d1f3c",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

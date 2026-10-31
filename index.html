@@ -10,6 +10,7 @@
 <link rel="shortcut icon" href="favicon.ico"/>
 <!-- No SVG icon: NHRC_logo.svg is a 107 KB picture in an SVG wrapper, and a
      browser that prefers SVG icons downloaded all of it for a 16-pixel tab. -->
+<link rel="manifest" href="manifest.webmanifest"/>
 <meta name="color-scheme" content="dark light"/>
 <meta name="theme-color" content="#0d1f3c"/>
 <script id="theme-init">
@@ -441,6 +442,13 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
          pushed the Conditions Summary off the first screen of a phone. It now
          sits at the bottom of the page (#site-disclaimer). The banners left up
          here appear only when there is something to warn about. -->
+
+    <!-- No connection: what is shown is what this phone saved (sw.js), and
+         from when. The readings keep their own times too. -->
+    <div id="warn-saved" class="warn-banner level-warn" style="display:none;">
+      <span style="width:10px;height:10px;border-radius:50%;background:var(--warn-dot);flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div><strong>No connection</strong><span id="warn-saved-text"></span></div>
+    </div>
 
     <!-- The National Weather Service: its alerts for the dock other than fog
          (those are in the fog banner below), and thunderstorms in its hourly
@@ -1268,11 +1276,57 @@ function refreshAll() {
  */
 const FETCH_TIMEOUT_MS = 20_000;
 function fetchWithTimeout(url, ms = FETCH_TIMEOUT_MS, init = {}) {
-  if (typeof AbortController === 'undefined') return fetch(url, init);
+  const noted = (res) => { noteSavedCopy(url, res); return res; };
+  if (typeof AbortController === 'undefined') return fetch(url, init).then(noted);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
-  return fetch(url, Object.assign({}, init, { signal: ctrl.signal })).finally(() => clearTimeout(timer));
+  return fetch(url, Object.assign({}, init, { signal: ctrl.signal })).then(noted).finally(() => clearTimeout(timer));
 }
+
+/* ── ON A PHONE WITH NO SIGNAL ────────────────────────────────────────────────
+ * sw.js keeps the page and the last readings. When the network does not
+ * answer, it hands back the kept ones, marked X-NHRC-Saved with when they were
+ * kept, and the page says so above everything, with that time. The readings
+ * keep their own times as well, so the stale and offline warnings still show.
+ */
+const savedCopies = {};   // address -> when the copy last answered from was kept (ms)
+function noteSavedCopy(url, res) {
+  try {
+    const key = String(url).replace(/\?.*$/, '');
+    // The past readings (the archive, the Worker's days) are history either
+    // way: the banner is about what is shown as now.
+    if (/(^|\/)history\.json$|\/water\/recent\.json$/.test(key)) return;
+    const at = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get('X-NHRC-Saved') : null;
+    const t = at ? Date.parse(at) : NaN;
+    if (Number.isFinite(t)) savedCopies[key] = t;
+    else delete savedCopies[key];
+    renderSavedBanner();
+  } catch (e) { /* never in the way of a reading */ }
+}
+/** A source that is not what the page shows - the water reading it did not pick - is not counted. */
+function forgetSavedCopy(url) {
+  delete savedCopies[String(url).replace(/\?.*$/, '')];
+  renderSavedBanner();
+}
+function renderSavedBanner() {
+  const el = document.getElementById('warn-saved');
+  if (!el) return;
+  const times = Object.values(savedCopies);
+  if (!times.length) { el.style.display = 'none'; return; }
+  document.getElementById('warn-saved-text').textContent =
+    ` Showing what this phone saved at ${fmtET(Math.min(...times))}. Readings, river and weather may have changed since.`;
+  el.style.display = 'flex';
+}
+
+// The offline copy (sw.js): only over https, only once the page has loaded,
+// and never a reason for the page to fail.
+window.addEventListener('load', () => {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.serviceWorker && typeof location !== 'undefined' && location.protocol === 'https:') {
+      navigator.serviceWorker.register('sw.js').catch((e) => console.warn('offline copy unavailable:', e && e.message ? e.message : e));
+    }
+  } catch (e) { /* the page works without it */ }
+});
 
 /**
  * Runs an async loader unless the previous call is still outstanding, so a
@@ -1372,6 +1426,9 @@ function loadData() {
       state.dataRefreshFailed = false;
       if (raw === fromWorker) state.waterSource = 'worker';
       else if (raw === fromRepo) state.waterSource = 'repo';
+      // Only the reading shown counts for the "No connection" banner: a fresh
+      // one from the Worker is not old because data.json came from the phone.
+      try { forgetSavedCopy(raw === fromWorker ? 'data.json' : WATER_LATEST_URL); } catch (e) { /* never in the way */ }
       renderDashboard(tempC, raw);
     } catch (e) {
       console.error('reading:', e);
@@ -1424,6 +1481,7 @@ function fetchArchive() {
     try {
       if (ctrl) timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
       const res = await fetch(`history.json?_=${Date.now()}`, ctrl ? { signal: ctrl.signal } : {});
+      noteSavedCopy('history.json', res);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json();
     } catch (e) {

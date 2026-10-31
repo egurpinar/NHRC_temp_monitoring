@@ -19,7 +19,7 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (281 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, and the NWS alerts and thunderstorms |
+| `test_daily_email.js` | Test suite (301 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, and the NWS alerts and thunderstorms |
 | `test_site_theme.js` | The website's light and dark themes (20 tests): contrast of every colour where it is used (WCAG AA), dark kept as the original design, the switch, the device default, the charts |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
@@ -27,8 +27,9 @@ status using the site's own functions and compares against the email output.
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
 | `hazard_map.js` | Copies the Safety Committee's Google map (lanes, hazards, swim areas) into `map/hazard-map.json` for the map with the wind |
 | `test_hazard_map.js` | Its tests (17): the real map's KML, colours, the committee's words as plain text, and never replacing a good copy with an error page |
-| `test_map.js` | The hazard map with the wind (65 tests): the wind in words, headwind/crosswind/tailwind on the lanes, now measured and the 24 hours forecast, the loop through the hours, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet, and the old trial address |
+| `test_map.js` | The hazard map with the wind (67 tests): the wind in words, headwind/crosswind/tailwind on the lanes, now measured and the 24 hours forecast, the loop through the hours, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet, and the old trial address |
 | `fixtures/hazard_map.kml` | The Google map as exported in October 2026 |
+| `test_offline.js` | The page on a phone with no signal (14 tests): what `../sw.js` keeps and never keeps, network first, the kept copy marked with its time, the home page only, and the manifest's icons |
 
 ## Water readings: the Worker first
 
@@ -74,6 +75,54 @@ Why: GitHub's scheduler skipped or delayed so many runs that, in late October
 Cloudflare's Cron Triggers are a separate scheduler, and the Worker's `/status`
 shows the age of its last reading, so whether it keeps time can be checked at
 any moment.
+
+## On a phone: fast, and with no signal
+
+What the page downloads before it shows the summary, and what waits until it
+is needed (November 2026):
+
+- **The header logo** is `nhrc-logo-header.png`, 11 KB (see "Club logo in the
+  email" below), not the 107 KB SVG.
+- **The chart library** (Chart.js, moment and their adapter, about 90 KB from a
+  CDN) loads once a chart is within a screen of being seen; it no longer holds
+  up the page from `<head>`. Until it is in, the chart says it is loading; if it
+  fails, the chart says so, and it is tried again after 5 minutes.
+- **The map** starts once its box is within a screen of being seen, so its
+  photos are downloaded only by those who scroll to it. Leaflet's styles no
+  longer hold up the page.
+- **The archive** (`history.json`) is downloaded only when it is needed - see
+  "Water readings: the Worker first" above.
+
+Without IntersectionObserver (old browsers) the chart library and the map load
+at once, as before.
+
+### On a phone with no signal
+
+`sw.js`, a service worker, keeps the home page, its pictures and the last
+readings whose time the page shows: the water sensor (`data.json`,
+`history.json`, the Worker's `/water/` files), the river gauge and the
+airport's observations. **Network first, always:** a kept copy is used only
+when the network does not answer (7 seconds for a reading, 8 for the page).
+Then the page shows a **"No connection"** banner with the time the copy was
+kept, and the readings keep their own times, so the stale and offline warnings
+still show. Forecasts, NWS alerts and the camera are never kept: an old
+forecast or alert list cannot be told from a current one. The site can also be
+added to a phone's home screen (`manifest.webmanifest`, `icon-192.png`,
+`icon-512.png`).
+
+Changing `VERSION` in `sw.js` drops every kept copy at the next visit.
+**To switch it off for everyone**, replace `sw.js` with this and push - each
+phone drops its copies and stops using it at its next visit:
+
+```js
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(caches.keys()
+  .then((ks) => Promise.all(ks.filter((k) => k.startsWith('nhrc-')).map((k) => caches.delete(k))))
+  .then(() => self.registration.unregister())));
+```
+
+Tests: `test_offline.js` (the service worker and the manifest), and section 17
+of `test_daily_email.js` (the page).
 
 ## The hazard map with the wind
 

@@ -5067,6 +5067,76 @@ test('phone: Download CSV when the archive cannot be loaded says so, and downloa
   assert.ok(/could not be loaded/.test(p.els['toast'].textContent || p.els['toast'].innerHTML), p.els['toast'].textContent);
 });
 
+// ── No connection: what this phone saved, and from when ──
+
+test('offline: readings the phone saved are shown under a "No connection" banner with the time they were saved - gone once the network answers', async () => {
+  let t = etDate('2026-10-31', 7, 30).getTime();
+  const savedAt = new Date(etDate('2026-10-31', 6, 15).getTime()).toISOString();
+  let up = false;
+  const withHeaders = (body, saved) => ({ ok: true, status: 200, json: () => Promise.resolve(body),
+    headers: { get: (h) => (saved && /^x-nhrc-saved$/i.test(h) ? saved : null) } });
+  const fetch = (url) => {
+    url = String(url);
+    if (/^data\.json/.test(url)) return Promise.resolve(withHeaders(makeRaw(64, new Date(etDate('2026-10-31', 6, 15).getTime())), up ? null : savedAt));
+    if (/^history\.json/.test(url)) return Promise.resolve(withHeaders(histUpTo(etDate('2026-10-31', 6, 15).getTime(), 64), up ? null : savedAt));
+    return Promise.reject(new TypeError('Failed to fetch'));
+  };
+  const { site, els } = loadSite(() => t, fetch);
+  await site.loadData();
+  assert.strictEqual(els['warn-saved'].style.display, 'flex');
+  assert.ok(/^ Showing what this phone saved at Oct 31, 6:15( | )AM EDT\. Readings, river and weather may have changed since\.$/.test(els['warn-saved-text'].textContent),
+    els['warn-saved-text'].textContent);
+  assert.strictEqual(els['current-f'].textContent, 64, 'the saved reading, with its own time');
+  assert.strictEqual(els['pill-text'].textContent, 'Delayed', 'and the usual age warnings still apply');
+  up = true; t += 60000;
+  await site.loadData();
+  assert.strictEqual(els['warn-saved'].style.display, 'none', 'fresh answers: no banner');
+});
+
+test('offline: with several saved copies the banner gives the oldest time', async () => {
+  const t = etDate('2026-10-31', 9).getTime();
+  const at = (h) => new Date(etDate('2026-10-31', h).getTime()).toISOString();
+  const res = (saved) => ({ ok: true, status: 200, json: () => Promise.resolve({}), headers: { get: () => saved } });
+  const answers = { 'data.json': at(8), 'https://api.weather.gov/stations/KOXC/observations': at(5) };
+  const { site, els } = loadSite(t, (url) => Promise.resolve(res(answers[String(url).replace(/\?.*$/, '')] || null)));
+  await site.fetchWithTimeout('data.json?_=1');
+  await site.fetchWithTimeout('https://api.weather.gov/stations/KOXC/observations?limit=15');
+  assert.ok(/saved at Oct 31, 5:00/.test(els['warn-saved-text'].textContent), els['warn-saved-text'].textContent);
+  answers['https://api.weather.gov/stations/KOXC/observations'] = null;
+  await site.fetchWithTimeout('https://api.weather.gov/stations/KOXC/observations?limit=15');
+  assert.ok(/saved at Oct 31, 8:00/.test(els['warn-saved-text'].textContent), 'the airport answered fresh: the water copy is left');
+  answers['data.json'] = null;
+  await site.fetchWithTimeout('data.json?_=2');
+  assert.strictEqual(els['warn-saved'].style.display, 'none');
+});
+
+test('offline: a fresh reading from the Worker is not "saved" because data.json was - only the reading shown counts', async () => {
+  const t = etDate('2026-10-31', 9).getTime();
+  const saved = new Date(etDate('2026-10-31', 6).getTime()).toISOString();
+  const res = (body, s) => ({ ok: true, status: 200, json: () => Promise.resolve(body), headers: { get: (h) => (s && /x-nhrc-saved/i.test(h) ? s : null) } });
+  const run = async (workerSaved, repoSaved, workerAt, repoAt) => {
+    const fetch = (url) => {
+      url = String(url);
+      if (url === W_LATEST) return Promise.resolve(res(makeRaw(64, new Date(workerAt)), workerSaved ? saved : null));
+      if (/^data\.json/.test(url)) return Promise.resolve(res(makeRaw(63, new Date(repoAt)), repoSaved ? saved : null));
+      if (/^history\.json/.test(url)) return Promise.resolve(res(histUpTo(repoAt, 63), null));
+      return Promise.reject(new TypeError('Failed to fetch'));
+    };
+    const { site, els } = loadSite(t, fetch);
+    await site.loadData();
+    return els['warn-saved'].style.display === 'flex';
+  };
+  assert.strictEqual(await run(false, true, t - 5 * 60000, t - 3 * HOUR), false, 'the Worker\'s fresh reading is shown: no banner');
+  assert.strictEqual(await run(true, false, t - 2 * HOUR, t - 3 * HOUR), true, 'the saved Worker reading is the one shown: the banner');
+  assert.strictEqual(await run(true, false, t - 4 * HOUR, t - 10 * 60000), false, 'data.json\'s fresh reading is newer and shown');
+});
+
+test('offline: an answer with no headers at all (an older browser, a stand-in) changes nothing', async () => {
+  const { site, els } = loadSite(Date.now(), () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) }));
+  await site.fetchWithTimeout('data.json');
+  assert.notStrictEqual(els['warn-saved'].style.display, 'flex');
+});
+
 test('phone: a chart library that never answers counts as failed after 30 s', async () => {
   const t = Date.now();
   const timers = [];
