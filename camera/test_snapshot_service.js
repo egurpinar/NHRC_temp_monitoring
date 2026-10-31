@@ -1426,6 +1426,236 @@ test('Worker: an upload records the Pi that sent it; anything else is dropped', 
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+section('6d-2. The Worker: the water sensor, every 15 minutes (Cron Trigger)');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The Worker reads the Govee sensor itself, so the website does not wait on
+// GitHub's scheduler. Govee is a stand-in here: global fetch, swapped for each
+// test - the Worker calls nothing else when it polls.
+
+const GOVEE_KEY = 'test-govee-key-0123456789abcdef';
+const goveeAnswer = (value, online) => ({ code: 200, payload: { capabilities: [
+  ...(online === undefined ? [] : [{ instance: 'online', state: { value: online } }]),
+  { instance: 'sensorTemperature', state: { value } }] } });
+/** Runs fn with Govee answering `answer` (an object, a function of the request, or an Error to throw). */
+async function withGovee(answer, fn) {
+  const real = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    const a = typeof answer === 'function' ? answer(url, init) : answer;
+    if (a instanceof Error) throw a;
+    if (a && a.status && a.body !== undefined) return new Response(a.body, { status: a.status });
+    return new Response(JSON.stringify(a), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  try { return await fn(calls); } finally { globalThis.fetch = real; }
+}
+const waterEnv = (extra = {}) => Object.assign({ UPLOAD_SECRET: SECRET, BUCKET: memoryR2(), GOVEE_API_KEY: GOVEE_KEY }, extra);
+/** One Cron Trigger, run to the end, at `when`. */
+async function cron(e, when = Date.now()) {
+  const waits = [];
+  await (await worker()).scheduled({ scheduledTime: when, cron: '0,15,30,45 * * * *' }, e, { waitUntil: (p) => waits.push(p) });
+  await Promise.all(waits);
+}
+const stored = (e, key) => { const o = e.BUCKET.stored(key); return o ? JSON.parse(new TextDecoder().decode(o.bytes)) : null; };
+const W_BASE = 'https://nhrc-camera.example.workers.dev';
+
+test('Worker water: a reading is kept as the latest, in data.json\'s shape, and among the last 14 days', async () => {
+  const e = waterEnv();
+  const when = Date.UTC(2026, 9, 30, 11, 15, 0, 412);
+  await withGovee(goveeAnswer(56.94), () => cron(e, when));
+  const latest = stored(e, 'water/latest.json');
+  assert.strictEqual(latest.fetchedAt, '2026-10-30T11:15:00Z', 'to the second, as data.json has it');
+  assert.strictEqual(latest.source, 'worker');
+  const dev = latest.data.devices[0];
+  assert.deepStrictEqual([dev.sku, dev.deviceName], ['H5109', 'NHRC Water Sensor']);
+  const d = JSON.parse(dev.deviceExt.lastDeviceData);
+  assert.deepStrictEqual(d, { online: true, tem: 1385, hum: 0, lastTime: when, avgDayTem: 1385, avgDayHum: 0 });
+  // Cut to two decimals, as fetch_temp.sh's bc always did: 13.855... is 13.85.
+  assert.deepStrictEqual(stored(e, 'water/recent.json'), [{ ts: '2026-10-30T11:15:00Z', tempC: 13.85, tempF: 56.94 }]);
+  assert.deepStrictEqual(stored(e, 'water/poll.json'), { at: new Date(when).toISOString(), ok: true, error: null });
+});
+
+test('Worker water: the numbers match fetch_temp.sh\'s for awkward values (no floating-point slips)', async () => {
+  // 32.05 x 100 is 3204.999... and (28.67 - 32) x 5/9 is -1.8499...: cut without care they would lose a hundredth.
+  for (const [f, c, tem] of [[56.94, 13.85, 1385], [73.36, 22.97, 2297], [32, 0, 0], [28.1, -2.16, -216], [60, 15.55, 1555], [59.99, 15.55, 1555],
+    [44.56, 6.97, 697], [32.05, 0.02, 2], [28.67, -1.85, -185], [32.3, 0.16, 16]]) {
+    const e = waterEnv();
+    await withGovee(goveeAnswer(f), () => cron(e, Date.UTC(2026, 9, 30, 11, 0)));
+    const r = stored(e, 'water/recent.json')[0];
+    assert.deepStrictEqual([r.tempF, r.tempC], [f, c], `${f}°F`);
+    assert.strictEqual(JSON.parse(stored(e, 'water/latest.json').data.devices[0].deviceExt.lastDeviceData).tem, tem, `${f}°F tem`);
+  }
+});
+
+test('Worker water: Govee is asked for the club\'s sensor, with the key in a header and nowhere else', async () => {
+  const e = waterEnv();
+  await withGovee(goveeAnswer(60), async (calls) => {
+    await cron(e);
+    assert.strictEqual(calls.length, 1);
+    assert.strictEqual(calls[0].url, 'https://openapi.api.govee.com/router/api/v1/device/state');
+    assert.strictEqual(calls[0].init.method, 'POST');
+    assert.strictEqual(calls[0].init.headers['Govee-API-Key'], GOVEE_KEY);
+    assert.deepStrictEqual(JSON.parse(calls[0].init.body).payload, { sku: 'H5109', device: '03:48:01:69:00:00:00:0F:FF:FF:00:45:FF:FF:00:45' });
+    assert.ok(!calls[0].url.includes(GOVEE_KEY) && !calls[0].init.body.includes(GOVEE_KEY));
+  });
+  const other = waterEnv({ GOVEE_DEVICE: 'AA:BB', GOVEE_SKU: 'H5179' });
+  await withGovee(goveeAnswer(60), async (calls) => {
+    await cron(other);
+    assert.deepStrictEqual(JSON.parse(calls[0].init.body).payload, { sku: 'H5179', device: 'AA:BB' }, 'a replacement sensor needs no code change');
+  });
+  for (const key of ['water/latest.json', 'water/recent.json', 'water/poll.json']) {
+    assert.ok(!new TextDecoder().decode(e.BUCKET.stored(key).bytes).includes(GOVEE_KEY), `${key} never holds the key`);
+  }
+});
+
+test('Worker water: readings gather, in time order, for 14 days; the same moment is never kept twice', async () => {
+  const e = waterEnv();
+  const t0 = Date.UTC(2026, 9, 1, 12, 0);
+  await withGovee(goveeAnswer(55), () => cron(e, t0));
+  await withGovee(goveeAnswer(56), () => cron(e, t0 + 15 * 60000));
+  await withGovee(goveeAnswer(57), () => cron(e, t0 + 15 * 60000));      // the same trigger, run twice
+  let days = stored(e, 'water/recent.json');
+  assert.deepStrictEqual(days.map((x) => [x.ts, x.tempF]), [['2026-10-01T12:00:00Z', 55], ['2026-10-01T12:15:00Z', 57]]);
+  await withGovee(goveeAnswer(58), () => cron(e, t0 + 14 * 86400000 + 60000));
+  days = stored(e, 'water/recent.json');
+  assert.deepStrictEqual(days.map((x) => x.tempF), [57, 58], 'past 14 days, the Worker lets a reading go');
+  await withGovee(goveeAnswer(59), () => cron(e, t0 + 14 * 86400000 + 16 * 60000));
+  assert.deepStrictEqual(stored(e, 'water/recent.json').map((x) => x.tempF), [58, 59]);
+  assert.strictEqual(stored(e, 'water/latest.json').fetchedAt, '2026-10-15T12:16:00Z');
+});
+
+test('Worker water: an answer that holds no reading changes nothing, and /status says why', async () => {
+  const cases = [
+    [goveeAnswer(''), /no temperature in Govee's answer/],
+    [{ code: 200, payload: { capabilities: [] } }, /no temperature/],
+    [{ code: 400, message: 'bad request' }, /no temperature/],
+    [goveeAnswer('abc'), /not a number/],
+    [goveeAnswer('7e1'), /not a number/],
+    [goveeAnswer(150), /implausible water temperature: 150°F/],
+    [goveeAnswer(0), /implausible water temperature: 0°F/],
+    [goveeAnswer(61, false), /Govee says the sensor is offline/],
+    [{ status: 500, body: 'oops' }, /Govee answered HTTP 500/],
+    [{ status: 429, body: 'slow down' }, /Govee answered HTTP 429/],
+    [{ status: 200, body: '<html>' }, /not JSON/],
+    [new TypeError('fetch failed'), /Govee could not be reached/],
+    [Object.assign(new Error('timed out'), { name: 'TimeoutError' }), /did not answer within 20 s/],
+  ];
+  for (const [answer, why] of cases) {
+    const e = waterEnv();
+    await withGovee(goveeAnswer(55), () => cron(e, Date.UTC(2026, 9, 30, 10, 0)));
+    const before = [stored(e, 'water/latest.json'), stored(e, 'water/recent.json')];
+    await withGovee(answer, () => cron(e, Date.UTC(2026, 9, 30, 10, 15)));
+    assert.deepStrictEqual([stored(e, 'water/latest.json'), stored(e, 'water/recent.json')], before, String(why));
+    const poll = stored(e, 'water/poll.json');
+    assert.ok(poll.ok === false && why.test(poll.error), `${why}: ${poll.error}`);
+    assert.ok(!poll.error.includes(GOVEE_KEY));
+  }
+  // An online sensor, and one that does not say, both give their reading.
+  const e = waterEnv();
+  await withGovee(goveeAnswer('58.5', true), () => cron(e));
+  assert.strictEqual(stored(e, 'water/recent.json')[0].tempF, 58.5);
+});
+
+test('Worker water: without its Govee key the Worker asks nothing and says so', async () => {
+  const e = waterEnv({ GOVEE_API_KEY: '' });
+  await withGovee(goveeAnswer(60), async (calls) => {
+    await cron(e);
+    assert.strictEqual(calls.length, 0);
+  });
+  assert.strictEqual(stored(e, 'water/latest.json'), null);
+  assert.strictEqual(stored(e, 'water/poll.json').error, 'GOVEE_API_KEY is not set on this Worker');
+});
+
+test('Worker water: a storage error reading the 14 days never replaces them with one reading', async () => {
+  const e = waterEnv();
+  await withGovee(goveeAnswer(55), () => cron(e, Date.UTC(2026, 9, 30, 10, 0)));
+  await withGovee(goveeAnswer(56), () => cron(e, Date.UTC(2026, 9, 30, 10, 15)));
+  e.BUCKET.failNext(1);
+  await withGovee(goveeAnswer(57), () => cron(e, Date.UTC(2026, 9, 30, 10, 30)));
+  assert.deepStrictEqual(stored(e, 'water/recent.json').map((x) => x.tempF), [55, 56]);
+  assert.strictEqual(stored(e, 'water/latest.json').fetchedAt, '2026-10-30T10:15:00Z', 'nor the latest, which would then be missing from the days');
+  assert.ok(/R2/.test(stored(e, 'water/poll.json').error));
+  // A damaged file of days, though, is started afresh: the archive on GitHub has them.
+  await e.BUCKET.put('water/recent.json', '{not json');
+  await withGovee(goveeAnswer(58), () => cron(e, Date.UTC(2026, 9, 30, 10, 45)));
+  assert.deepStrictEqual(stored(e, 'water/recent.json').map((x) => x.tempF), [58]);
+  // ... and entries that are not readings are dropped, not passed on.
+  await e.BUCKET.put('water/recent.json', JSON.stringify([{ ts: '2026-10-30T10:50:00Z', tempF: 'x', tempC: 1 }, null, { ts: 5 }]));
+  await withGovee(goveeAnswer(59), () => cron(e, Date.UTC(2026, 9, 30, 11, 0)));
+  assert.deepStrictEqual(stored(e, 'water/recent.json').map((x) => x.tempF), [59]);
+});
+
+test('Worker water: the website reads the latest and the 14 days from anywhere, cached for a minute', async () => {
+  const e = waterEnv();
+  let r = await (await worker()).fetch(new Request(`${W_BASE}/water/latest.json`), e);
+  assert.strictEqual(r.status, 404, 'no reading yet');
+  assert.strictEqual(r.headers.get('Cache-Control'), 'no-store');
+  assert.strictEqual(r.headers.get('Access-Control-Allow-Origin'), '*');
+  await withGovee(goveeAnswer(57.2), () => cron(e, Date.UTC(2026, 9, 30, 11, 0)));
+  r = await (await worker()).fetch(new Request(`${W_BASE}/water/latest.json`), e);
+  assert.strictEqual(r.status, 200);
+  for (const [h, v] of [['Content-Type', 'application/json'], ['Access-Control-Allow-Origin', '*'], ['Cache-Control', 'public, max-age=60'], ['X-Content-Type-Options', 'nosniff']]) {
+    assert.strictEqual(r.headers.get(h), v, h);
+  }
+  assert.strictEqual((await r.json()).fetchedAt, '2026-10-30T11:00:00Z');
+  r = await (await worker()).fetch(new Request(`${W_BASE}/water/recent.json`), e);
+  assert.deepStrictEqual(await r.json(), [{ ts: '2026-10-30T11:00:00Z', tempC: 14, tempF: 57.2 }]);
+  r = await (await worker()).fetch(new Request(`${W_BASE}/water/latest.json`, { method: 'HEAD' }), e);
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(await r.text(), '');
+  r = await (await worker()).fetch(new Request(`${W_BASE}/water/latest.json`, { method: 'OPTIONS' }), e);
+  assert.strictEqual(r.status, 204);
+  assert.strictEqual(r.headers.get('Access-Control-Allow-Methods'), 'GET, HEAD');
+  e.BUCKET.failNext(1);
+  r = await (await worker()).fetch(new Request(`${W_BASE}/water/latest.json`), e);
+  assert.strictEqual(r.status, 503, 'a storage error is said as one, never as "no reading"');
+  // Nobody can write a reading through the website's address.
+  for (const method of ['PUT', 'POST', 'DELETE']) {
+    r = await (await worker()).fetch(new Request(`${W_BASE}/water/latest.json`, { method, body: method === 'DELETE' ? undefined : '{}',
+      headers: { Authorization: `Bearer ${SECRET}`, 'Content-Type': 'image/jpeg' } }), e);
+    assert.notStrictEqual(r.status, 200, method);
+    assert.strictEqual(stored(e, 'water/latest.json').fetchedAt, '2026-10-30T11:00:00Z', method);
+  }
+});
+
+test('Worker water: /status says when the last reading came and how the last try went - and the photo part is unchanged', async () => {
+  const e = waterEnv();
+  let st = await (await (await worker()).fetch(new Request(`${W_BASE}/status`), e)).json();
+  assert.deepStrictEqual(st.water, { lastReadingAt: null, ageSeconds: null, lastTryAt: null, lastTryOk: null, lastError: null });
+  await withGovee(goveeAnswer(57), () => cron(e, Date.now() - 20 * 60000));
+  await withGovee(goveeAnswer(''), () => cron(e, Date.now() - 5 * 60000));
+  await put(e, { 'X-Camera-Role': 'primary', 'X-Camera-Name': 'Dock Wired', 'X-Camera-Pi': 'main' });
+  st = await (await (await worker()).fetch(new Request(`${W_BASE}/status`), e)).json();
+  assert.ok(Math.abs(st.water.ageSeconds - 1200) <= 2, String(st.water.ageSeconds));
+  assert.strictEqual(st.water.lastTryOk, false);
+  assert.ok(/no temperature/.test(st.water.lastError));
+  assert.strictEqual(st.ok, true);
+  assert.strictEqual(st.camera, 'Dock Wired');
+  assert.ok(!JSON.stringify(st).includes(GOVEE_KEY));
+  e.BUCKET.failNext(1);
+  st = await (await (await worker()).fetch(new Request(`${W_BASE}/status`), e)).json();
+  assert.ok(st.water === 'unavailable' || st.pis === 'unavailable', 'a storage error is said as one');
+});
+
+test('Worker water: the Cron Trigger hands its work to waitUntil, so it runs to the end', async () => {
+  const e = waterEnv();
+  const waits = [];
+  await withGovee(goveeAnswer(55), async () => {
+    await (await worker()).scheduled({ scheduledTime: Date.UTC(2026, 9, 30, 11, 0), cron: '0,15,30,45 * * * *' }, e, { waitUntil: (p) => waits.push(p) });
+    assert.strictEqual(waits.length, 1);
+    await waits[0];
+  });
+  assert.strictEqual(stored(e, 'water/latest.json').fetchedAt, '2026-10-30T11:00:00Z');
+});
+
+test('Worker water: the README says how to turn it on, with the trigger written so the Worker\'s comments stay valid', () => {
+  const w = fs.readFileSync(path.join(__dirname, 'cloudflare_worker.js'), 'utf8');
+  assert.ok(w.includes('Cron Trigger  0,15,30,45 * * * *'), 'the header says which trigger');
+  assert.ok(!/\/\*[^]*?\*\/15[^]*?\*\//.test(w.slice(0, w.indexOf('const OBJECT_KEY'))), 'no "*/15" inside a block comment');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 section('6e. Two Pis: check-ins, the standby\'s decision, whole days on a fake clock');
 // ═══════════════════════════════════════════════════════════════════════════
 //

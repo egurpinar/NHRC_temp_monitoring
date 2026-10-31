@@ -2313,7 +2313,8 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     ' loadData, loadHistory, refreshAll, loadFogOutlook, loadCameraSnapshot, historyNeedsRefresh, pickRiverLevel,' +
     ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraBackupAsleep,' +
     ' cameraCaption, cameraMissingMessage, CAMERA_SNAPSHOT_URL, nearestReading, downloadCSV, withGapBreaks,' +
-    ' checkCameraForNewPhoto };',
+    ' checkCameraForNewPhoto, newestReading, mergeHistory, normalizeHistory, readingTime, WATER_LATEST_URL, WATER_RECENT_URL,' +
+    ' ARCHIVE_REFRESH_MS };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -3328,9 +3329,9 @@ test('a request that never answers is abandoned after 20 s, and refreshing works
   });
   const p = site.loadData();
   await settle();
-  assert.strictEqual(timers.length, 1, 'a deadline was set');
-  assert.strictEqual(timers[0].ms, 20000);
-  timers[0].fn();
+  // Two requests now: the Worker's reading (8 s, refused at once here) and data.json (20 s).
+  assert.deepStrictEqual(timers.map(t => t.ms).sort((a, b) => a - b), [8000, 20000], 'a deadline was set on each');
+  timers.find(t => t.ms === 20000).fn();
   await p;
   assert.strictEqual(els['error-view'].style.display, 'block', 'the stuck first load ends in the error view');
   site.loadData();
@@ -4006,6 +4007,191 @@ test('loadFogInputs: total network failure yields nulls, which assess as "unknow
   } finally {
     global.fetch = realFetch;
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('15. Water readings: the Worker\'s first, the repository\'s alongside');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The Worker takes a reading every 15 minutes; GitHub's scheduler, which used
+// to, left the reading over 45 minutes old 41% of the time between 5 and 11 AM.
+// The page and the email read the Worker first and the repository's files
+// alongside: the newest reading wins, and without the Worker they are exactly
+// what they were.
+
+const W_LATEST = logic.WATER_LATEST_URL, W_RECENT = logic.WATER_RECENT_URL;
+const exact = (u) => new RegExp('^' + u.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&') + '$');
+/** The Worker's 14 days as it stores them: a reading every 15 minutes up to endMs. */
+function workerDays(endMs, tempF, days = 14) {
+  const out = [];
+  for (let ts = endMs - days * 24 * HOUR; ts <= endMs; ts += 15 * 60000) out.push({ ts: new Date(ts).toISOString().replace(/\.\d{3}Z$/, 'Z'), tempC: Math.trunc((tempF - 32) * 500 / 9) / 100, tempF });
+  return out;
+}
+/** A page on a fake network: data.json/history.json from the repository, and the Worker's answers. */
+function waterPage(clock, { repo, archive, latest, recent }) {
+  const net = fakeNet([
+    [exact(W_LATEST), (u) => (typeof latest === 'function' ? latest(u) : latest === undefined ? offline() : reply(latest))],
+    [exact(W_RECENT), (u) => (typeof recent === 'function' ? recent(u) : recent === undefined ? offline() : reply(recent))],
+    [/^data\.json/, () => (typeof repo === 'function' ? repo() : reply(repo))],
+    [/^history\.json/, () => (typeof archive === 'function' ? archive() : reply(archive))],
+  ]);
+  const page = loadSite(clock, net.fetch);
+  return Object.assign(page, { net });
+}
+
+test('water: the Worker\'s newer reading is shown - the repository\'s, three hours old, is not', async () => {
+  const t = Date.now();
+  const p = waterPage(t, { repo: makeRaw(66, new Date(t - 3 * HOUR)), archive: histUpTo(t - 3 * HOUR, 66),
+    latest: makeRaw(64, new Date(t - 5 * 60000)), recent: workerDays(t - 5 * 60000, 64) });
+  await p.site.loadData();
+  assert.strictEqual(p.els['current-f'].textContent, 64);
+  assert.strictEqual(p.site.state.waterSource, 'worker');
+  assert.strictEqual(p.els['pill-text'].textContent, 'Live');
+  assert.strictEqual(p.els['status-text'].textContent, 'Sensor live');
+  const h = p.site.state.allHistory;
+  assert.strictEqual(h[h.length - 1].ts, Math.floor((t - 5 * 60000) / 1000) * 1000, 'the history reaches the shown reading (to the second, as stored)');
+  assert.strictEqual(new Set(h.map(x => x.ts)).size, h.length, 'one reading per moment');
+});
+
+test('water: without the Worker - down, failing, or saying nothing usable - the page is exactly what it was', async () => {
+  const t = Date.now();
+  const answers = [undefined, () => reply('busy', 503), () => reply({}), () => reply({ data: { devices: [] } }),
+    () => reply({ error: 'x', fetchedAt: new Date(t).toISOString() }), () => reply(null), () => reply([1, 2])];
+  for (const latest of answers) {
+    const p = waterPage(t, { repo: makeRaw(66, new Date(t - 10 * 60000)), archive: histUpTo(t - 10 * 60000, 66), latest, recent: undefined });
+    await p.site.loadData();
+    assert.strictEqual(p.els['current-f'].textContent, 66, String(latest));
+    assert.strictEqual(p.site.state.waterSource, 'repo');
+    assert.strictEqual(p.els['pill-text'].textContent, 'Live');
+    assert.strictEqual(p.els['error-view'].style.display, 'none');
+  }
+});
+
+test('water: a Worker that has fallen behind the repository loses to it', async () => {
+  const t = Date.now();
+  const p = waterPage(t, { repo: makeRaw(66, new Date(t - 10 * 60000)), archive: histUpTo(t - 10 * 60000, 66),
+    latest: makeRaw(61, new Date(t - 5 * HOUR)), recent: workerDays(t - 5 * HOUR, 61) });
+  await p.site.loadData();
+  assert.strictEqual(p.els['current-f'].textContent, 66);
+  assert.strictEqual(p.site.state.waterSource, 'repo');
+});
+
+test('water: the page never goes back to an older reading than it shows', async () => {
+  let t = Date.now(), workerUp = true;
+  const p = waterPage(() => t, { repo: () => reply(makeRaw(66, new Date(t - 3 * HOUR))), archive: () => reply(histUpTo(t - 3 * HOUR, 66)),
+    latest: () => (workerUp ? reply(makeRaw(64, new Date(t - 5 * 60000))) : offline()), recent: () => (workerUp ? reply(workerDays(t - 5 * 60000, 64)) : offline()) });
+  await p.site.loadData();
+  assert.strictEqual(p.els['current-f'].textContent, 64);
+  const shownAt = p.site.state.lastFetchedAt.getTime();
+  workerUp = false; t += 60000;
+  await p.site.loadData();
+  assert.strictEqual(p.els['current-f'].textContent, 64, 'not the repository\'s three-hour-old 66');
+  assert.strictEqual(p.site.state.lastFetchedAt.getTime(), shownAt);
+  assert.strictEqual(p.els['data-age'].textContent, '6 min ago', 'its age keeps counting');
+});
+
+// The mornings for the rule: history.json has them up to the 23rd; the Worker has the 23rd to the 25th.
+test('water: the 3-morning rule counts the Worker\'s mornings that history.json does not have yet', async () => {
+  const now = etAt(2026, 10, 25, 10, 0);
+  const archiveList = [[2026, 10, 21, 58], [2026, 10, 22, 59], [2026, 10, 23, 61]];
+  const archive = mornings(archiveList).map(x => ({ ts: new Date(x.ts).toISOString(), tempF: x.tempF }));
+  const days = mornings([[2026, 10, 23, 61], [2026, 10, 24, 61.5], [2026, 10, 25, 62]]).map(x => ({ ts: new Date(x.ts).toISOString().replace(/\.\d{3}Z$/, 'Z'), tempF: x.tempF, tempC: 16 }));
+  const repo = makeRaw(61, new Date(etAt(2026, 10, 23, 9)));
+  const withWorker = waterPage(now, { repo, archive, latest: makeRaw(62, new Date(etAt(2026, 10, 25, 9))), recent: days });
+  withWorker.site.state.riverLevel = 3;
+  await withWorker.site.loadData();
+  assert.ok(/No temperature restrictions \(water > 60°F, 3-day confirmed\)/.test(withWorker.els['rule-banner'].innerHTML), withWorker.els['rule-banner'].innerHTML);
+  const without = waterPage(now, { repo, archive, latest: undefined, recent: undefined });
+  without.site.state.riverLevel = 3;
+  await without.site.loadData();
+  assert.ok(/COLD WATER/.test(without.els['rule-banner'].innerHTML.replace(/<[^>]+>/g, '')), 'archive alone: one warm morning of three');
+});
+
+test('water: history.json (over 1 MB) is downloaded again only every 30 minutes while the Worker keeps up', async () => {
+  let t = Date.now();
+  const p = waterPage(() => t, { repo: () => reply(makeRaw(66, new Date(t - 2 * HOUR))), archive: () => reply(histUpTo(t - 2 * HOUR, 66)),
+    latest: () => reply(makeRaw(64, new Date(t))), recent: () => reply(workerDays(t, 64)) });
+  const counts = [];
+  for (let i = 0; i < 5; i++) {
+    await p.site.loadData();
+    counts.push([p.net.count(/^history\.json/), p.net.count(exact(W_RECENT))]);
+    t += 15 * 60000;
+  }
+  assert.deepStrictEqual(counts, [[1, 1], [1, 2], [1, 3], [2, 4], [2, 5]], 'the 14 days each time there is a new reading; the archive at 0 and 45 min');
+  assert.strictEqual(p.site.ARCHIVE_REFRESH_MS, 30 * 60000);
+});
+
+test('water: with the Worker down, history.json is asked for whenever it is behind - as before', async () => {
+  let t = Date.now();
+  const p = waterPage(() => t, { repo: () => reply(makeRaw(66, new Date(t))), archive: () => reply(histUpTo(t, 66)) });
+  for (let i = 0; i < 3; i++) { await p.site.loadData(); t += 15 * 60000; }
+  assert.strictEqual(p.net.count(/^history\.json/), 3);
+  assert.strictEqual(p.site.state.waterSource, 'repo');
+});
+
+test('water: the Worker\'s addresses are asked as they are (it caches for a minute); data.json keeps its cache-buster', async () => {
+  const t = Date.now();
+  const p = waterPage(t, { repo: makeRaw(66, new Date(t - 10 * 60000)), archive: histUpTo(t - 10 * 60000, 66),
+    latest: makeRaw(64, new Date(t - 5 * 60000)), recent: workerDays(t - 5 * 60000, 64) });
+  await p.site.loadData();
+  assert.ok(p.net.calls.includes(W_LATEST) && p.net.calls.includes(W_RECENT), p.net.calls.join(' '));
+  assert.ok(p.net.calls.some(u => /^data\.json\?_=\d+$/.test(u)));
+  assert.strictEqual(W_LATEST, 'https://nhrc-camera.gurpinar-emre.workers.dev/water/latest.json');
+  assert.strictEqual(W_RECENT, 'https://nhrc-camera.gurpinar-emre.workers.dev/water/recent.json');
+});
+
+test('water: newest, merged, normalized - the pieces on their own', () => {
+  const { site } = loadSite(Date.now());
+  const a = makeRaw(60, new Date('2026-10-30T10:00:00Z')), b = makeRaw(61, new Date('2026-10-30T10:15:00Z'));
+  assert.strictEqual(site.newestReading(a, b), b);
+  assert.strictEqual(site.newestReading(b, a), b);
+  assert.strictEqual(site.newestReading(null, a, { error: 'x' }, { data: {} }, 'x', 5), a);
+  assert.strictEqual(site.newestReading(), null);
+  const noTime = makeRaw(62); delete noTime.fetchedAt;
+  assert.strictEqual(site.newestReading(noTime, a), a, 'a reading that does not say when loses to one that does');
+  assert.strictEqual(site.newestReading(noTime), noTime, 'but is used when it is all there is');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(site.normalizeHistory([{ ts: '2026-10-30T10:00:00Z', tempC: 15 }, { ts: '2026-10-30T09:45:00Z', tempF: '58.5' },
+    { ts: 'nope', tempF: 60 }, null, 7, { ts: '2026-10-30T10:15:00Z', tempF: 'warm' }]))),
+    [{ ts: Date.parse('2026-10-30T09:45:00Z'), tempF: 58.5 }, { ts: Date.parse('2026-10-30T10:00:00Z'), tempF: 59 }]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(site.normalizeHistory('x'))), []);
+  const arch = [{ ts: 1, tempF: 50 }, { ts: 3, tempF: 52 }], rec = [{ ts: 3, tempF: 52 }, { ts: 2, tempF: 51 }, { ts: 4, tempF: 53 }];
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(site.mergeHistory(arch, rec))).map(x => x.ts), [1, 2, 3, 4]);
+  assert.strictEqual(site.mergeHistory(arch, []), arch);
+  assert.strictEqual(site.mergeHistory([], rec), rec);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(site.mergeHistory(null, null))), []);
+});
+
+test('water, email: the Worker\'s fresh reading and its days, together with the checkout\'s files', async () => {
+  const realFetch = global.fetch;
+  const local = M.loadLocalData();
+  const t = Date.now() + 60000;   // newer than anything in the checkout
+  global.fetch = async (url) => {
+    if (url === W_LATEST) return { ok: true, status: 200, json: async () => makeRaw(57.5, new Date(t)) };
+    if (url === W_RECENT) return { ok: true, status: 200, json: async () => workerDays(t, 57.5, 1) };
+    throw new Error('unexpected ' + url);
+  };
+  try {
+    const w = await M.loadWater(logic);
+    assert.strictEqual(w.source, 'worker');
+    assert.strictEqual(w.raw.fetchedAt, new Date(t).toISOString());
+    assert.strictEqual(w.history[w.history.length - 1].ts, Date.parse(new Date(t).toISOString().replace(/\.\d{3}Z$/, 'Z')));
+    assert.ok(w.history.length >= local.history.length, 'the archive is all still there');
+    assert.strictEqual(w.history[0].ts, local.history[0].ts);
+  } finally { global.fetch = realFetch; }
+});
+
+test('water, email: without the Worker, exactly the checkout\'s data.json and history.json', async () => {
+  const realFetch = global.fetch;
+  global.fetch = async () => { throw new Error('offline'); };
+  try {
+    const w = await M.loadWater(logic);
+    const local = M.loadLocalData();
+    assert.strictEqual(w.source, 'repo');
+    assert.deepStrictEqual(w.raw, local.raw);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(w.history)), JSON.parse(JSON.stringify(local.history)));
+  } finally { global.fetch = realFetch; }
+  const src = fsT.readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8');
+  assert.ok(/const local = await loadWater\(logic\);/.test(src), 'build() uses it');
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

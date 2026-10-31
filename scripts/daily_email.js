@@ -170,6 +170,8 @@ function loadSiteLogic(indexHtmlPath = INDEX_HTML) {
     'getEffectiveLevel', 'checkMorningStreak', 'nyWindowBound', 'nyTzAbbr',
     'getFloodStatus', 'combineStatus', 'boatKeys', 'floodStatusForBoat',
     'floodSummaryLabel', 'riverStaleNote', 'extractTemp', 'parseLastDeviceData',
+    // The water readings: the Worker's first, the repository's alongside, as on the site.
+    'WATER_LATEST_URL', 'WATER_RECENT_URL', 'readingTime', 'newestReading', 'normalizeHistory', 'mergeHistory',
     // River level selection: same staleness rule and forecast fallback as the site.
     'pickRiverLevel', 'parseRiverSeries', 'RIVER_STALE_MS', 'RIVER_FORECAST_MAX_GAP_MS',
     'WMO_CODES', 'WMO_ICONS',
@@ -196,6 +198,31 @@ function loadSiteLogic(indexHtmlPath = INDEX_HTML) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. Data loading
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The water readings the email uses: the Worker's, which it takes every 15
+ * minutes, and the repository's data.json and history.json - the newest
+ * reading, and the two histories together, exactly as the website does. The
+ * email is built in the small hours from a checkout of the repository, whose
+ * newest reading GitHub's scheduler may have left hours old; the Worker's is
+ * the fresh one. Without the Worker, the email is what it was before.
+ */
+const WORKER_WATER_TIMEOUT_MS = 15000;
+async function loadWater(logic) {
+  let local = null, localError = null;
+  try { local = loadLocalData(); } catch (e) { localError = e; }
+  const [latest, recent] = await Promise.all([
+    fetchJson(logic.WATER_LATEST_URL, WORKER_WATER_TIMEOUT_MS).catch(() => null),
+    fetchJson(logic.WATER_RECENT_URL, WORKER_WATER_TIMEOUT_MS).catch(() => null),
+  ]);
+  const raw = logic.newestReading(latest, local && local.raw);
+  if (!raw) {
+    if (localError) throw localError;
+    return local;
+  }
+  const history = logic.mergeHistory(local ? local.history : [], logic.normalizeHistory(recent));
+  return { raw, history, source: raw === latest ? 'worker' : 'repo' };
+}
 
 function loadLocalData() {
   const dataPath = path.join(REPO_ROOT, 'data.json');
@@ -1095,7 +1122,7 @@ async function checkSubscriberHeadroom() {
 
 async function build() {
   const logic = loadSiteLogic();
-  const local = loadLocalData();
+  const local = await loadWater(logic);
   const [river, weather, fogInputs] = await Promise.all([
     loadRiver(logic), loadWeather(logic), loadFogInputs(logic),
   ]);
@@ -1162,7 +1189,7 @@ async function main() {
 }
 
 module.exports = {
-  loadSiteLogic, loadLocalData, loadRiver, loadWeather, loadFogInputs, NWS_HEADERS,
+  loadSiteLogic, loadLocalData, loadWater, loadRiver, loadWeather, loadFogInputs, NWS_HEADERS,
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
   parseGaugeSeries, checkSubscriberHeadroom, isInSeason, dailySlug,
   alreadySentToday, isPrimarySendHour,

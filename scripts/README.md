@@ -19,7 +19,7 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (240 tests): the email, and the website's script run against a fake network and clock |
+| `test_daily_email.js` | Test suite (251 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository |
 | `test_site_theme.js` | The website's light and dark themes (20 tests): contrast of every colour where it is used (WCAG AA), dark kept as the original design, the switch, the device default, the charts |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
@@ -27,8 +27,36 @@ status using the site's own functions and compares against the email output.
 | `../.github/workflows/daily_email.yml` | 1 AM ET schedule |
 | `hazard_map.js` | Copies the Safety Committee's Google map (lanes, hazards, swim areas) into `map/hazard-map.json` for the map with the wind |
 | `test_hazard_map.js` | Its tests (17): the real map's KML, colours, the committee's words as plain text, and never replacing a good copy with an error page |
-| `test_map.js` | The hazard map with the wind (63 tests): the wind in words, headwind/crosswind/tailwind on the lanes, now measured and the 24 hours forecast, the loop through the hours, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet, and the old trial address |
+| `test_map.js` | The hazard map with the wind (65 tests): the wind in words, headwind/crosswind/tailwind on the lanes, now measured and the 24 hours forecast, the loop through the hours, the state's photos and the stand-in if they fail, the hazards' pictures, the page run with stand-ins for the browser and Leaflet, and the old trial address |
 | `fixtures/hazard_map.kml` | The Google map as exported in October 2026 |
+
+## Water readings: the Worker first
+
+The water temperature reaches the website and this email two ways, and the
+newest reading wins:
+
+- **The Cloudflare Worker** (`camera/cloudflare_worker.js`) reads the Govee
+  sensor every 15 minutes on its own Cron Trigger and serves the latest reading
+  (`/water/latest.json`, in `data.json`'s shape) and the last 14 days
+  (`/water/recent.json`). The page and the email read these first.
+- **The repository's** `data.json` and `history.json` - the archive. The
+  `Fetch Govee Temperature` workflow (`scripts/fetch_temp.sh`) copies the
+  Worker's readings into them, filling any gap, and ends in a minute. Only when
+  the Worker cannot be reached, or has had no reading for 45 minutes, does it
+  poll the sensor itself, in its old three-hour loop.
+
+The page merges the Worker's 14 days into `history.json`'s archive, so the
+chart, the CSV and the 3-morning rule have the newest readings even before
+GitHub archives them; the archive itself is downloaded again only every 30
+minutes while the Worker keeps up. Without the Worker, everything is exactly as
+before: `data.json` and `history.json`, refreshed whenever they are behind.
+
+Why: GitHub's scheduler skipped or delayed so many runs that, in late October
+2026, the reading on the website was more than 45 minutes old 24% of the time -
+41% between 5 and 11 AM, when members check it and the 3-morning rule looks.
+Cloudflare's Cron Triggers are a separate scheduler, and the Worker's `/status`
+shows the age of its last reading, so whether it keeps time can be checked at
+any moment.
 
 ## The hazard map with the wind
 

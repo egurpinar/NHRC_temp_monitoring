@@ -24,6 +24,10 @@ section(){ echo; echo "$1"; echo "${1//?/-}"; }
 
 TEMP_OK='{"payload":{"capabilities":[{"instance":"online","state":{"value":true}},{"instance":"sensorTemperature","state":{"value":73.36}}]}}'
 
+# Sections 1-5 test polling the sensor directly - what the job does without the
+# Worker. Section 6 turns the Worker back on, with stand-in files.
+export WORKER_ARCHIVE=0
+
 # ══════════════════════════════════════════════════════════════════════════
 section "0. Syntax"
 # ══════════════════════════════════════════════════════════════════════════
@@ -186,6 +190,89 @@ if [ $((n1-n0)) -ge 3 ]; then pass=$((pass+1)); echo "  ok   loop pushes increme
 else fail=$((fail+1)); echo "  FAIL loop produced only $((n1-n0)) commits"; fi
 chk "no unpushed commits at exit" "$(git rev-list --count '@{u}..HEAD')" "0"
 chk "origin JSON valid after the loop" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq -e . >/dev/null 2>&1 && echo valid)" "valid"
+
+# ══════════════════════════════════════════════════════════════════════════
+section "6. The Worker's readings, archived (the sensor polled only without them)"
+# ══════════════════════════════════════════════════════════════════════════
+export WORKER_ARCHIVE=1
+V=$(mktemp -d); cd "$V" || exit 1
+F="$V/fake"; mkdir -p "$F"; export WORKER_FAKE_DIR="$F"
+ago(){ date -u -d "-$1 minutes" +%Y-%m-%dT%H:%M:%SZ; }
+OLD="2026-08-29T12:00:00Z"; B=$(ago 10); C=$(ago 5)
+latest_json(){ # fetchedAt tem
+  printf '{"status":200,"message":"Success","data":{"devices":[{"sku":"H5109","deviceName":"NHRC Water Sensor","deviceExt":{"lastDeviceData":"{\\"online\\":true,\\"tem\\":%s,\\"hum\\":0}"}}]},"fetchedAt":"%s","source":"worker"}' "$2" "$1"; }
+reset(){ echo "[{\"ts\":\"$OLD\",\"tempC\":22.0,\"tempF\":71.6}]" > history.json; echo '{"fetchedAt":"2026-08-29T12:00:00Z"}' > data.json; }
+# If the sensor were polled from here, its 99F would show up in history.json.
+export GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":99}}]}}'
+
+reset
+echo "[{\"ts\":\"$OLD\",\"tempC\":0,\"tempF\":32},{\"ts\":\"$C\",\"tempC\":14,\"tempF\":57.2},{\"ts\":\"$B\",\"tempC\":13.9,\"tempF\":57.02}]" > "$F/recent.json"
+latest_json "$C" 1400 > "$F/latest.json"
+LOOP_MINUTES=180 GIT_COMMIT=0 bash "$SCRIPT" > w1.log 2>&1
+chk "a healthy Worker: exit 0" "$?" "0"
+chk "its readings archived, in time order" "$(jq -c '[.[].ts]' history.json)" "[\"$OLD\",\"$B\",\"$C\"]"
+chk "a moment already archived keeps its value" "$(jq -r '.[0].tempF' history.json)" "71.6"
+chk "data.json is the Worker's latest" "$(jq -r .fetchedAt data.json)" "$C"
+chk "the sensor is not polled from here" "$(jq '[.[] | select(.tempF == 99)] | length' history.json)" "0"
+chk "and no three-hour loop" "$(grep -c sleeping w1.log)" "0"
+chk "history.json strictly valid JSON" "$(python3 -c 'import json; json.load(open("history.json")); print("ok")' 2>&1)" "ok"
+
+reset
+echo "[{\"ts\":\"$(ago 120)\",\"tempC\":14,\"tempF\":57.2}]" > "$F/recent.json"
+latest_json "$(ago 120)" 1400 > "$F/latest.json"
+LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" > w2.log 2>&1
+chk "a Worker two hours behind: its readings kept" "$(jq '[.[] | select(.tempF == 57.2)] | length' history.json)" "1"
+chk "and the sensor polled directly" "$(jq -r '.[-1].tempF' history.json)" "99"
+chk "the log says why" "$(grep -c 'over 45 minutes old' w2.log)" "1"
+
+reset; rm -f "$F/recent.json" "$F/latest.json"
+LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" > w3.log 2>&1
+chk "no Worker: the sensor polled, as before" "$(jq -r '.[-1].tempF' history.json)" "99"
+chk "the log says the Worker could not be reached" "$(grep -c 'could not be reached' w3.log)" "1"
+
+for junk in '{"not":"an array"}' 'not json' '[]' '[1,"x",null]' \
+  "[{\"ts\":\"yesterday\",\"tempC\":14,\"tempF\":57.2}]" \
+  "[{\"ts\":\"$C\",\"tempC\":14,\"tempF\":\"57.2\"}]" \
+  "[{\"ts\":\"$C\",\"tempF\":57.2}]" \
+  "[{\"ts\":\"$C\",\"tempC\":65.5,\"tempF\":150}]" \
+  "[{\"ts\":\"$C\",\"tempC\":-17.7,\"tempF\":0}]"; do
+  reset; printf '%s' "$junk" > "$F/recent.json"; latest_json "$C" 1400 > "$F/latest.json"
+  LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1
+  chk "junk never archived: ${junk:0:40}" "$(jq -c '[.[].tempF]' history.json)" "[71.6,99]"
+done
+
+reset; echo "{\"fetchedAt\":\"$(ago 1)\",\"marker\":1}" > data.json
+echo "[{\"ts\":\"$C\",\"tempC\":14,\"tempF\":57.2}]" > "$F/recent.json"; latest_json "$C" 1400 > "$F/latest.json"
+LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1
+chk "an older latest never replaces data.json" "$(jq -r .marker data.json)" "1"
+reset; latest_json "$C" 99999 > "$F/latest.json"
+LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1
+chk "nor an implausible one" "$(jq -r .fetchedAt data.json)" "2026-08-29T12:00:00Z"
+reset; printf '{"fetchedAt":"%s"}' "$C" > "$F/latest.json"
+LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1
+chk "nor one without a temperature" "$(jq -r .fetchedAt data.json)" "2026-08-29T12:00:00Z"
+
+# Git: one commit for the Worker's readings; none when there is nothing new.
+G2=$(mktemp -d); ORIGIN2="$G2/origin.git"
+git init -q --bare -b main "$ORIGIN2"
+mkdir "$G2/seed" && cd "$G2/seed" && git init -qb main
+echo "[{\"ts\":\"$OLD\",\"tempC\":22.0,\"tempF\":71.6}]" > history.json; echo '{}' > data.json
+git add -A && git commit -qm init && git remote add origin "$ORIGIN2" && git push -q -u origin main
+cd "$G2" && git clone -q "$ORIGIN2" work && cd work
+echo "[{\"ts\":\"$B\",\"tempC\":13.9,\"tempF\":57.02},{\"ts\":\"$C\",\"tempC\":14,\"tempF\":57.2}]" > "$F/recent.json"; latest_json "$C" 1400 > "$F/latest.json"
+n0=$(git --git-dir="$ORIGIN2" rev-list --count main)
+LOOP_MINUTES=180 GIT_COMMIT=1 bash "$SCRIPT" > g1.log 2>&1
+chk "pushed: exit 0" "$?" "0"
+chk "one commit" "$(( $(git --git-dir="$ORIGIN2" rev-list --count main) - n0 ))" "1"
+chk "the Worker's readings reached origin" "$(git --git-dir="$ORIGIN2" cat-file -p main:history.json | jq length)" "3"
+LOOP_MINUTES=180 GIT_COMMIT=1 bash "$SCRIPT" > g2.log 2>&1
+chk "nothing new: exit 0" "$?" "0"
+chk "nothing new: no commit" "$(( $(git --git-dir="$ORIGIN2" rev-list --count main) - n0 ))" "1"
+chk "no unpushed commits" "$(git rev-list --count '@{u}..HEAD')" "0"
+cd "$V"
+chk "the workflow leaves the Worker on" "$(grep -c 'WORKER_ARCHIVE' "$(dirname "$SCRIPT")/../.github/workflows/fetch_temp.yml")" "0"
+unset WORKER_FAKE_DIR GOVEE_FAKE_RESPONSE
+rm -rf "$V" "$G2"
 
 rm -rf "$W" "$G"
 echo

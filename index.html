@@ -752,6 +752,18 @@ const ZONE_OVERRIDE = null;
 // custom domains require the zone to be hosted on Cloudflare.)
 const CAMERA_SNAPSHOT_URL = 'https://nhrc-camera.gurpinar-emre.workers.dev/latest.jpg';
 
+// The water sensor's readings, which the same Worker takes every 15 minutes (its
+// Cron Trigger): the latest, in data.json's shape, and the last 14 days. The
+// page reads these first. GitHub's scheduler, which took the readings before,
+// skipped or delayed so many runs that the reading was over 45 minutes old 41%
+// of the time between 5 and 11 AM (October 2026). data.json and history.json,
+// which GitHub still keeps as the archive, are read alongside: the newest
+// reading wins, so the page never shows less than it did before.
+const WATER_LATEST_URL = 'https://nhrc-camera.gurpinar-emre.workers.dev/water/latest.json';
+const WATER_RECENT_URL = 'https://nhrc-camera.gurpinar-emre.workers.dev/water/recent.json';
+// The Worker answers in well under a second; past this, the page goes on without it.
+const WORKER_TIMEOUT_MS = 8000;
+
 // How the page keeps the photo current. Every CAMERA_CHECK_SECONDS it asks the
 // Worker whether a newer photo exists - a HEAD request, a few hundred bytes -
 // and downloads the photo only when it has changed, so a new photo shows
@@ -970,10 +982,15 @@ const state = {
   fogResponse: null,  // Open-Meteo multi-model forecast, or null if it could not be fetched
   fogAlerts: null,    // NWS active alerts for the fog point, or null
   station: null,      // the airport's current reading (readStation), or null
-  lastRaw: null,      // the last data.json that rendered, kept for failed refreshes
+  lastRaw: null,      // the last reading that rendered (data.json's shape), kept for failed refreshes
   lastTempC: null,
-  dataRefreshFailed: false, // the latest data.json refresh failed; the last reading is still shown
-  historyFetchedAt: 0,      // when history.json was last requested (ms)
+  dataRefreshFailed: false, // the latest refresh got no reading; the last reading is still shown
+  waterSource: null,        // where the shown reading came from: 'worker' or 'repo'
+  historyFetchedAt: 0,      // when the history was last requested (ms)
+  archive: [],              // history.json, as the page keeps it
+  archiveFetchedAt: 0,      // when history.json was last downloaded (ms)
+  recent: [],               // the Worker's last 14 days, as the page keeps them
+  recentOk: false,          // the Worker's 14 days came with the last history request
   riverEstimateTs: null,    // time of the forecast point used when riverLevelIsEstimate
   inFlight: {},             // loader name -> true while its request is outstanding
 };
@@ -1141,15 +1158,80 @@ async function once(name, fn) {
   try { return await fn(); } finally { state.inFlight[name] = false; }
 }
 
+/** When a reading (data.json's shape) was taken, in ms; -1 when it does not say. */
+function readingTime(raw) {
+  const t = Date.parse(raw && raw.fetchedAt);
+  return Number.isFinite(t) ? t : -1;
+}
+
+/** The newest of the readings given that holds a temperature, or null. */
+function newestReading(...raws) {
+  let best = null;
+  for (const raw of raws) {
+    if (!raw || typeof raw !== 'object' || raw.error || extractTemp(raw) === null) continue;
+    if (!best || readingTime(raw) > readingTime(best)) best = raw;
+  }
+  return best;
+}
+
+/**
+ * history.json's entries - or the Worker's 14 days, which are the same - as
+ * the page keeps them: { ts (ms), tempF }, in time order. parseFloat, not the
+ * raw value: a reading stored as a string would otherwise survive the NaN
+ * check and break every .toFixed() downstream.
+ */
+function normalizeHistory(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(h => (h && typeof h === 'object') ? {
+    ts: new Date(h.ts).getTime(),
+    tempF: h.tempF != null ? parseFloat(h.tempF) : Math.round((parseFloat(h.tempC) * 9/5 + 32) * 10) / 10
+  } : null).filter(h => h && Number.isFinite(h.ts) && Number.isFinite(h.tempF)).sort((a,b) => a.ts - b.ts);
+}
+
+/**
+ * The archive and the Worker's 14 days together: one reading per moment, in
+ * time order. The Worker's fill what the archive does not have yet - the last
+ * hours, and any gap GitHub's scheduler left.
+ */
+function mergeHistory(archive, recent) {
+  if (!Array.isArray(recent) || !recent.length) return Array.isArray(archive) ? archive : [];
+  if (!Array.isArray(archive) || !archive.length) return recent;
+  const byTs = new Map();
+  for (const h of archive) byTs.set(h.ts, h);
+  for (const h of recent) byTs.set(h.ts, h);
+  return [...byTs.values()].sort((a, b) => a.ts - b.ts);
+}
+
+/** A JSON document, or null - never throws. */
+async function fetchJsonOrNull(url, ms = FETCH_TIMEOUT_MS) {
+  try {
+    const res = await fetchWithTimeout(url, ms);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (e) {
+    console.warn(`${url}:`, e && e.message ? e.message : e);
+    return null;
+  }
+}
+
+/** A reading that holds a temperature, from one source, or null. */
+async function fetchReading(url, ms) {
+  return newestReading(await fetchJsonOrNull(url, ms));
+}
+
 function loadData() {
   return once('data', async () => {
+    // The Worker's reading and the repository's, side by side: the newest one
+    // wins, and the page never goes back to a reading older than it shows.
+    const [fromWorker, fromRepo] = await Promise.all([
+      fetchReading(WATER_LATEST_URL, WORKER_TIMEOUT_MS),
+      fetchReading(`data.json?_=${Date.now()}`),
+    ]);
+    let raw = newestReading(fromWorker, fromRepo);
+    if (raw && state.lastRaw && readingTime(raw) < readingTime(state.lastRaw)) raw = state.lastRaw;
     try {
-      const res = await fetchWithTimeout(`data.json?_=${Date.now()}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const raw = await res.json();
-      if (!raw || raw.error) throw new Error('data.json reports no reading');
+      if (!raw) throw new Error('no reading from the Worker or data.json');
       const tempC = extractTemp(raw);
-      if (tempC === null) throw new Error('data.json has no temperature');
       // History BEFORE rendering, so the rowing rules have it - but only when
       // there is a reading it does not have yet. It used to be downloaded in
       // full every minute (hundreds of KB, growing every day) on every open
@@ -1161,9 +1243,11 @@ function loadData() {
       state.lastRaw = raw;
       state.lastTempC = tempC;
       state.dataRefreshFailed = false;
+      if (raw === fromWorker) state.waterSource = 'worker';
+      else if (raw === fromRepo) state.waterSource = 'repo';
       renderDashboard(tempC, raw);
     } catch (e) {
-      console.error('data.json:', e);
+      console.error('reading:', e);
       // Once the page has a reading, a failed refresh - one dropped request on
       // a phone at the river - must not replace the whole page with an error,
       // as it used to. Keep the last reading on screen and re-render it, so
@@ -1179,8 +1263,8 @@ function loadData() {
   });
 }
 
-// history.json gets the same timestamp as data.json's fetchedAt when a reading
-// is recorded, so "behind" is exact. While it lags (a failed write, a slow
+// The history's newest entry has the same timestamp as the reading's
+// fetchedAt, so "behind" is exact. While it lags (a failed write, a slow
 // deploy) it is retried, but no more often than this.
 const HISTORY_RETRY_MS = 2 * 60_000;
 function historyNeedsRefresh(raw) {
@@ -1191,19 +1275,29 @@ function historyNeedsRefresh(raw) {
   return state.allHistory[state.allHistory.length - 1].ts < fetchedTs - 1000;
 }
 
+// history.json (the archive, over 1 MB and growing) is downloaded again only
+// this often while the Worker's 14 days keep the newest readings coming - and
+// every time the history is behind when they do not.
+const ARCHIVE_REFRESH_MS = 30 * 60_000;
+
 async function loadHistory() {
   state.historyFetchedAt = Date.now();
   try {
-    const res = await fetchWithTimeout(`history.json?_=${Date.now()}`);
-    if (!res.ok) return;
-    const hist = await res.json();
-    if (!Array.isArray(hist) || hist.length === 0) return;
-    // parseFloat, not the raw value: a reading stored as a string would
-    // otherwise survive the NaN check and break every .toFixed() downstream.
-    state.allHistory = hist.map(h => ({
-      ts: new Date(h.ts).getTime(),
-      tempF: h.tempF != null ? parseFloat(h.tempF) : Math.round((parseFloat(h.tempC) * 9/5 + 32) * 10) / 10
-    })).filter(h => Number.isFinite(h.ts) && Number.isFinite(h.tempF)).sort((a,b) => a.ts - b.ts);
+    const needArchive = !state.archive.length || !state.recentOk || Date.now() - state.archiveFetchedAt > ARCHIVE_REFRESH_MS;
+    const [archive, recent] = await Promise.all([
+      needArchive ? fetchJsonOrNull(`history.json?_=${Date.now()}`) : Promise.resolve(null),
+      fetchJsonOrNull(WATER_RECENT_URL, WORKER_TIMEOUT_MS),
+    ]);
+    if (Array.isArray(archive) && archive.length) {
+      state.archive = normalizeHistory(archive);
+      state.archiveFetchedAt = Date.now();
+    }
+    const days = normalizeHistory(recent);
+    state.recentOk = days.length > 0;
+    if (state.recentOk) state.recent = days;
+    const merged = mergeHistory(state.archive, state.recent);
+    if (!merged.length) return;
+    state.allHistory = merged;
     updateInfoBar();
     updateFreshnessWarnings();
     updateStats();
@@ -1214,7 +1308,7 @@ async function loadHistory() {
     // Last: the chart depends on a library from a CDN, and nothing above may
     // wait on it (renderChartData also guards itself).
     updateChart();
-  } catch(e) { console.error('history.json:', e); }
+  } catch(e) { console.error('history:', e); }
 }
 
 // Labels for the chart's range buttons (data-d values), used by the stats.

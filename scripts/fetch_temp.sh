@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
-# Fetch the water temperature from the Govee OpenAPI and record it.
+# Archive the water readings into data.json and history.json.
+#
+# SINCE NOVEMBER 2026: THE CLOUDFLARE WORKER TAKES THE READINGS
+# ---------------------------------------------------------------
+# The camera's Cloudflare Worker reads the sensor every 15 minutes on its own
+# Cron Trigger, which runs on time, and keeps the last 14 days. The website and
+# the morning email read it first. This job now copies the Worker's readings
+# into history.json - filling any gap GitHub's scheduler left - and stops: one
+# short run per trigger, instead of a three-hour loop. Only when the Worker
+# cannot be reached, or its newest reading is over 45 minutes old, does this job
+# poll the sensor itself, as it always did (below). WORKER_ARCHIVE=0 skips the
+# Worker altogether.
 #
 # WHY THIS IS A LOOP AND NOT JUST A CRON JOB
 # ------------------------------------------
@@ -21,6 +32,10 @@
 #   SAMPLE_INTERVAL_SECONDS  gap between readings, default 900 (15 min)
 #   GIT_COMMIT             "1" to commit and push each reading, "0" to skip
 #   GOVEE_FAKE_RESPONSE    test hook: use this instead of calling the API
+#   WORKER_ARCHIVE         "1" (default) to copy the Worker's readings first; "0" to skip it
+#   WORKER_WATER_URL       where the Worker serves latest.json and recent.json
+#   WORKER_FRESH_SECONDS   the Worker counts as taking readings if its newest is this recent (2700)
+#   WORKER_FAKE_DIR        test hook: latest.json / recent.json from this folder instead of the Worker
 #
 # Exit codes: 0 if at least one reading was recorded, 1 if none were.
 
@@ -32,6 +47,11 @@ LOOP_MINUTES="${LOOP_MINUTES:-0}"
 SAMPLE_INTERVAL_SECONDS="${SAMPLE_INTERVAL_SECONDS:-900}"
 GIT_COMMIT="${GIT_COMMIT:-0}"
 GOVEE_FAKE_RESPONSE="${GOVEE_FAKE_RESPONSE:-}"
+
+WORKER_ARCHIVE="${WORKER_ARCHIVE:-1}"
+WORKER_WATER_URL="${WORKER_WATER_URL:-https://nhrc-camera.gurpinar-emre.workers.dev/water}"
+WORKER_FRESH_SECONDS="${WORKER_FRESH_SECONDS:-2700}"
+WORKER_FAKE_DIR="${WORKER_FAKE_DIR:-}"
 
 recorded=0
 
@@ -154,6 +174,76 @@ commit_reading() {
   log "could not push after 3 attempts"
   return 1
 }
+
+# One of the Worker's files (latest or recent), or nothing.
+fetch_worker() {
+  if [ -n "$WORKER_FAKE_DIR" ]; then
+    cat "$WORKER_FAKE_DIR/$1.json" 2>/dev/null
+    return
+  fi
+  curl -sf --max-time 20 "$WORKER_WATER_URL/$1.json"
+}
+
+# Copies the Worker's readings into history.json, and its latest reading into
+# data.json when it is newer. Returns 0 when the Worker is taking readings (its
+# newest is under WORKER_FRESH_SECONDS old), 1 when it cannot be reached or
+# gives nothing usable, 2 when its newest reading is too old. Only well-formed
+# readings in the plausible range are taken; a reading already in history.json
+# (the same moment) is kept as it is.
+archive_from_worker() {
+  local recent good newest newest_s now_s latest cur new tem
+  recent=$(fetch_worker recent) || { log "the Worker could not be reached"; return 1; }
+  good=$(printf '%s' "$recent" | jq -c --argjson lo "$MIN_PLAUSIBLE_F" --argjson hi "$MAX_PLAUSIBLE_F" '
+    if type == "array" then [ .[] | select(type == "object"
+      and (.ts | type) == "string" and (.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+      and (.tempF | type) == "number" and (.tempC | type) == "number"
+      and .tempF >= $lo and .tempF <= $hi) | {ts, tempC, tempF} ] else empty end' 2>/dev/null)
+  if [ -z "$good" ] || [ "$good" = "[]" ]; then
+    log "the Worker gave no usable readings"
+    return 1
+  fi
+  [ -f history.json ] || echo '[]' > history.json
+  jq --argjson add "$good" '(. + $add) | unique_by(.ts) | .[-525600:]' history.json > history_tmp.json \
+    && mv history_tmp.json history.json || { log "failed merging into history.json"; return 1; }
+  log "history.json entries: $(jq length history.json 2>/dev/null || echo 0) (with the Worker's $(printf '%s' "$good" | jq length))"
+
+  # data.json: the Worker's latest, if it holds a plausible temperature and is newer.
+  latest=$(fetch_worker latest) || latest=""
+  if [ -n "$latest" ]; then
+    tem=$(printf '%s' "$latest" | jq -r '.data.devices[0].deviceExt.lastDeviceData | fromjson | .tem' 2>/dev/null)
+    new=$(printf '%s' "$latest" | jq -r '.fetchedAt // empty' 2>/dev/null)
+    cur=$(jq -r '.fetchedAt // empty' data.json 2>/dev/null)
+    if echo "$tem" | grep -Eq '^-?[0-9]+$' \
+      && awk -v t="$tem" -v lo="$MIN_PLAUSIBLE_F" -v hi="$MAX_PLAUSIBLE_F" 'BEGIN { f = t / 100 * 9 / 5 + 32; exit !(f >= lo && f <= hi) }' \
+      && echo "$new" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+      && [[ "$new" > "$cur" ]]; then
+      printf '%s' "$latest" | jq '.' > data.json || log "failed writing data.json"
+    fi
+  fi
+
+  newest=$(printf '%s' "$good" | jq -r 'map(.ts) | max')
+  newest_s=$(date -u -d "$newest" +%s 2>/dev/null || echo 0)
+  now_s=$(date -u +%s)
+  if [ $(( now_s - newest_s )) -gt "$WORKER_FRESH_SECONDS" ]; then
+    log "the Worker's newest reading ($newest) is over $((WORKER_FRESH_SECONDS / 60)) minutes old"
+    return 2
+  fi
+  log "the Worker is taking readings (newest $newest)"
+  return 0
+}
+
+if [ "$WORKER_ARCHIVE" = "1" ]; then
+  archive_from_worker
+  worker_rc=$?
+  if [ "$worker_rc" -ne 1 ]; then
+    commit_reading || { log "ERROR: the Worker's readings could not be pushed"; exit 1; }
+  fi
+  if [ "$worker_rc" -eq 0 ]; then
+    log "done - the Worker's readings archived; the sensor is not polled from here"
+    exit 0
+  fi
+  log "polling the sensor directly, as before the Worker"
+fi
 
 END_TS=$(( $(date +%s) + LOOP_MINUTES * 60 ))
 

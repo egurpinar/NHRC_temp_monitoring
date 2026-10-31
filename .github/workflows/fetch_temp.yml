@@ -1,6 +1,15 @@
 name: Fetch Govee Temperature
 
-# WHY THE JOB LOOPS INSTEAD OF RELYING ON THE SCHEDULE
+# SINCE NOVEMBER 2026: THE ARCHIVER
+# ---------------------------------
+# The camera's Cloudflare Worker now reads the sensor every 15 minutes on a
+# Cron Trigger, which runs on time, and the website and the email read it
+# first. This job copies the Worker's readings into history.json and
+# data.json - backfilling any gap - and ends in a minute. Only when the Worker
+# cannot be reached, or has had no reading for 45 minutes, does it poll the
+# sensor itself, in the loop described below. See scripts/fetch_temp.sh.
+#
+# WHY THE JOB LOOPS INSTEAD OF RELYING ON THE SCHEDULE (the fallback)
 # ----------------------------------------------------
 # GitHub Actions schedules are best effort, and on this repository they are
 # badly unreliable: a '*/15' cron produced 12-44 runs a day against 96

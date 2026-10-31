@@ -99,6 +99,51 @@ Routes** and change the one constant in `index.html`.
 Check it: `curl https://nhrc-camera.<account>.workers.dev/status` → JSON saying
 no snapshot has been uploaded yet.
 
+### The water sensor, every 15 minutes
+
+The same Worker reads the club's Govee water sensor every 15 minutes and keeps
+the readings - the latest, and the last 14 days. The website and the morning
+email read them from here first. GitHub's scheduler used to take the readings
+and skipped or delayed so many runs that, in late October 2026, the reading on
+the website was more than 45 minutes old 41% of the time between 5 and 11 AM.
+GitHub now only archives the readings into `history.json` (and polls the
+sensor itself only when the Worker cannot be reached or has had no reading for
+45 minutes): see `scripts/fetch_temp.sh`.
+
+To turn it on, after pasting the new `cloudflare_worker.js`:
+
+1. **Settings → Variables and Secrets** → add `GOVEE_API_KEY`, type **Secret**:
+   the same Govee key the repository's GitHub secret of that name holds.
+   GitHub never shows a secret again; if the key is not to hand, Govee emails
+   one when it is requested in the Govee Home app (Profile → Settings → Apply
+   for API Key) - a new key may replace the old one, so then put it in the
+   GitHub secret too.
+   (`GOVEE_DEVICE` and `GOVEE_SKU` are optional, for a replacement sensor; they
+   default to the one in the water since August 2026.)
+2. **Settings → Triggers → Cron Triggers → Add**: `*/15 * * * *`.
+
+Cloudflare says a new Cron Trigger can take up to 15 minutes to reach its
+network; from then on, within 15 minutes, these show a reading:
+
+```
+https://nhrc-camera.<account>.workers.dev/water/latest.json
+https://nhrc-camera.<account>.workers.dev/status
+```
+
+`/status` has a `water` part: when the last reading came (`lastReadingAt`,
+`ageSeconds`), whether the last try worked (`lastTryOk`) and, if not, why
+(`lastError` - "GOVEE_API_KEY is not set on this Worker", "Govee answered HTTP
+429", "no temperature in Govee's answer: the sensor may be out of reach"...).
+The key never appears in anything the Worker serves.
+
+Each run needs about 2 ms of CPU with the full 14 days stored (measured in
+Node, which runs the same JavaScript engine), within the free plan's 10 ms per
+Cron Trigger, and writes three small files to R2: about 9,000 writes a month.
+
+Until the trigger runs, or if it ever stops, the website and the email simply
+use `data.json` and `history.json` from the repository, as before: the newest
+reading wins, so they never show less than they used to.
+
 ## 2. Node on the Pi Zero W
 
 Pi Zero W is **ARMv6**, which official Node builds dropped years ago. Use the
@@ -1296,11 +1341,12 @@ TEST_SHARD=1/3 node camera/test_snapshot_service.js
 TEST_ONLY='battery' node camera/test_snapshot_service.js
 ```
 
-288 tests covering config validation, the timezone-aware windows, the capture
+301 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including
 both daylight-saving days and day-long outages), camera selection, atomic token
 persistence and file permissions, upload auth and retry behaviour, the Worker
-itself (run in Node against an in-memory R2), and the real service process end
+itself (run in Node against an in-memory R2, its water-sensor readings with a
+stand-in for Govee), and the real service process end
 to end, with a stand-in Ring library, talking over HTTP to the real Worker
 code. The two-Pi tests cover the check-ins and the standby's decision on a fake
 clock (takeover at 15 minutes, hand-back, Worker outages, a Ring sign-in that
