@@ -184,6 +184,20 @@ size, so still crisp on any screen) at 107 KB, which is visually identical and
 94% smaller. Re-exporting from Inkscape will likely reinflate it — resize before
 committing.
 
+**The website header** shows `nhrc-logo-header.png` (240x200, 11 KB, three
+times its shown size), not the 107 KB SVG; the page no longer lists the SVG as
+an icon either, since a browser that prefers SVG icons downloaded all of it for
+a 16-pixel tab. To make it again from the SVG (needs Python with Pillow):
+
+```bash
+python3 -c "
+import re, base64, io; from PIL import Image
+s = open('NHRC_logo.svg').read()
+im = Image.open(io.BytesIO(base64.b64decode(re.sub(r'\s', '', re.search(r'base64,([^\"]+)\"', s).group(1))))).convert('RGBA').resize((240, 200), Image.LANCZOS)
+im = Image.alpha_composite(Image.new('RGBA', im.size, (255, 255, 255, 255)), im).convert('RGB')
+im.quantize(colors=128, method=Image.Quantize.MEDIANCUT).save('nhrc-logo-header.png', optimize=True)"
+```
+
 **Regenerating the email logo after changing the SVG** (needs ImageMagick — `brew install imagemagick`):
 
 ```bash

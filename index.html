@@ -8,7 +8,8 @@
 <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png"/>
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png"/>
 <link rel="shortcut icon" href="favicon.ico"/>
-<link rel="icon" type="image/svg+xml" href="NHRC_logo.svg"/>
+<!-- No SVG icon: NHRC_logo.svg is a 107 KB picture in an SVG wrapper, and a
+     browser that prefers SVG icons downloaded all of it for a 16-pixel tab. -->
 <meta name="color-scheme" content="dark light"/>
 <meta name="theme-color" content="#0d1f3c"/>
 <script id="theme-init">
@@ -388,7 +389,9 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 <div id="app">
 
   <div class="header">
-    <div class="header-logo-wrap"><img src="NHRC_logo.svg" alt="NHRC Logo"/></div>
+    <!-- 11 KB, three times the size it is shown at; NHRC_logo.svg, its source,
+         is 107 KB (scripts/README.md says how to make it again). -->
+    <div class="header-logo-wrap"><img src="nhrc-logo-header.png" width="240" height="200" alt="NHRC Logo"/></div>
     <div class="header-text">
       <h1>New Haven Rowing Club</h1>
       <div style="font-size:0.75rem;color:var(--muted);margin-top:4px;letter-spacing:.04em;text-transform:uppercase;">Lake Housatonic Rowing Conditions &amp; Safety</div>

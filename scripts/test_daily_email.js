@@ -4731,6 +4731,23 @@ test('email: a broken NWS answer never stops the email', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+section('17. Fast and dependable on a phone');
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('phone: the header logo is an 11 KB picture, three times its shown size - not the 107 KB SVG, as a picture or as an icon', () => {
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8');
+  const markup = html.replace(/<!--[\s\S]*?-->/g, '');
+  assert.ok(/<div class="header-logo-wrap"><img src="nhrc-logo-header\.png" width="240" height="200" alt="NHRC Logo"\/><\/div>/.test(markup));
+  assert.ok(!/(src|href)="NHRC_logo\.svg"/.test(markup), 'the SVG is not loaded by the page');
+  const png = fsT.readFileSync(path.join(__dirname, '..', 'nhrc-logo-header.png'));
+  assert.strictEqual(png.slice(1, 4).toString(), 'PNG');
+  assert.deepStrictEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [240, 200], 'width, height');
+  assert.ok(png.length <= 16 * 1024, `${png.length} bytes`);
+  // Shown at most 96px x 78% across - 75 CSS pixels - so 240 covers a 3x screen.
+  assert.ok(/\.header-logo-wrap\{width:clamp\(72px,12vw,96px\)/.test(html) && /\.header-logo-wrap img\{width:78%;height:78%;object-fit:contain;\}/.test(html));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Report only once every async test has actually finished.
 asyncChain.then(() => {
   console.log(`\n${'='.repeat(60)}`);
