@@ -132,8 +132,17 @@ https://nhrc-camera.<account>.workers.dev/status
 
 `/status` has a `water` part: when the last reading came (`lastReadingAt`,
 `ageSeconds`), whether the last try worked (`lastTryOk`) and, if not, why
-(`lastError` - "GOVEE_API_KEY is not set on this Worker", "Govee answered HTTP
-429", "no temperature in Govee's answer: the sensor may be out of reach"...).
+(`lastError`):
+
+| `lastError` | What it means |
+|---|---|
+| GOVEE_API_KEY is not set on this Worker | Step 1 above |
+| Govee answered HTTP 401 / 429 / 5xx | The key was refused, too many requests, or Govee's servers are failing |
+| Govee answered code 400: (Govee's words) | Govee refused the request itself - a wrong device or model, for example |
+| Govee says the sensor is offline: no temperature from it | Govee has not heard from the sensor - check the Govee Home app and the hub at the boathouse |
+| no temperature in Govee's answer: the sensor may be out of reach | Govee has no current value from the sensor - the same check |
+| Govee did not answer within 20 s / Govee could not be reached | A network problem; the next try is 15 minutes later |
+
 The key never appears in anything the Worker serves.
 
 Each run needs about 2 ms of CPU with the full 14 days stored (measured in

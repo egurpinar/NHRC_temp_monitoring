@@ -358,11 +358,22 @@ const cut2 = (v) => Math.trunc(v * 100 + (v >= 0 ? 1e-6 : -1e-6)) / 100;
  * gives no reading either - its value would be an old one, shown as new.
  */
 function goveeReading(body) {
+  // Govee's own errors come back as HTTP 200, with a code and words of their own.
+  if (body && body.code !== undefined && body.code !== null && Number(body.code) !== 200) {
+    const said = [body.msg, body.message].find((m) => typeof m === 'string' && m.trim());
+    return { error: `Govee answered code ${String(body.code).slice(0, 8)}${said ? `: ${said.trim().slice(0, 80)}` : ''}` };
+  }
   const caps = body && body.payload && Array.isArray(body.payload.capabilities) ? body.payload.capabilities : [];
   const cap = (name) => caps.find((c) => c && c.instance === name);
+  const online = cap('online');
+  const offline = !!(online && online.state && online.state.value === false);
   const t = cap('sensorTemperature');
   const raw = t && t.state ? t.state.value : undefined;
-  if (raw === undefined || raw === null || raw === '') return { error: 'no temperature in Govee\'s answer: the sensor may be out of reach' };
+  if (raw === undefined || raw === null || raw === '') {
+    return { error: offline ? 'Govee says the sensor is offline: no temperature from it'
+      : t ? 'no temperature in Govee\'s answer: the sensor may be out of reach'
+      : 'Govee\'s answer has no temperature field' };
+  }
   const tempF = typeof raw === 'number' ? raw : /^-?\d+(\.\d+)?$/.test(String(raw)) ? Number(raw) : NaN;
   if (!Number.isFinite(tempF)) return { error: 'the temperature in Govee\'s answer is not a number' };
   if (tempF < PLAUSIBLE_F[0] || tempF > PLAUSIBLE_F[1]) return { error: `implausible water temperature: ${tempF}°F` };

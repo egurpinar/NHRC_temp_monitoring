@@ -1527,9 +1527,15 @@ test('Worker water: readings gather, in time order, for 14 days; the same moment
 
 test('Worker water: an answer that holds no reading changes nothing, and /status says why', async () => {
   const cases = [
-    [goveeAnswer(''), /no temperature in Govee's answer/],
-    [{ code: 200, payload: { capabilities: [] } }, /no temperature/],
-    [{ code: 400, message: 'bad request' }, /no temperature/],
+    [goveeAnswer(''), /^no temperature in Govee's answer: the sensor may be out of reach$/],
+    [goveeAnswer('', false), /^Govee says the sensor is offline: no temperature from it$/],
+    [goveeAnswer(null, true), /^no temperature in Govee's answer: the sensor may be out of reach$/],
+    [{ code: 200, payload: { capabilities: [] } }, /^Govee's answer has no temperature field$/],
+    [{ code: 200, msg: 'success' }, /^Govee's answer has no temperature field$/],
+    // Govee's own errors come back as HTTP 200: its code and words are kept, briefly.
+    [{ code: 400, message: 'bad request' }, /^Govee answered code 400: bad request$/],
+    [{ code: 429, msg: 'Too many requests '.repeat(20) }, /^Govee answered code 429: Too many requests .{62}$/],   // 80 characters of its words
+    [{ code: '401' }, /^Govee answered code 401$/],
     [goveeAnswer('abc'), /not a number/],
     [goveeAnswer('7e1'), /not a number/],
     [goveeAnswer(150), /implausible water temperature: 150°F/],
