@@ -182,8 +182,11 @@ function loadSiteLogic(indexHtmlPath = INDEX_HTML) {
     'boatStatusLabel', 'ALLOWED_NOTE_HTML',
     // Fog outlook: same models, thresholds, wording and rule as the website.
     'FOG_POINT', 'FOG_MODELS', 'FOG_RULES', 'FOG_LAUNCH_RULE',
-    'fogOutlookUrl', 'fogAlertsUrl', 'fogTarget', 'fogAdvisory',
+    'fogOutlookUrl', 'fogTarget', 'fogAdvisory',
     'assessFogRisk', 'fogText',
+    // NWS alerts and thunderstorms: the same alerts, forecast, times and words as the website.
+    'nwsAlertsUrl', 'nwsPointsUrl', 'nwsHourlyUrlFrom', 'nwsPageUrl', 'nwsAlertList', 'nwsHours',
+    'thunderOutlook', 'nwsWhen', 'nwsWhat', 'nwsOutlook', 'THUNDER_HOURS', 'THUNDER_LIKELY_POP',
   ];
   const exportSrc = EXPORTS
     .map(n => `try { __out.${n} = ${n}; } catch (e) {}`)
@@ -453,17 +456,36 @@ const NWS_HEADERS = {
  * Fetched independently, so an outage of one never hides the other, and
  * assessed in computeDigest with the website's own logic. Failures come back
  * as null, which the assessment reports as "unavailable" - never as "low".
+ * The alerts are the dock's - all of them, as the website reads them: the
+ * fog outlook takes the fog advisories, the NWS box the rest.
  */
 async function loadFogInputs(logic) {
   const { lat, lon } = logic.FOG_POINT;
   const [fc, al] = await Promise.allSettled([
     fetchJson(logic.fogOutlookUrl(lat, lon)),
-    fetchJson(logic.fogAlertsUrl(lat, lon), 20000, NWS_HEADERS),
+    fetchJson(logic.nwsAlertsUrl(), 20000, NWS_HEADERS),
   ]);
+  const alerts = al.status === 'fulfilled' && al.value && Array.isArray(al.value.features) ? al.value : null;
   return {
     response: fc.status === 'fulfilled' ? fc.value : null,
-    alerts:   al.status === 'fulfilled' ? al.value : null,
+    alerts,
   };
+}
+
+/**
+ * The NWS hourly forecast for the dock, for the thunderstorms in the next 24
+ * hours - or null when it could not be loaded, which the email says. /points
+ * gives the forecast's address, as on the website. Never throws.
+ */
+async function loadNwsForecast(logic) {
+  try {
+    const url = logic.nwsHourlyUrlFrom(await fetchJson(logic.nwsPointsUrl(), 20000, NWS_HEADERS));
+    if (!url) return null;
+    const forecast = await fetchJson(url, 20000, NWS_HEADERS);
+    return logic.nwsHours(forecast).length ? forecast : null;
+  } catch (e) {
+    return null;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -485,7 +507,7 @@ const ZONE_COLOR = {
   normal:    { bg: 'rgba(46,125,79,0.15)',  border: 'rgba(46,125,79,0.4)',  text: '#5cc98a' },
 };
 
-function computeDigest(logic, { raw, history }, river, weather, now = new Date(), fogInputs = null) {
+function computeDigest(logic, { raw, history }, river, weather, now = new Date(), fogInputs = null, nwsForecast = undefined) {
   const tempC = logic.extractTemp(raw);
   if (tempC === null || tempC === undefined) {
     throw new Error('Could not extract water temperature from data.json');
@@ -554,6 +576,19 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
     rule: logic.FOG_LAUNCH_RULE,
   };
 
+  // NWS alerts other than fog, and thunderstorms in the NWS hourly forecast
+  // for the next 24 hours, with the website's own logic and words. Guarded
+  // like the fog: nothing in the NWS's data may stop the email. Inputs not
+  // asked for (undefined) are left out; ones that failed (null) are said.
+  let nws;
+  try {
+    nws = logic.nwsOutlook(fogInputs ? fogInputs.alerts : undefined, nwsForecast, now.getTime());
+  } catch (e) {
+    console.error('NWS alerts failed; reporting them as unavailable:', e.message);
+    nws = logic.nwsOutlook(null, null, now.getTime());
+  }
+  nws = Object.assign({}, nws, { pageUrl: logic.nwsPageUrl() });
+
   return {
     dateLabel: now.toLocaleDateString('en-US', {
       timeZone: 'America/New_York', weekday: 'long', year: 'numeric',
@@ -585,6 +620,7 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
     sensorStale,
     sensorAgeMs,
     fog,
+    nws,
     allowedNoteHtml: logic.ALLOWED_NOTE_HTML,
   };
 }
@@ -767,6 +803,28 @@ function renderEmailHtml(d) {
        <div style="font-size:13px;line-height:1.5;font-weight:bold;color:${C.ink};background-color:${C.card};padding-top:4px;font-family:Arial,Helvetica,sans-serif;">Club rule: ${esc(fog.rule)}</div>`
     : '';
 
+  // ── NWS alerts and thunderstorms ───────────────────────────────────────────
+  // Any: a box under the fog's, red when one is a warning. None, or not
+  // loaded: one line in the weather section, said every day, so a missing
+  // alert is never mistaken for a quiet day. Headline and detail come from
+  // index.html's nwsOutlook(), which escapes everything from the NWS feed.
+  const nws = d.nws || null;
+  const nwsBoxStyle = nws && nws.level === 'danger' ? STATUS_STYLE.no : STATUS_STYLE.caution;
+  const nwsRow = nws && nws.items && nws.items.length
+    ? `<tr><td style="padding:0 ${PAD}px 12px ${PAD}px;background-color:${C.card};">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+          <tr><td style="background-color:${nwsBoxStyle.bg};border:1px solid ${nwsBoxStyle.border};border-radius:8px;padding:12px 14px;font-family:Arial,Helvetica,sans-serif;">
+            ${nws.items.map((it, i) => `<div style="font-size:15px;font-weight:bold;color:${nwsBoxStyle.text};background-color:${nwsBoxStyle.bg};padding-top:${i ? 10 : 0}px;">${it.headline}</div>${
+              it.detail ? `<div style="font-size:13px;line-height:1.5;color:${nwsBoxStyle.text};background-color:${nwsBoxStyle.bg};padding-top:4px;">${it.detail}</div>` : ''}`).join('')}
+            <div style="font-size:12px;line-height:1.5;color:${nwsBoxStyle.text};background-color:${nwsBoxStyle.bg};padding-top:8px;">From the National Weather Service for the dock &middot; <a href="${esc(nws.pageUrl)}" style="color:${nwsBoxStyle.text};text-decoration:underline;">full text at weather.gov</a></div>
+          </td></tr>
+        </table>
+      </td></tr>`
+    : '';
+  const nwsQuiet = nws && nws.notes && nws.notes.length
+    ? `<div style="font-size:13px;line-height:1.5;color:${C.inkSoft};background-color:${C.card};padding-top:10px;font-family:Arial,Helvetica,sans-serif;">${nws.notes.map(esc).join(' ')}</div>`
+    : '';
+
   // ── Key numbers ────────────────────────────────────────────────────────────
   const riverStr = d.river.level !== null ? d.river.level.toFixed(1) + ' ft' : '--';
   const airStr = d.weather.available ? d.weather.tempF + '°F' : '--';
@@ -851,6 +909,7 @@ function renderEmailHtml(d) {
         </table>
       </td></tr>
 
+${nwsRow}
 ${fogRow}
 ${allowedNoteRow}
 ${warningHtml}
@@ -874,6 +933,7 @@ ${warningHtml}
       <tr><td style="padding:8px ${PAD}px 16px ${PAD}px;background-color:${C.card};">
         ${sectionLabel('Weather — Oxford, CT')}
         ${weatherBlock}
+        ${nwsQuiet}
         ${fogQuiet}
       </td></tr>
 
@@ -951,6 +1011,15 @@ function renderSubject(d, now = new Date()) {
   // only the subject before deciding whether to drive in. "Possible" stays in
   // the body: it fires too often to earn the subject line.
   const fogPrefix = d.fog && d.fog.level === 'likely' ? 'FOG RISK - ' : '';
+  // An NWS warning leads it too, by its own name, and so do thunderstorms the
+  // NWS forecast as likely (a 55% chance or more) in the next 24 hours. A
+  // watch, an advisory or a "slight chance" stays in the body: they are
+  // common enough to drown the subject line.
+  // The name comes from the NWS feed: letters, digits and spaces only, kept short.
+  const warningName = d.nws && d.nws.warning
+    ? String(d.nws.warning).replace(/[^A-Za-z0-9 /-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 60) : '';
+  const nwsPrefix = warningName ? `NWS ${warningName} - `
+    : d.nws && d.nws.thunderLikely ? 'THUNDERSTORMS LIKELY - ' : '';
 
   const dateShort = now.toLocaleDateString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric',
@@ -968,7 +1037,7 @@ function renderSubject(d, now = new Date()) {
   const waterPart = `${d.tempF.toFixed(1)}F${d.sensorStale ? ' (old reading)' : ''}`;
 
   return toAsciiSubject(
-    `NHRC ${dateShort} - ${fogPrefix}${headline} - ${waterPart} - ${riverPart}`);
+    `NHRC ${dateShort} - ${nwsPrefix}${fogPrefix}${headline} - ${waterPart} - ${riverPart}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1123,10 +1192,10 @@ async function checkSubscriberHeadroom() {
 async function build() {
   const logic = loadSiteLogic();
   const local = await loadWater(logic);
-  const [river, weather, fogInputs] = await Promise.all([
-    loadRiver(logic), loadWeather(logic), loadFogInputs(logic),
+  const [river, weather, fogInputs, nwsForecast] = await Promise.all([
+    loadRiver(logic), loadWeather(logic), loadFogInputs(logic), loadNwsForecast(logic),
   ]);
-  const digest = computeDigest(logic, local, river, weather, new Date(), fogInputs);
+  const digest = computeDigest(logic, local, river, weather, new Date(), fogInputs, nwsForecast);
   return { digest, html: renderEmailHtml(digest), subject: renderSubject(digest) };
 }
 
@@ -1189,7 +1258,7 @@ async function main() {
 }
 
 module.exports = {
-  loadSiteLogic, loadLocalData, loadWater, loadRiver, loadWeather, loadFogInputs, NWS_HEADERS,
+  loadSiteLogic, loadLocalData, loadWater, loadRiver, loadWeather, loadFogInputs, loadNwsForecast, NWS_HEADERS,
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
   parseGaugeSeries, checkSubscriberHeadroom, isInSeason, dailySlug,
   alreadySentToday, isPrimarySendHour,

@@ -212,6 +212,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .fog-title{font-size:.82rem;font-weight:600;color:var(--white);}
 .fog-detail{font-size:.75rem;color:var(--muted);line-height:1.55;}
 .fog-rule{font-size:.75rem;color:var(--white);font-weight:600;margin-top:6px;}
+/* NWS alerts and thunderstorms: one block per item, in the banner and the weather card. */
+.nws-item + .nws-item{margin-top:8px;}
+.nws-src{margin-top:8px;font-size:.72rem;}
+.nws-src a{color:inherit;text-decoration:underline;}
 .tiers-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;}
 @media(max-width:560px){.tiers-grid{grid-template-columns:1fr;}}
 .tier-card{background:var(--navy3);border-radius:10px;padding:12px 14px;border:1px solid rgba(var(--ink),.06);}
@@ -434,6 +438,15 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
          sits at the bottom of the page (#site-disclaimer). The banners left up
          here appear only when there is something to warn about. -->
 
+    <!-- The National Weather Service: its alerts for the dock other than fog
+         (those are in the fog banner below), and thunderstorms in its hourly
+         forecast for the next 24 hours. Shown only when there are some; the
+         NWS's own words and times (renderNwsOutlook). -->
+    <div id="warn-nws" class="warn-banner level-warn" style="display:none;">
+      <span id="warn-nws-dot" style="width:10px;height:10px;border-radius:50%;background:var(--warn-dot);flex-shrink:0;margin-top:3px;display:inline-block;"></span>
+      <div id="warn-nws-body"></div>
+    </div>
+
     <!-- Fog: shown only when fog is likely at dawn or an NWS fog advisory is in
          effect. Awareness only - fog never changes which boats are allowed. -->
     <div id="warn-fog" class="warn-banner level-warn" style="display:none;">
@@ -480,6 +493,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       <div class="summary-tile">
         <div class="section-label">Weather</div>
         <div id="sum-weather"><div class="summary-line">Loading…</div></div>
+        <div id="sum-nws"></div>
         <div id="sum-fog" class="summary-fog"></div>
       </div>
       <div class="summary-tile">
@@ -526,7 +540,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         <div style="font-size:.8rem;color:var(--muted);padding:12px 0;">Loading weather data...</div>
       </div>
       <!-- Separate from weather-content, which loadWeather() replaces wholesale
-           every ten minutes and would otherwise wipe this. -->
+           every ten minutes and would otherwise wipe these. -->
+      <div id="nws-outlook" class="fog-outlook"></div>
       <div id="fog-outlook" class="fog-outlook"></div>
     </div>
 
@@ -980,7 +995,13 @@ const state = {
   riverRange: 3,      // selected zoom window in days for the river chart (default: 3 days)
   fogLoaded: false,   // true once loadFogOutlook() has finished, even if both sources failed
   fogResponse: null,  // Open-Meteo multi-model forecast, or null if it could not be fetched
-  fogAlerts: null,    // NWS active alerts for the fog point, or null
+  nwsAlerts: null,    // NWS active alerts for the dock - all of them, fog too - or null
+  nwsAlertsAt: 0,     // when they last loaded (ms)
+  nwsAlertsLoaded: false,   // true once loadNwsAlerts() has finished, even if it failed
+  nwsForecast: null,        // the NWS hourly forecast for the dock, or null
+  nwsForecastAt: 0,
+  nwsForecastLoaded: false,
+  nwsHourlyUrl: null,       // that forecast's address, from /points, kept for the visit
   station: null,      // the airport's current reading (readStation), or null
   lastRaw: null,      // the last reading that rendered (data.json's shape), kept for failed refreshes
   lastTempC: null,
@@ -1107,6 +1128,10 @@ window.addEventListener('DOMContentLoaded', () => {
   // morning" to "tomorrow morning" at 10 AM needs no refetch - the response
   // covers two days, and loadData re-renders the outlook every minute.)
   setInterval(loadFogOutlook, 1_800_000);
+  // NWS alerts every 5 minutes: a storm warning can come with half an hour's
+  // notice. Its hourly forecast changes about once an hour.
+  setInterval(loadNwsAlerts, 300_000);
+  setInterval(loadNwsForecast, 1_800_000);
   setInterval(loadRiverData, 900_000); // refresh river every 15 min
   setInterval(checkCameraForNewPhoto, CAMERA_CHECK_SECONDS * 1000);
 
@@ -1131,7 +1156,8 @@ function refreshAll() {
   loadWeather();
   loadRiverData();
   loadCameraSnapshot();
-  loadFogOutlook();
+  loadFogOutlook();     // and, through it, the NWS alerts
+  loadNwsForecast();
 }
 
 /**
@@ -1471,6 +1497,9 @@ function renderDashboard(tempC, raw) {
   // before updateFreshnessWarnings(), where any fog failure would have
   // silently skipped the stale-data and offline-sensor warnings.
   renderFogOutlook();
+  // Every minute, with the reading: an alert past its end time goes, and its
+  // "until" stays right as the day goes on. Never throws either.
+  renderNwsOutlook();
 }
 
 /* ── RANGE BUTTONS ── */
@@ -2794,9 +2823,7 @@ function fogOutlookUrl(lat, lon) {
     `&hourly=temperature_2m,dew_point_2m,wind_speed_10m&models=${FOG_MODELS.join(',')}` +
     `&forecast_days=2&timezone=America%2FNew_York&temperature_unit=fahrenheit&wind_speed_unit=mph`;
 }
-function fogAlertsUrl(lat, lon) {
-  return `https://api.weather.gov/alerts/active?point=${lat},${lon}`;
-}
+// The NWS alerts the outlook reads are the dock's (nwsAlertsUrl, below).
 
 /**
  * Which dawn the outlook is about: this morning until 10 AM boathouse time,
@@ -2836,12 +2863,12 @@ function fogAdvisory(alerts) {
     if (!p || typeof p.event !== 'string' || !/fog/i.test(p.event)) continue;
     // The live feed carries test and exercise messages, and cancellations
     // linger briefly: none of them mean fog.
-    if (p.status !== 'Actual' || p.messageType === 'Cancel') continue;
-    // Over by its own end time. The active feed can keep an advisory listed
-    // until it "expires", after it "ends" - which would print "in effect until
-    // 9:00 AM" at half past nine.
-    const end = Date.parse(p.ends || p.expires);
-    if (Number.isFinite(end) && end < Date.now()) continue;
+    if (p.status !== 'Actual') continue;
+    // Over: cancelled, ended early ("The threat for dense fog has ended"), or
+    // past its own end time - the active feed can keep an advisory listed
+    // until it "expires", after it "ends", which would print "in effect until
+    // 9:00 AM" at half past nine. See nwsAlertOver.
+    if (nwsAlertOver(p, Date.now())) continue;
     return { event: p.event, until: p.ends || p.expires || null };
   }
   return null;
@@ -2984,10 +3011,12 @@ function loadFogOutlook() {
     const { lat, lon } = FOG_POINT;
     const getJson = (url) => fetchWithTimeout(url).then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
     // Independent sources: an NWS outage must not hide the model outlook, or
-    // the other way round.
-    const [fc, al] = await Promise.allSettled([
+    // the other way round. The NWS alerts are loaded by loadNwsAlerts, which
+    // the alerts block shares and refreshes every 5 minutes; it renders the
+    // outlook again when they come.
+    const [fc] = await Promise.allSettled([
       getJson(fogOutlookUrl(lat, lon)),
-      getJson(fogAlertsUrl(lat, lon)),
+      loadNwsAlerts(),
     ]);
     // A failed refresh keeps the previous answer for a while rather than
     // replacing a good outlook with "unavailable" over one dropped request.
@@ -2998,8 +3027,6 @@ function loadFogOutlook() {
     const kept = (value, at) => (value && at && now - at < FOG_KEEP_MS) ? value : null;
     if (fc.status === 'fulfilled') { state.fogResponse = fc.value; state.fogResponseAt = now; }
     else state.fogResponse = kept(state.fogResponse, state.fogResponseAt);
-    if (al.status === 'fulfilled') { state.fogAlerts = al.value; state.fogAlertsAt = now; }
-    else state.fogAlerts = kept(state.fogAlerts, state.fogAlertsAt);
     state.fogLoaded   = true;
     renderFogOutlook();
   });
@@ -3017,7 +3044,7 @@ function renderFogOutlook() {
   // stated, not silent - and cannot reach the code that called this.
   let a, t;
   try {
-    a = assessFogRisk(state.fogResponse, target.date, water, state.fogAlerts);
+    a = assessFogRisk(state.fogResponse, target.date, water, state.nwsAlerts);
     t = fogText(a, target.label);
   } catch (e) {
     console.warn('fog outlook failed:', e);
@@ -3046,6 +3073,331 @@ function renderFogOutlook() {
     } else {
       banner.style.display = 'none';
     }
+  }
+}
+
+/* ── NWS ALERTS AND THUNDERSTORMS ─────────────────────────────────────────────
+ * Every alert the National Weather Service has in effect for the dock - wind,
+ * storms, floods, heat, cold, air quality - and the thunderstorms in its
+ * hourly forecast for the next 24 hours. Its own words and times: the page
+ * adds no verdict, and never calls anything safe. Fog alerts are left to the
+ * fog outlook above, which already shows them.
+ *
+ * The alerts are the dock's. Until November 2026 they were fetched for the
+ * fog point in Oxford; both points are in the same NWS forecast zone (CTZ006)
+ * and county (CTC009), so the fog advisories are the same, and storm warnings,
+ * which the NWS draws round the storm, are now asked for at the dock itself.
+ *
+ * Thunder comes from the NWS hourly forecast, written by its forecasters, not
+ * from Open-Meteo's weather codes: on 31 Oct 2026, at six US places where
+ * the NWS forecast thunderstorms in the next three days (Miami for 72 hours of
+ * them), Open-Meteo showed thunder for one hour in total.
+ */
+const NWS_ALERTS_KEEP_MS = 3600000;        // a failed refresh keeps the last alerts this long
+const NWS_FORECAST_KEEP_MS = 3 * 3600000;  // and the last hourly forecast this long
+const THUNDER_HOURS = 24;
+const THUNDER_LIKELY_POP = 55;             // the NWS's "likely" starts at a 55% chance of rain
+
+// The dock to four decimals, as the NWS writes points: more and /points redirects.
+function nwsPoint() { return `${DOCK_POINT.lat.toFixed(4)},${DOCK_POINT.lon.toFixed(4)}`; }
+function nwsAlertsUrl() { return `https://api.weather.gov/alerts/active?point=${nwsPoint()}`; }
+function nwsPointsUrl() { return `https://api.weather.gov/points/${nwsPoint()}`; }
+// The NWS page for the dock: its forecast, with every alert in full at the top.
+function nwsPageUrl() { return `https://forecast.weather.gov/MapClick.php?lat=${DOCK_POINT.lat.toFixed(4)}&lon=${DOCK_POINT.lon.toFixed(4)}`; }
+/** The hourly forecast's address from a /points answer - only ever an api.weather.gov gridpoint. */
+function nwsHourlyUrlFrom(points) {
+  const u = points && points.properties && points.properties.forecastHourly;
+  return typeof u === 'string' && /^https:\/\/api\.weather\.gov\/gridpoints\/[A-Z]{3}\/\d+,\d+\/forecast\/hourly$/.test(u) ? u : null;
+}
+
+/**
+ * "WHAT..." from an alert's text - "Northwest winds 20 to 30 mph with gusts
+ * up to 50 mph." - or, for statements written without it, their first
+ * sentence. Plain text, one line, at most 240 characters; null if neither.
+ */
+function nwsWhat(description) {
+  if (typeof description !== 'string' || !description.trim()) return null;
+  const m = /\*\s*WHAT\.\.\.([\s\S]*?)(?=\n\s*\n|\n\s*\*|$)/.exec(description);
+  let s = (m ? m[1] : (/^[\s\S]*?[.!?](?=\s|$)/.exec(description.trim()) || [description])[0]).replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  if (s.length > 240) s = s.slice(0, 237).replace(/\s+\S*$/, '') + '...';
+  return s;
+}
+
+/**
+ * An alert that is over: a cancellation; past its end time, or its expiry
+ * when it gives no end; or a message whose every VTEC code ends, cancels or
+ * upgrades the hazard. The feed keeps those listed - as "Update"s saying "The
+ * threat for winds ... has ended" - until they expire: on 31 Oct 2026 it held
+ * four of them among 390 alerts.
+ */
+function nwsAlertOver(p, nowMs) {
+  if (p.messageType === 'Cancel') return true;
+  const end = Date.parse(p.ends || p.expires);
+  if (Number.isFinite(end) && end < nowMs) return true;
+  const vtec = p.parameters && Array.isArray(p.parameters.VTEC) ? p.parameters.VTEC.filter(v => typeof v === 'string') : [];
+  return vtec.length > 0 && vtec.every(v => /^\/[A-Z]\.(CAN|EXP|UPG)\./.test(v));
+}
+
+// Warnings first, then watches, advisories, and the statements.
+function nwsKind(event) {
+  if (/warning|emergency/i.test(event)) return { kind: 'warning', rank: 0 };
+  if (/watch/i.test(event)) return { kind: 'watch', rank: 1 };
+  if (/advisory/i.test(event)) return { kind: 'advisory', rank: 2 };
+  return { kind: 'statement', rank: 3 };
+}
+const NWS_SEVERITY = { Extreme: 0, Severe: 1, Moderate: 2, Minor: 3 };
+
+/**
+ * The alerts in force or still to come for the dock, from an NWS active-alerts
+ * answer: [{ event, kind, startMs, untilMs, inEffect, what, fog }], those in
+ * effect first, then the most serious. Left out: test and exercise messages,
+ * cancellations, alerts past their end, alerts that an update in the same
+ * answer replaces, and repeats. untilMs is the alert's own end time, or null:
+ * its expiry is only when that message will be reissued (a flood watch from
+ * Sunday to Monday can "expire" on Saturday), so it is never shown as "until".
+ */
+function nwsAlertList(alerts, nowMs) {
+  const feats = alerts && Array.isArray(alerts.features) ? alerts.features : [];
+  const props = feats.map(f => f && f.properties).filter(p => p && typeof p.event === 'string' && p.event.trim());
+  const replaced = new Set();
+  for (const p of props) {
+    for (const r of Array.isArray(p.references) ? p.references : []) if (r && typeof r.identifier === 'string') replaced.add(r.identifier);
+  }
+  const seen = new Set(), out = [];
+  for (const p of props) {
+    if (p.status !== 'Actual' || nwsAlertOver(p, nowMs)) continue;
+    if (typeof p.id === 'string' && replaced.has(p.id)) continue;
+    const key = `${p.event}|${p.onset}|${p.ends}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const start = Date.parse(p.onset || p.effective), until = Date.parse(p.ends);
+    const k = nwsKind(p.event);
+    out.push({
+      event: p.event.trim(), kind: k.kind, rank: k.rank,
+      severity: Object.prototype.hasOwnProperty.call(NWS_SEVERITY, p.severity) ? NWS_SEVERITY[p.severity] : 4,
+      startMs: Number.isFinite(start) ? start : null, untilMs: Number.isFinite(until) ? until : null,
+      inEffect: !Number.isFinite(start) || start <= nowMs,
+      what: nwsWhat(p.description), fog: /fog/i.test(p.event),
+    });
+  }
+  return out.sort((a, b) => (Number(b.inEffect) - Number(a.inEffect)) || (a.rank - b.rank) || (a.severity - b.severity)
+    || ((a.startMs || 0) - (b.startMs || 0)));
+}
+
+/**
+ * The NWS hourly forecast's hours: [{ startMs, endMs, words, pop, thunder }],
+ * in time order. Thunder is in the words ("Chance Showers And Thunderstorms")
+ * or the icon (tsra), the NWS's own two ways of saying it.
+ */
+function nwsHours(forecast) {
+  const per = forecast && forecast.properties && Array.isArray(forecast.properties.periods) ? forecast.properties.periods : [];
+  const out = [];
+  for (const p of per) {
+    if (!p || typeof p !== 'object') continue;
+    const startMs = Date.parse(p.startTime), endMs = Date.parse(p.endTime);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
+    const words = typeof p.shortForecast === 'string' ? p.shortForecast.trim() : '';
+    const pop = p.probabilityOfPrecipitation && wxNum(p.probabilityOfPrecipitation.value) ? Math.round(p.probabilityOfPrecipitation.value) : null;
+    const thunder = /thunder|t-?storm/i.test(words) || /\/tsra/.test(String(p.icon || ''));
+    out.push({ startMs, endMs, words, pop, thunder });
+  }
+  return out.sort((a, b) => a.startMs - b.startMs);
+}
+
+/**
+ * Thunderstorms in the next 24 hours of the NWS hourly forecast: { known,
+ * windows: [{ startMs, endMs, maxPop, words }] }. Hours in a row are one
+ * window; words are the NWS's for its most likely hour. known is false when
+ * the forecast covers fewer than 12 of those hours - an old or broken answer,
+ * which must not read as "no thunderstorms".
+ */
+function thunderOutlook(forecast, nowMs, hours = THUNDER_HOURS) {
+  const until = nowMs + hours * 3600000;
+  const ahead = nwsHours(forecast).filter(h => h.endMs > nowMs && h.startMs < until);
+  const known = ahead.length >= 12;
+  const windows = [];
+  for (const h of ahead) {
+    if (!h.thunder) continue;
+    const w = windows[windows.length - 1];
+    if (w && h.startMs <= w.endMs) {
+      w.endMs = Math.max(w.endMs, h.endMs);
+      if ((h.pop || 0) > (w.maxPop || 0)) { w.maxPop = h.pop; w.words = h.words; }
+    } else {
+      windows.push({ startMs: h.startMs, endMs: h.endMs, maxPop: h.pop, words: h.words });
+    }
+  }
+  return { known, windows };
+}
+
+/** "6:00 PM", "Sun 6:00 PM" on another day this week, "Nov 9, 6:00 PM" further out - boathouse time. */
+function nwsWhen(ms, nowMs, hourOnly = false) {
+  const tz = 'America/New_York';
+  const day = (t) => new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t));
+  const clock = new Intl.DateTimeFormat('en-US', hourOnly && new Date(ms).getUTCMinutes() === 0
+    ? { timeZone: tz, hour: 'numeric' } : { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(new Date(ms));
+  if (day(ms) === day(nowMs)) return clock;
+  if (Math.abs(ms - nowMs) < 6 * 86400000) {
+    return `${new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short' }).format(new Date(ms))} ${clock}`;
+  }
+  return `${new Intl.DateTimeFormat('en-US', { timeZone: tz, month: 'short', day: 'numeric' }).format(new Date(ms))}, ${clock}`;
+}
+
+/** "Showers And Thunderstorms Likely" as a sentence: "Showers and thunderstorms likely". */
+function nwsSentence(words) {
+  const s = String(words || '').toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/**
+ * What the page and the email say: { items: [{ level, headline, detail }],
+ * level, warning, thunderLikely, notes }.
+ *   alerts    NWS active-alerts answer; null when it could not be loaded,
+ *             undefined while it has not been asked for yet
+ *   forecast  NWS hourly forecast, the same way
+ * items: each alert other than fog, then the thunderstorms. level: 'danger'
+ * when any is a warning, 'warn' otherwise, null with no items. warning: the
+ * first warning's name, for the email's subject. notes: plain sentences for
+ * what is not there - none in effect, or could not be loaded - so a missing
+ * alert is never mistaken for a quiet day. Safe HTML, pure ASCII with
+ * entities: the email inserts these unchanged.
+ */
+function nwsOutlook(alerts, forecast, nowMs) {
+  const items = [], notes = [];
+  let warning = null, thunderLikely = false, fogCount = 0;
+  if (alerts) {
+    for (const a of nwsAlertList(alerts, nowMs)) {
+      if (a.fog) { fogCount++; continue; }
+      const ev = fogEsc(a.event);
+      const until = a.untilMs !== null ? ` until ${nwsWhen(a.untilMs, nowMs)}` : '';
+      const headline = a.inEffect
+        ? `NWS ${ev}${until || ' in effect'}`
+        : `NWS ${ev} from ${nwsWhen(a.startMs, nowMs)}${until}`;
+      items.push({ level: a.kind === 'warning' ? 'danger' : 'warn', headline, detail: a.what ? fogEsc(a.what) : '' });
+      if (a.kind === 'warning' && !warning) warning = a.event;
+    }
+    if (!items.length) notes.push(fogCount ? 'No other NWS alerts in effect for the dock.' : 'No NWS alerts in effect for the dock.');
+  } else if (alerts === null) {
+    notes.push('NWS alerts could not be loaded.');
+  }
+  if (forecast) {
+    const t = thunderOutlook(forecast, nowMs);
+    if (!t.known) {
+      notes.push('The NWS hourly forecast could not be loaded, so thunderstorms are not shown.');
+    } else if (t.windows.length) {
+      const span = (w) => `${nwsWhen(w.startMs, nowMs, true)} &ndash; ${nwsWhen(w.endMs, w.startMs, true)}`;
+      const top = t.windows.reduce((a, b) => ((b.maxPop || 0) > (a.maxPop || 0) ? b : a));
+      thunderLikely = t.windows.some(w => (w.maxPop || 0) >= THUNDER_LIKELY_POP);
+      items.push({
+        level: 'warn',
+        headline: `Thunderstorms in the NWS forecast, ${t.windows.map(span).join(', ')}`,
+        detail: `NWS hourly forecast: ${fogEsc(nwsSentence(top.words))}${top.maxPop !== null ? `, chance of rain up to ${top.maxPop}%` : ''}.`,
+      });
+    } else {
+      notes.push(`No thunderstorms in the NWS hourly forecast for the next ${THUNDER_HOURS} hours.`);
+    }
+  } else if (forecast === null) {
+    notes.push('The NWS hourly forecast could not be loaded, so thunderstorms are not shown.');
+  }
+  const level = !items.length ? null : items.some(i => i.level === 'danger') ? 'danger' : 'warn';
+  return { items, level, warning, thunderLikely, notes };
+}
+
+function loadNwsAlerts() {
+  return once('alerts', async () => {
+    let json = null;
+    try {
+      const res = await fetchWithTimeout(nwsAlertsUrl(), FETCH_TIMEOUT_MS, { headers: { Accept: 'application/geo+json' } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      json = await res.json();
+      if (!json || !Array.isArray(json.features)) throw new Error('not an alerts answer');
+    } catch (e) {
+      json = null;
+      console.warn('NWS alerts:', e && e.message ? e.message : e);
+    }
+    // One dropped request keeps the last alerts for a while, rather than
+    // flicking a warning off; past their end time they go anyway.
+    const now = Date.now();
+    if (json) { state.nwsAlerts = json; state.nwsAlertsAt = now; }
+    else if (!(state.nwsAlertsAt && now - state.nwsAlertsAt < NWS_ALERTS_KEEP_MS)) state.nwsAlerts = null;
+    state.nwsAlertsLoaded = true;
+    renderFogOutlook();
+    renderNwsOutlook();
+  });
+}
+
+function loadNwsForecast() {
+  return once('nwsForecast', async () => {
+    const get = async (url) => {
+      const res = await fetchWithTimeout(url, FETCH_TIMEOUT_MS, { headers: { Accept: 'application/geo+json' } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    };
+    let json = null;
+    try {
+      // /points says which forecast grid square the dock is in; the browser
+      // keeps that answer for a day, the page for the visit.
+      if (!state.nwsHourlyUrl) state.nwsHourlyUrl = nwsHourlyUrlFrom(await get(nwsPointsUrl()));
+      if (!state.nwsHourlyUrl) throw new Error('no hourly forecast for the dock');
+      json = await get(state.nwsHourlyUrl);
+      if (!nwsHours(json).length) throw new Error('no hours in the forecast');
+    } catch (e) {
+      json = null;
+      state.nwsHourlyUrl = null;   // asked again next time, in case the grid moved
+      console.warn('NWS hourly forecast:', e && e.message ? e.message : e);
+    }
+    const now = Date.now();
+    if (json) { state.nwsForecast = json; state.nwsForecastAt = now; }
+    else if (!(state.nwsForecastAt && now - state.nwsForecastAt < NWS_FORECAST_KEEP_MS)) state.nwsForecast = null;
+    state.nwsForecastLoaded = true;
+    renderNwsOutlook();
+  });
+}
+
+/** The banner at the top, a line or two in the summary, and the block in the weather card. Never throws. */
+function renderNwsOutlook() {
+  try {
+    if (!state.nwsAlertsLoaded && !state.nwsForecastLoaded) return;
+    const o = nwsOutlook(state.nwsAlertsLoaded ? state.nwsAlerts : undefined,
+      state.nwsForecastLoaded ? state.nwsForecast : undefined, Date.now());
+    const item = (i, titleClass, detailClass) => `<div class="nws-item"><${titleClass ? `div class="${titleClass}"` : 'strong'}>${i.headline}</${titleClass ? 'div' : 'strong'}>${
+      i.detail ? (detailClass ? `<div class="${detailClass}">${i.detail}</div>` : `<span>${i.detail}</span>`) : ''}</div>`;
+    const fullText = `<a href="${nwsPageUrl()}" target="_blank" rel="noopener">full text at weather.gov</a>`;
+
+    const banner = document.getElementById('warn-nws');
+    if (banner) {
+      if (o.items.length) {
+        banner.className = `warn-banner level-${o.level}`;
+        const dot = document.getElementById('warn-nws-dot');
+        if (dot) dot.style.background = o.level === 'danger' ? 'var(--bad-dot)' : 'var(--warn-dot)';
+        // One: its name, its time and what the NWS says. More: their names and
+        // times only, so a phone still shows the Conditions Summary on its
+        // first screen; what the NWS says about each is in the weather card.
+        document.getElementById('warn-nws-body').innerHTML = o.items.length === 1
+          ? `${item(o.items[0])}<div class="nws-src">From the National Weather Service for the dock &middot; ${fullText}</div>`
+          : `${o.items.map(i => `<strong>${i.headline}</strong>`).join('')}<div class="nws-src">From the National Weather Service for the dock &middot; <a href="#nws-outlook">details in the weather card</a> &middot; ${fullText}</div>`;
+        banner.style.display = 'flex';
+      } else {
+        banner.style.display = 'none';
+      }
+    }
+
+    // The summary: the first two, by name and time; the banner above has the rest.
+    const shown = o.items.slice(0, 2).map(i => `<div class="summary-alert ${i.level}">${i.headline}</div>`);
+    if (o.items.length > 2) shown.push(`<div class="summary-alert ${o.level}">and ${o.items.length - 2} more, above</div>`);
+    setSummary('sum-nws', shown.join(''));
+
+    const box = document.getElementById('nws-outlook');
+    if (box) {
+      const checked = state.nwsAlertsAt ? ` &middot; alerts checked ${clockTime(state.nwsAlertsAt)}` : '';
+      box.innerHTML = `
+        <div class="fog-head"><span class="section-label" style="margin:0;">NWS alerts &amp; thunderstorms</span></div>
+        ${o.items.map(i => item(i, 'fog-title', 'fog-detail')).join('')}
+        ${o.notes.length ? `<div class="fog-detail"${o.items.length ? ' style="margin-top:6px;"' : ''}>${o.notes.join(' ')}</div>` : ''}
+        <div class="nws-src fog-detail">From the National Weather Service for the dock${checked} &middot; <a href="${nwsPageUrl()}" target="_blank" rel="noopener">weather.gov</a></div>`;
+    }
+  } catch (e) {
+    console.warn('NWS alerts failed:', e);
   }
 }
 

@@ -19,7 +19,7 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (251 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository |
+| `test_daily_email.js` | Test suite (281 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, and the NWS alerts and thunderstorms |
 | `test_site_theme.js` | The website's light and dark themes (20 tests): contrast of every colour where it is used (WCAG AA), dark kept as the original design, the switch, the device default, the charts |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
@@ -319,6 +319,42 @@ shown as a measurement (Safety Committee, October 2026).
 The 24-hour wind on the website is a **forecast** - Open-Meteo's weather models
 for the dock - and is labelled as one. Sunrise and sunset come with it. The
 fog outlook below stays at the point it was calibrated for.
+
+## NWS alerts and thunderstorms
+
+Every alert the National Weather Service has in effect for the dock - wind,
+storms, floods, heat, cold, air quality - and the thunderstorms in its hourly
+forecast for the next 24 hours, on the website and in the email. The NWS's own
+words and times (`nwsOutlook()` in `index.html`); nothing is added, and nothing
+is called safe.
+
+| What | Website | Email |
+|---|---|---|
+| A **warning** (red) | Banner at the top, a line in the summary, the NWS's words in the weather card | Red box under the rules banner; the subject starts `NWS <name> -` |
+| A watch, advisory or statement (orange) | The same, orange | Amber box; not in the subject |
+| **Thunderstorms** in the NWS hourly forecast | Their hours, in the same places | In the box; `THUNDERSTORMS LIKELY -` leads the subject at a 55% chance or more |
+| None | Said in the weather card | One line in the weather section |
+| Could not be loaded | Said in the weather card | Said in the weather section |
+
+- **Fog alerts** stay with the fog outlook, which already shows them.
+- **"Until"** is an alert's own end time. Its expiry is only when the message
+  will be reissued - a flood watch from Sunday to Monday can "expire" on
+  Saturday - so it is never shown as an end.
+- **Over is over**: cancellations, alerts past their end, and updates whose
+  VTEC codes all end, cancel or upgrade the alert ("The threat for winds ...
+  has ended") are left out - the feed keeps listing those until they expire.
+- **Thunder comes from the NWS forecast, not Open-Meteo.** On 31 Oct 2026, at
+  six US places where the NWS forecast thunderstorms within three days
+  (Miami for 72 hours of them), Open-Meteo's weather codes showed thunder for
+  one hour in total.
+- The website checks the alerts every 5 minutes and the forecast every 30; a
+  failed check keeps the last alerts for an hour and the forecast for three,
+  then says they could not be loaded. A forecast that does not cover the next
+  12 hours is "could not be loaded", never "no thunderstorms".
+- The alerts are fetched for the dock. Until November 2026 they were fetched
+  for the fog point in Oxford: both are in the same NWS forecast zone (CTZ006)
+  and county, so the fog advisories are the same, and storm warnings, which
+  the NWS draws round the storm, are now asked for at the dock itself.
 
 ## Fog outlook
 

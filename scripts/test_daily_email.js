@@ -1751,7 +1751,8 @@ const assess = (name, water, alerts = null, response) =>
     water === undefined ? FOG_FX[name].waterTempF : water, alerts);
 
 test('every fog export reaches the email (extraction skips missing names silently)', () => {
-  for (const fn of ['assessFogRisk', 'fogText', 'fogTarget', 'fogOutlookUrl', 'fogAlertsUrl', 'fogAdvisory']) {
+  for (const fn of ['assessFogRisk', 'fogText', 'fogTarget', 'fogOutlookUrl', 'fogAdvisory', 'nwsAlertsUrl', 'nwsPointsUrl',
+    'nwsHourlyUrlFrom', 'nwsPageUrl', 'nwsAlertList', 'nwsHours', 'thunderOutlook', 'nwsWhen', 'nwsWhat', 'nwsOutlook']) {
     assert.strictEqual(typeof logic[fn], 'function', `${fn} missing from the email's copy of the site logic`);
   }
   for (const k of ['FOG_MODELS', 'FOG_RULES', 'FOG_LAUNCH_RULE', 'FOG_POINT', 'ALLOWED_NOTE_HTML',
@@ -2072,7 +2073,9 @@ test('the forecast URL asks for exactly the calibrated models, variables and uni
   assert.strictEqual(u.searchParams.get('wind_speed_unit'), 'mph');
   assert.strictEqual(u.searchParams.get('timezone'), 'America/New_York');
   assert.strictEqual(u.searchParams.get('forecast_days'), '2', 'must cover tomorrow\'s dawn after 10 AM');
-  assert.strictEqual(new URL(logic.fogAlertsUrl(41.437, -73.119)).hostname, 'api.weather.gov');
+  const al = new URL(logic.nwsAlertsUrl());
+  assert.strictEqual(al.hostname, 'api.weather.gov');
+  assert.strictEqual(al.searchParams.get('point'), '41.3685,-73.1478', 'the NWS alerts are the dock\'s');
 });
 
 test('the fog outlook stays at the point it was calibrated for', () => {
@@ -2314,7 +2317,8 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraBackupAsleep,' +
     ' cameraCaption, cameraMissingMessage, CAMERA_SNAPSHOT_URL, nearestReading, downloadCSV, withGapBreaks,' +
     ' checkCameraForNewPhoto, newestReading, mergeHistory, normalizeHistory, readingTime, WATER_LATEST_URL, WATER_RECENT_URL,' +
-    ' ARCHIVE_REFRESH_MS };',
+    ' ARCHIVE_REFRESH_MS, loadNwsAlerts, loadNwsForecast, renderNwsOutlook, nwsOutlook, nwsAlertsUrl, nwsPointsUrl,' +
+    ' NWS_ALERTS_KEEP_MS, NWS_FORECAST_KEEP_MS };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -2353,7 +2357,7 @@ test('site: the page never flashes an all-clear before data loads', () => {
 test('site: 5 AM on 2 Oct shows fog LIKELY in the card and the top banner, with the rule', () => {
   const { site, els } = loadSite(etDate('2026-10-02', 5).getTime());
   Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.likely_2026_10_02.response,
-    fogAlerts: null, lastTempF: 65.7 });
+    nwsAlerts: null, lastTempF: 65.7 });
   site.renderFogOutlook();
   const box = els['fog-outlook'].innerHTML;
   assert.ok(/fog-pill likely/.test(box) && /Fog likely at dawn this morning/.test(box), box);
@@ -2367,7 +2371,7 @@ test('site: a quiet morning shows the outlook but no banner; nothing renders bef
   const { site, els } = loadSite(etDate('2026-09-19', 6).getTime());
   site.renderFogOutlook();
   assert.strictEqual(els['fog-outlook'].innerHTML, '', 'must not render before the forecast has loaded');
-  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.dry.response, fogAlerts: null, lastTempF: 72.3 });
+  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.dry.response, nwsAlerts: null, lastTempF: 72.3 });
   site.renderFogOutlook();
   assert.ok(/Fog not indicated this morning/.test(els['fog-outlook'].innerHTML));
   assert.ok(/picket fence/.test(els['fog-outlook'].innerHTML));
@@ -2376,7 +2380,7 @@ test('site: a quiet morning shows the outlook but no banner; nothing renders bef
 
 test('site: a failed fog fetch says "unavailable" - never silence, never "not indicated"', () => {
   const { site, els } = loadSite(etDate('2026-10-02', 5).getTime());
-  Object.assign(site.state, { fogLoaded: true, fogResponse: null, fogAlerts: null, lastTempF: 65 });
+  Object.assign(site.state, { fogLoaded: true, fogResponse: null, nwsAlerts: null, lastTempF: 65 });
   site.renderFogOutlook();
   assert.ok(/Fog outlook unavailable/.test(els['fog-outlook'].innerHTML));
   assert.ok(!/not indicated/.test(els['fog-outlook'].innerHTML));
@@ -2385,7 +2389,7 @@ test('site: a failed fog fetch says "unavailable" - never silence, never "not in
 test('site: after 10 AM the outlook is about tomorrow morning', () => {
   const { site, els } = loadSite(etDate('2026-10-01', 14).getTime());
   Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.likely_2026_10_02.response,
-    fogAlerts: null, lastTempF: 65.7 });
+    nwsAlerts: null, lastTempF: 65.7 });
   site.renderFogOutlook();
   assert.ok(/Fog likely at dawn tomorrow morning/.test(els['fog-outlook'].innerHTML), els['fog-outlook'].innerHTML);
 });
@@ -2400,7 +2404,7 @@ test('SAFETY site: a fog failure cannot suppress the stale-data or offline-senso
   const now = Date.now();
   const { site, els } = loadSite(now);
   site.state.allHistory = historyAtTemp(72);
-  Object.assign(site.state, { fogLoaded: true, fogResponse: EXPLODING, fogAlerts: null });
+  Object.assign(site.state, { fogLoaded: true, fogResponse: EXPLODING, nwsAlerts: null });
   const fourHoursAgo = new Date(now - 4 * 3600000);
   const tempC = (72 - 32) * 5 / 9;
   assert.doesNotThrow(() => site.renderDashboard(tempC, makeRaw(72, fourHoursAgo)));
@@ -2412,7 +2416,7 @@ test('SAFETY site: a fog failure cannot suppress the stale-data or offline-senso
 test('site: renderFogOutlook never throws, whatever the forecast data looks like', () => {
   const { site, els } = loadSite(etDate('2026-10-02', 5).getTime());
   for (const bad of [EXPLODING, { hourly: EXPLODING }, { hourly: { time: EXPLODING } }, 42, 'x', [], { hourly: [] }]) {
-    Object.assign(site.state, { fogLoaded: true, fogResponse: bad, fogAlerts: bad, lastTempF: 65 });
+    Object.assign(site.state, { fogLoaded: true, fogResponse: bad, nwsAlerts: bad, lastTempF: 65 });
     assert.doesNotThrow(() => site.renderFogOutlook());
     assert.ok(/Fog outlook unavailable|Fog not indicated/.test(els['fog-outlook'].innerHTML),
       els['fog-outlook'].innerHTML.slice(0, 120));
@@ -2435,7 +2439,7 @@ test('site: footer status describes the sensor feed, never "Normal"', () => {
 test('site: the steam-fog check uses the river temperature once it arrives', () => {
   const { site, els } = loadSite(etDate('2026-05-31', 2).getTime());
   Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.steam_2026_05_31.response,
-    fogAlerts: null, lastTempF: null });
+    nwsAlerts: null, lastTempF: null });
   site.renderFogOutlook();
   assert.ok(/Fog not indicated/.test(els['fog-outlook'].innerHTML), 'no water reading yet');
   site.state.lastTempF = 63.25;
@@ -2926,16 +2930,16 @@ test('summary river tile: restrictions, forecast estimates and outages are all s
 
 test('summary fog line: same verdict as the fog outlook, naming which morning', () => {
   let { site, els } = loadSite(etDate('2026-10-02', 5).getTime());
-  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.likely_2026_10_02.response, fogAlerts: null, lastTempF: 65.7 });
+  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.likely_2026_10_02.response, nwsAlerts: null, lastTempF: 65.7 });
   site.renderFogOutlook();
   assert.ok(/Fog this morning:/.test(els['sum-fog'].innerHTML) && /fog-pill likely">Likely/.test(els['sum-fog'].innerHTML),
     els['sum-fog'].innerHTML);
   ({ site, els } = loadSite(etDate('2026-10-01', 14).getTime()));
-  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.likely_2026_10_02.response, fogAlerts: null, lastTempF: 65.7 });
+  Object.assign(site.state, { fogLoaded: true, fogResponse: FOG_FX.likely_2026_10_02.response, nwsAlerts: null, lastTempF: 65.7 });
   site.renderFogOutlook();
   assert.ok(/Fog tomorrow morning:/.test(els['sum-fog'].innerHTML), els['sum-fog'].innerHTML);
   ({ site, els } = loadSite(etDate('2026-10-02', 5).getTime()));
-  Object.assign(site.state, { fogLoaded: true, fogResponse: null, fogAlerts: null });
+  Object.assign(site.state, { fogLoaded: true, fogResponse: null, nwsAlerts: null });
   site.renderFogOutlook();
   assert.ok(/fog-pill unknown">Unavailable/.test(els['sum-fog'].innerHTML), 'an outage is stated in the summary too');
 });
@@ -4192,6 +4196,538 @@ test('water, email: without the Worker, exactly the checkout\'s data.json and hi
   } finally { global.fetch = realFetch; }
   const src = fsT.readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8');
   assert.ok(/const local = await loadWater\(logic\);/.test(src), 'build() uses it');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('16. NWS alerts and thunderstorms: the page and the email');
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Every NWS alert for the dock - not only fog - and thunderstorms in the NWS
+// hourly forecast for the next 24 hours. The NWS's words and times; nothing
+// added, never "safe". The fixtures are shaped like the live feeds (31 Oct
+// 2026), and are function declarations so section 8a2's email checks can use
+// them.
+
+/** One alert, shaped like the live feed. Times are relative to nowMs. */
+function nwsAlert(nowMs, props = {}) {
+  const iso = (ms) => new Date(ms).toISOString();
+  return { type: 'Feature', properties: Object.assign({
+    id: 'urn:oid:2.49.0.1.840.0.' + Math.random().toString(16).slice(2), event: 'Wind Advisory',
+    status: 'Actual', messageType: 'Alert', severity: 'Moderate', urgency: 'Expected', certainty: 'Likely',
+    sent: iso(nowMs - 2 * 3600000), effective: iso(nowMs - 2 * 3600000), onset: iso(nowMs - 3600000),
+    expires: iso(nowMs + 3 * 3600000), ends: iso(nowMs + 6 * 3600000),
+    headline: 'Wind Advisory issued October 31 at 6:26AM EDT until October 31 at 6:00PM EDT by NWS Upton NY',
+    description: '* WHAT...Northwest winds 20 to 30 mph with gusts up to 50 mph.\n\n* WHERE...Northern New Haven.\n\n' +
+      '* WHEN...Until 6 PM EDT this evening.\n\n* IMPACTS...Gusty winds will blow around unsecured\nobjects.',
+    instruction: 'Use extra caution.', references: [],
+  }, props) };
+}
+function nwsFeed(...features) { return { type: 'FeatureCollection', features }; }
+/**
+ * The NWS hourly forecast: one period an hour from the start of nowMs's hour,
+ * 156 of them as the live one has. at(i, startMs) changes hour i.
+ */
+function nwsHourly(nowMs, at = () => ({}), hours = 156) {
+  const start = Math.floor(nowMs / 3600000) * 3600000, periods = [];
+  for (let i = 0; i < hours; i++) {
+    const s = start + i * 3600000;
+    periods.push(Object.assign({ number: i + 1, name: '', startTime: new Date(s).toISOString(), endTime: new Date(s + 3600000).toISOString(),
+      isDaytime: true, temperature: 60, temperatureUnit: 'F', probabilityOfPrecipitation: { unitCode: 'wmoUnit:percent', value: 0 },
+      windSpeed: '5 mph', windDirection: 'NW', icon: 'https://api.weather.gov/icons/land/day/few?size=small',
+      shortForecast: 'Mostly Sunny', detailedForecast: '' }, at(i, s)));
+  }
+  return { type: 'Feature', properties: { units: 'us', generatedAt: new Date(nowMs).toISOString(), periods } };
+}
+/** Thunder from hour `from` for `n` hours, at `pop`%, in the NWS's words. */
+function thunderAt(from, n, pop = 46, words = 'Chance Showers And Thunderstorms') {
+  return (i) => (i >= from && i < from + n
+    ? { shortForecast: words, probabilityOfPrecipitation: { unitCode: 'wmoUnit:percent', value: pop },
+        icon: `https://api.weather.gov/icons/land/day/tsra_sct,${pop}?size=small` } : {});
+}
+const NWS_HOURLY_URL = 'https://api.weather.gov/gridpoints/OKX/58,76/forecast/hourly';
+const nwsPoints = (url = NWS_HOURLY_URL) => ({ properties: { gridId: 'OKX', gridX: 58, gridY: 76, forecastHourly: url } });
+
+test('NWS: alerts in force or still to come; tests, cancellations, ended ones, replaced ones and repeats left out', () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const old = nwsAlert(now, { event: 'Wind Advisory', id: 'urn:old' });
+  const feed = nwsFeed(
+    nwsAlert(now, { event: 'Test Message', status: 'Test' }),
+    nwsAlert(now, { event: 'Flood Watch', status: 'Exercise' }),
+    nwsAlert(now, { event: 'Wind Advisory', messageType: 'Cancel' }),
+    nwsAlert(now, { event: 'Frost Advisory', ends: new Date(now - 60000).toISOString() }),
+    nwsAlert(now, { event: 'Special Weather Statement', ends: null, expires: new Date(now - 60000).toISOString() }),
+    old,
+    nwsAlert(now, { event: 'Wind Advisory', messageType: 'Update', references: [{ identifier: 'urn:old' }],
+      description: '* WHAT...Northwest winds 25 to 35 mph with gusts up to 55 mph.' }),
+    nwsAlert(now, { event: 'Flood Watch', onset: new Date(now + 20 * 3600000).toISOString(), ends: new Date(now + 44 * 3600000).toISOString() }),
+    nwsAlert(now, { event: 'Flood Watch', onset: new Date(now + 20 * 3600000).toISOString(), ends: new Date(now + 44 * 3600000).toISOString() }),
+  );
+  const list = plain(logic.nwsAlertList(feed, now));
+  assert.deepStrictEqual(list.map(a => a.event), ['Wind Advisory', 'Flood Watch'], JSON.stringify(list.map(a => a.event)));
+  assert.ok(/25 to 35 mph/.test(list[0].what), 'the update, not the alert it replaced');
+  assert.strictEqual(list[0].inEffect, true);
+  assert.strictEqual(list[1].inEffect, false, 'the watch starts tomorrow');
+  assert.deepStrictEqual(plain(logic.nwsAlertList({ features: 'nonsense' }, now)), []);
+  assert.deepStrictEqual(plain(logic.nwsAlertList(null, now)), []);
+  assert.deepStrictEqual(plain(logic.nwsAlertList({ features: [null, {}, { properties: { event: '' } }, { properties: 7 }] }, now)), []);
+});
+
+test('NWS: an alert whose every VTEC code ends, cancels or upgrades it is over - the feed lists those as updates until they expire', () => {
+  // As the live feed had them on 31 Oct 2026: "The threat for winds ... has ended."
+  const now = etDate('2026-10-31', 10).getTime();
+  const vtec = (...v) => ({ parameters: { VTEC: v } });
+  const ended = nwsAlert(now, Object.assign({ messageType: 'Update', description: 'The threat for winds gusting up to Wind Advisory criteria has ended.' },
+    vtec('/O.EXP.KOKX.WI.Y.0043.000000T0000Z-261031T1500Z/')));
+  const cancelled = nwsAlert(now, Object.assign({ event: 'Flood Watch', messageType: 'Update' }, vtec('/O.CAN.KOKX.FA.A.0012.000000T0000Z-261101T1200Z/')));
+  const upgraded = nwsAlert(now, Object.assign({ event: 'Winter Storm Watch', messageType: 'Update' }, vtec('/O.UPG.KOKX.WS.A.0004.261101T0600Z-261102T0000Z/')));
+  const going = nwsAlert(now, Object.assign({ event: 'High Wind Warning', messageType: 'Update' }, vtec('/O.CON.KOKX.HW.W.0002.000000T0000Z-261031T2200Z/')));
+  const partly = nwsAlert(now, Object.assign({ event: 'Winter Weather Advisory', messageType: 'Update' },
+    vtec('/O.EXP.KOKX.WW.Y.0085.000000T0000Z-261031T1500Z/', '/O.EXT.KOKX.WW.Y.0085.000000T0000Z-261031T2100Z/')));
+  assert.deepStrictEqual(plain(logic.nwsAlertList(nwsFeed(ended, cancelled, upgraded, going, partly), now)).map(a => a.event),
+    ['High Wind Warning', 'Winter Weather Advisory']);
+  // The fog advisory reads the same rule: one that has ended is not "in effect".
+  const fogEnded = nwsFeed(nwsAlert(now, Object.assign({ event: 'Dense Fog Advisory', messageType: 'Update' }, vtec('/O.EXP.KOKX.FG.Y.0021.000000T0000Z-261031T1500Z/'))));
+  assert.strictEqual(logic.fogAdvisory(fogEnded), null);
+  const fogOn = nwsFeed(nwsAlert(now, Object.assign({ event: 'Dense Fog Advisory', messageType: 'Update' }, vtec('/O.CON.KOKX.FG.Y.0021.000000T0000Z-261031T1500Z/'))));
+  assert.strictEqual(logic.fogAdvisory(fogOn).event, 'Dense Fog Advisory');
+  assert.strictEqual(logic.fogAdvisory(nwsFeed(nwsAlert(now, { event: 'Dense Fog Advisory', parameters: { VTEC: 'nonsense' } }))).event,
+    'Dense Fog Advisory', 'a VTEC that is not a list is not a reason to drop it');
+});
+
+test('NWS: in force before still to come, then warnings, watches, advisories, statements, then severity', () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const later = { onset: new Date(now + 5 * 3600000).toISOString() };
+  const feed = nwsFeed(
+    nwsAlert(now, { event: 'Special Weather Statement', ends: null }),
+    nwsAlert(now, { event: 'Tornado Watch', severity: 'Severe' }),
+    nwsAlert(now, Object.assign({ event: 'Severe Thunderstorm Warning', severity: 'Severe' }, later)),
+    nwsAlert(now, { event: 'Wind Advisory' }),
+    nwsAlert(now, { event: 'Flood Warning', severity: 'Moderate' }),
+    nwsAlert(now, { event: 'High Wind Warning', severity: 'Severe' }),
+  );
+  assert.deepStrictEqual(plain(logic.nwsAlertList(feed, now)).map(a => a.event),
+    ['High Wind Warning', 'Flood Warning', 'Tornado Watch', 'Wind Advisory', 'Special Weather Statement', 'Severe Thunderstorm Warning']);
+});
+
+test('NWS: "until" is the alert\'s own end, never its expiry - a watch from Sunday to Monday can expire on Saturday', () => {
+  // The live Flood Watch of 31 Oct 2026, Pueblo CO, moved to the boathouse's clock.
+  const now = etDate('2026-10-31', 10).getTime();
+  const feed = nwsFeed(nwsAlert(now, { event: 'Flood Watch', severity: 'Severe', urgency: 'Future',
+    onset: etDate('2026-11-01', 6).toISOString(), expires: etDate('2026-10-31', 14).toISOString(), ends: etDate('2026-11-02', 11).toISOString() }));
+  const o = logic.nwsOutlook(feed, undefined, now);
+  assert.strictEqual(o.items.length, 1);
+  assert.strictEqual(o.items[0].headline, 'NWS Flood Watch from Sun 6:00 AM until Mon 11:00 AM', o.items[0].headline);
+  assert.ok(!/2:00 PM/.test(o.items[0].headline), 'the expiry is not an end');
+  // A statement with no end time: in effect, no "until" (its expiry is only when it is reissued).
+  const sws = logic.nwsOutlook(nwsFeed(nwsAlert(now, { event: 'Special Weather Statement', ends: null, description: 'Patchy dense smoke has been observed. Visibility may drop.' })), undefined, now);
+  assert.strictEqual(sws.items[0].headline, 'NWS Special Weather Statement in effect');
+  assert.strictEqual(sws.items[0].detail, 'Patchy dense smoke has been observed.');
+});
+
+test('NWS: the WHAT line, or a statement\'s first sentence - one line, at most 240 characters', () => {
+  assert.strictEqual(logic.nwsWhat('* WHAT...Northwest winds 20 to 30 mph with gusts up to\n50 mph.\n\n* WHERE...Northern New Haven.'),
+    'Northwest winds 20 to 30 mph with gusts up to 50 mph.');
+  assert.strictEqual(logic.nwsWhat('* WHAT...Sub-freezing temperatures as low as 27.\n* WHERE...Northern New Haven.'),
+    'Sub-freezing temperatures as low as 27.');
+  assert.strictEqual(logic.nwsWhat('Patchy dense fog has been observed in the valley. Use extra caution.'),
+    'Patchy dense fog has been observed in the valley.');
+  const long = logic.nwsWhat('* WHAT...' + 'very '.repeat(80) + 'windy.');
+  assert.ok(long.length <= 240 && /\.\.\.$/.test(long), long);
+  for (const nothing of [null, undefined, '', '   ', 7]) assert.strictEqual(logic.nwsWhat(nothing), null);
+});
+
+test('NWS: warnings are red, the rest orange; fog alerts are left to the fog outlook', () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const o = logic.nwsOutlook(nwsFeed(nwsAlert(now, { event: 'Severe Thunderstorm Warning', severity: 'Severe',
+    ends: etDate('2026-10-31', 11, 15).toISOString() }), nwsAlert(now)), undefined, now);
+  assert.deepStrictEqual(plain(o.items.map(i => [i.level, i.headline])),
+    [['danger', 'NWS Severe Thunderstorm Warning until 11:15 AM'], ['warn', 'NWS Wind Advisory until 4:00 PM']]);
+  assert.strictEqual(o.level, 'danger');
+  assert.strictEqual(o.warning, 'Severe Thunderstorm Warning');
+  assert.strictEqual(o.items[1].detail, 'Northwest winds 20 to 30 mph with gusts up to 50 mph.');
+  const fogOnly = logic.nwsOutlook(nwsFeed(nwsAlert(now, { event: 'Dense Fog Advisory' })), undefined, now);
+  assert.strictEqual(fogOnly.items.length, 0, 'the fog banner has it');
+  assert.deepStrictEqual(plain(fogOnly.notes), ['No other NWS alerts in effect for the dock.']);
+  assert.strictEqual(fogOnly.level, null);
+  assert.strictEqual(logic.nwsOutlook(nwsFeed(nwsAlert(now)), undefined, now).warning, null, 'an advisory is not a warning');
+});
+
+test('NWS: thunderstorms in the next 24 hours of the hourly forecast, hours in a row as one window', () => {
+  const now = etDate('2026-10-31', 10, 20).getTime();   // the forecast starts at 10 AM
+  const t = logic.thunderOutlook(nwsHourly(now, (i) => Object.assign({}, thunderAt(4, 4, 46)(i), thunderAt(6, 1, 61, 'Showers And Thunderstorms Likely')(i),
+    thunderAt(11, 1, 30)(i), thunderAt(30, 2, 90)(i))), now);
+  assert.strictEqual(t.known, true);
+  const w = plain(t.windows);
+  assert.strictEqual(w.length, 2, 'hour 30 is beyond the 24 hours');
+  assert.deepStrictEqual([w[0].startMs, w[0].endMs], [etDate('2026-10-31', 14).getTime(), etDate('2026-10-31', 18).getTime()]);
+  assert.deepStrictEqual([w[0].maxPop, w[0].words], [61, 'Showers And Thunderstorms Likely'], 'the words of its most likely hour');
+  assert.deepStrictEqual([w[1].startMs, w[1].maxPop], [etDate('2026-10-31', 21).getTime(), 30]);
+  const o = logic.nwsOutlook(undefined, nwsHourly(now, thunderAt(4, 4, 61, 'Showers And Thunderstorms Likely')), now);
+  assert.strictEqual(o.items[0].headline, 'Thunderstorms in the NWS forecast, 2 PM &ndash; 6 PM');
+  assert.strictEqual(o.items[0].detail, 'NWS hourly forecast: Showers and thunderstorms likely, chance of rain up to 61%.');
+  assert.strictEqual(o.thunderLikely, true);
+  assert.strictEqual(logic.nwsOutlook(undefined, nwsHourly(now, thunderAt(4, 4, 54)), now).thunderLikely, false, 'a 54% chance is not "likely"');
+});
+
+test('NWS: thunder is in the words or in the icon (tsra); an hour already over does not count', () => {
+  const now = etDate('2026-10-31', 10, 59).getTime();
+  const iconOnly = (i) => (i === 3 ? { shortForecast: 'Showers', icon: 'https://api.weather.gov/icons/land/day/tsra,40?size=small', probabilityOfPrecipitation: { value: 40 } } : {});
+  assert.strictEqual(logic.thunderOutlook(nwsHourly(now, iconOnly), now).windows.length, 1);
+  const wordsOnly = (i) => (i === 3 ? { shortForecast: 'Isolated Thunderstorms', probabilityOfPrecipitation: { value: 20 } } : {});
+  assert.strictEqual(logic.thunderOutlook(nwsHourly(now, wordsOnly), now).windows.length, 1);
+  // The 10 AM hour is nearly over and stormy; it still counts until 11.
+  assert.strictEqual(logic.thunderOutlook(nwsHourly(now, thunderAt(0, 1)), now).windows.length, 1);
+  assert.strictEqual(logic.thunderOutlook(nwsHourly(now, thunderAt(0, 1)), now + 60000).windows.length, 0, 'past 11 it is over');
+  // The live format: local time with its offset.
+  const live = { properties: { periods: [{ startTime: '2026-11-06T01:00:00-05:00', endTime: '2026-11-06T02:00:00-05:00',
+    shortForecast: 'Showers And Thunderstorms Likely', probabilityOfPrecipitation: { unitCode: 'wmoUnit:percent', value: 56 },
+    icon: 'https://api.weather.gov/icons/land/night/tsra,60?size=small' }] } };
+  assert.deepStrictEqual(plain(logic.nwsHours(live)).map(h => [h.startMs, h.pop, h.thunder]), [[Date.parse('2026-11-06T06:00:00Z'), 56, true]]);
+});
+
+test('NWS: an old, short or broken forecast is "could not be loaded", never "no thunderstorms"', () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const stale = nwsHourly(now - 150 * 3600000);              // ends hours before now
+  const short = nwsHourly(now, () => ({}), 8);
+  for (const f of [stale, short, {}, { properties: { periods: 'x' } }, { properties: { periods: [{ startTime: 'garbage', endTime: 'x' }] } }]) {
+    const o = logic.nwsOutlook(undefined, f, now);
+    assert.deepStrictEqual(plain(o.notes), ['The NWS hourly forecast could not be loaded, so thunderstorms are not shown.'], JSON.stringify(f).slice(0, 60));
+    assert.strictEqual(o.items.length, 0);
+  }
+  assert.deepStrictEqual(plain(logic.nwsOutlook(undefined, nwsHourly(now), now).notes), ['No thunderstorms in the NWS hourly forecast for the next 24 hours.']);
+});
+
+test('NWS: what is not there is said - none in effect, or could not be loaded; nothing for what was not asked', () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  assert.deepStrictEqual(plain(logic.nwsOutlook(nwsFeed(), nwsHourly(now), now).notes),
+    ['No NWS alerts in effect for the dock.', 'No thunderstorms in the NWS hourly forecast for the next 24 hours.']);
+  assert.deepStrictEqual(plain(logic.nwsOutlook(null, null, now).notes),
+    ['NWS alerts could not be loaded.', 'The NWS hourly forecast could not be loaded, so thunderstorms are not shown.']);
+  assert.deepStrictEqual(plain(logic.nwsOutlook(undefined, undefined, now)), { items: [], level: null, warning: null, thunderLikely: false, notes: [] });
+  const o = logic.nwsOutlook(nwsFeed(nwsAlert(now)), null, now);
+  assert.strictEqual(o.items.length, 1);
+  assert.deepStrictEqual(plain(o.notes), ['The NWS hourly forecast could not be loaded, so thunderstorms are not shown.'], 'said beside the alerts too');
+});
+
+test('NWS: times in boathouse time - today, a weekday this week, a date further out; across the end of daylight saving', () => {
+  const now = etDate('2026-10-31', 10).getTime();   // Saturday
+  assert.strictEqual(logic.nwsWhen(etDate('2026-10-31', 18).getTime(), now), '6:00 PM');
+  assert.strictEqual(logic.nwsWhen(etDate('2026-11-01', 9).getTime(), now), 'Sun 9:00 AM');
+  assert.strictEqual(logic.nwsWhen(etDate('2026-11-09', 9).getTime(), now), 'Nov 9, 9:00 AM');
+  assert.strictEqual(logic.nwsWhen(etDate('2026-10-31', 14).getTime(), now, true), '2 PM');
+  assert.strictEqual(logic.nwsWhen(etDate('2026-10-31', 14, 30).getTime(), now, true), '2:30 PM');
+  // 1 AM happens twice on 1 Nov 2026: hours are instants, so the window is right.
+  const night = etDate('2026-10-31', 23).getTime();
+  const o = logic.nwsOutlook(undefined, nwsHourly(night, thunderAt(1, 3)), night);
+  assert.ok(/^Thunderstorms in the NWS forecast, Sun 12 AM &ndash; 2 AM$/.test(o.items[0].headline), o.items[0].headline);
+});
+
+test('SECURITY NWS: the feed\'s words are escaped, and the output is ASCII', () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const o = logic.nwsOutlook(nwsFeed(nwsAlert(now, { event: 'Wind <img src=x onerror=alert(1)> Advisory',
+    description: '* WHAT...Gusts <script>alert(1)</script> to 50 mph — strong.' })),
+    nwsHourly(now, (i) => (i === 2 ? { shortForecast: 'Thunder <b>x</b>', probabilityOfPrecipitation: { value: 50 } } : {})), now);
+  const all = JSON.stringify(plain(o));
+  assert.ok(!/<img|<script|<b>/i.test(all), all);
+  assert.ok(/&lt;img/.test(o.items[0].headline) && /&lt;script&gt;/.test(o.items[0].detail));
+  for (const i of o.items) assert.ok(/^[\x20-\x7e]*$/.test(i.headline), i.headline);
+  // The subject takes the name only as letters, digits and spaces.
+  const d = M.computeDigest(logic, { raw: makeRaw(66), history: historyAtTemp(66) },
+    { level: 5, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() }, { available: false }, new Date(),
+    { response: null, alerts: nwsFeed(nwsAlert(Date.now(), { event: 'High Wind Warning\r\nBcc: x@example.com' })) }, undefined);
+  const s = M.renderSubject(d);
+  assert.ok(/^NHRC [A-Za-z]{3} \d+ - NWS High Wind Warning Bcc x example com - /.test(s), s);
+  assert.ok(!/[\r\n@]/.test(s), s);
+});
+
+test('NWS: nothing in the alerts or the forecast ever says it is safe or clear to row', () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const outs = [logic.nwsOutlook(nwsFeed(), nwsHourly(now), now), logic.nwsOutlook(null, null, now),
+    logic.nwsOutlook(nwsFeed(nwsAlert(now)), nwsHourly(now, thunderAt(2, 2)), now)];
+  for (const o of outs) assert.ok(!GO_AHEAD.test(JSON.stringify(plain(o))) && !/\bsafe\b/i.test(JSON.stringify(plain(o))), JSON.stringify(plain(o)));
+});
+
+// ── The page ────────────────────────────────────────────────────────────────
+
+/** A page on a fake NWS: alerts, /points and the hourly forecast. */
+function nwsPage(clock, { alerts, points, hourly }) {
+  const answer = (v, u) => (typeof v === 'function' ? v(u) : v === undefined ? offline() : reply(v));
+  const net = fakeNet([
+    [/^https:\/\/api\.weather\.gov\/alerts\/active\?point=/, (u) => answer(alerts, u)],
+    [/^https:\/\/api\.weather\.gov\/points\//, (u) => answer(points, u)],
+    [/\/forecast\/hourly$/, (u) => answer(hourly, u)],
+  ]);
+  return Object.assign(loadSite(clock, net.fetch), { net });
+}
+
+test('page: a warning and thunder - the red banner, two lines in the summary, the block in the weather card', async () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const p = nwsPage(now, { alerts: nwsFeed(nwsAlert(now, { event: 'High Wind Warning', severity: 'Severe' }), nwsAlert(now)),
+    points: nwsPoints(), hourly: nwsHourly(now, thunderAt(4, 3, 61, 'Showers And Thunderstorms Likely')) });
+  await p.site.loadNwsAlerts();
+  await p.site.loadNwsForecast();
+  const b = p.els['warn-nws'];
+  assert.strictEqual(b.style.display, 'flex');
+  assert.strictEqual(b.className, 'warn-banner level-danger');
+  assert.strictEqual(p.els['warn-nws-dot'].style.background, 'var(--bad-dot)');
+  // Three: their names and times, and where the rest is - a phone keeps the summary on its first screen.
+  const body = p.els['warn-nws-body'].innerHTML;
+  for (const s of ['<strong>NWS High Wind Warning until 4:00 PM</strong>', '<strong>NWS Wind Advisory until 4:00 PM</strong>',
+    '<strong>Thunderstorms in the NWS forecast, 2 PM &ndash; 5 PM</strong>', '<a href="#nws-outlook">details in the weather card</a>',
+    'href="https://forecast.weather.gov/MapClick.php?lat=41.3685&lon=-73.1478"']) {
+    assert.ok(body.includes(s), `${s} in ${body}`);
+  }
+  assert.ok(!/Northwest winds|chance of rain/.test(body), 'the details are in the weather card');
+  const sum = p.els['sum-nws'].innerHTML;
+  assert.ok(/summary-alert danger">NWS High Wind Warning until 4:00 PM</.test(sum), sum);
+  assert.ok(/summary-alert warn">NWS Wind Advisory/.test(sum) && /and 1 more, above/.test(sum), sum);
+  const card = p.els['nws-outlook'].innerHTML;
+  assert.ok(/NWS alerts &amp; thunderstorms/.test(card) && /fog-title">NWS High Wind Warning/.test(card) && /alerts checked 10:00 AM/.test(card), card);
+  for (const s of ['Northwest winds 20 to 30 mph', 'chance of rain up to 61%']) assert.ok(card.includes(s), `${s} in the weather card`);
+});
+
+test('page: one alert - the banner gives its name, its time and what the NWS says; orange for an advisory', async () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const p = nwsPage(now, { alerts: nwsFeed(nwsAlert(now)), points: nwsPoints(), hourly: nwsHourly(now) });
+  await p.site.loadNwsAlerts();
+  await p.site.loadNwsForecast();
+  assert.strictEqual(p.els['warn-nws'].className, 'warn-banner level-warn');
+  assert.strictEqual(p.els['warn-nws-dot'].style.background, 'var(--warn-dot)');
+  const body = p.els['warn-nws-body'].innerHTML;
+  assert.ok(/<strong>NWS Wind Advisory until 4:00 PM<\/strong><span>Northwest winds 20 to 30 mph with gusts up to 50 mph\.<\/span>/.test(body), body);
+  assert.ok(!/details in the weather card/.test(body));
+  assert.strictEqual(p.els['sum-nws'].innerHTML, '<div class="summary-alert warn">NWS Wind Advisory until 4:00 PM</div>');
+});
+
+test('page: no alerts and no thunder - no banner, nothing in the summary, and the card says so', async () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const p = nwsPage(now, { alerts: nwsFeed(), points: nwsPoints(), hourly: nwsHourly(now) });
+  await p.site.loadNwsAlerts();
+  await p.site.loadNwsForecast();
+  assert.strictEqual(p.els['warn-nws'].style.display, 'none');
+  assert.strictEqual(p.els['sum-nws'].innerHTML, '');
+  assert.ok(/No NWS alerts in effect for the dock\. No thunderstorms in the NWS hourly forecast for the next 24 hours\./.test(p.els['nws-outlook'].innerHTML));
+});
+
+test('page: the alerts and the forecast come from the dock, with the NWS\'s own JSON; /points once a visit', async () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const seen = [];
+  const p = nwsPage(now, { alerts: (u) => { seen.push(u); return reply(nwsFeed()); }, points: nwsPoints(), hourly: nwsHourly(now) });
+  await p.site.loadNwsAlerts();
+  await p.site.loadNwsForecast();
+  await p.site.loadNwsForecast();
+  assert.deepStrictEqual(seen, ['https://api.weather.gov/alerts/active?point=41.3685,-73.1478']);
+  assert.strictEqual(p.net.count(/\/points\/41\.3685,-73\.1478$/), 1, 'the grid square is looked up once');
+  assert.strictEqual(p.net.count(/forecast\/hourly$/), 2);
+});
+
+test('page: a /points answer pointing anywhere but an NWS gridpoint is refused, and never fetched', async () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  for (const bad of ['https://evil.example/gridpoints/OKX/58,76/forecast/hourly', 'http://api.weather.gov/gridpoints/OKX/58,76/forecast/hourly',
+    'https://api.weather.gov.evil.example/gridpoints/OKX/58,76/forecast/hourly', 'javascript:alert(1)', 42, null]) {
+    const p = nwsPage(now, { alerts: nwsFeed(), points: nwsPoints(bad), hourly: nwsHourly(now) });
+    await p.site.loadNwsForecast();
+    assert.strictEqual(p.net.count(/forecast\/hourly/), 0, String(bad));
+    assert.ok(/The NWS hourly forecast could not be loaded/.test(p.els['nws-outlook'].innerHTML), String(bad));
+  }
+});
+
+test('page: a failed refresh keeps the last alerts for an hour, then says they could not be loaded', async () => {
+  let t = etDate('2026-10-31', 10).getTime(), up = true;
+  const start = t;
+  const p = nwsPage(() => t, { alerts: () => (up ? reply(nwsFeed(nwsAlert(start, { ends: new Date(start + 8 * 3600000).toISOString() }))) : offline()),
+    points: nwsPoints(), hourly: nwsHourly(start) });
+  await p.site.loadNwsAlerts();
+  assert.strictEqual(p.els['warn-nws'].style.display, 'flex');
+  up = false; t = start + 30 * 60000;
+  await p.site.loadNwsAlerts();
+  assert.strictEqual(p.els['warn-nws'].style.display, 'flex', 'one dropped request does not hide the advisory');
+  t = start + p.site.NWS_ALERTS_KEEP_MS + 60000;
+  await p.site.loadNwsAlerts();
+  assert.strictEqual(p.els['warn-nws'].style.display, 'none');
+  assert.ok(/NWS alerts could not be loaded\./.test(p.els['nws-outlook'].innerHTML));
+  // An answer that is not an alerts list counts as a failure, not as "none".
+  const q = nwsPage(start, { alerts: { error: 'busy' }, points: nwsPoints(), hourly: nwsHourly(start) });
+  await q.site.loadNwsAlerts();
+  assert.ok(/NWS alerts could not be loaded\./.test(q.els['nws-outlook'].innerHTML), q.els['nws-outlook'].innerHTML);
+});
+
+test('page: an alert past its end goes at the next minute\'s render, without a new request', async () => {
+  let t = etDate('2026-10-31', 10).getTime();
+  const start = t;
+  const p = nwsPage(() => t, { alerts: nwsFeed(nwsAlert(start, { ends: new Date(start + 20 * 60000).toISOString() })), points: nwsPoints(), hourly: nwsHourly(start) });
+  await p.site.loadNwsAlerts();
+  assert.strictEqual(p.els['warn-nws'].style.display, 'flex');
+  t = start + 21 * 60000;
+  p.site.renderNwsOutlook();
+  assert.strictEqual(p.els['warn-nws'].style.display, 'none');
+  assert.strictEqual(p.net.count(/alerts\/active/), 1);
+  const src = fsT.readFileSync(INDEX_PATH, 'utf8');
+  const dash = src.slice(src.indexOf('function renderDashboard('), src.indexOf('/* ── RANGE BUTTONS ── */'));
+  assert.ok(/renderNwsOutlook\(\);\s*\}\s*$/.test(dash.trim() + '\n') || /renderNwsOutlook\(\);/.test(dash), 'renderDashboard re-renders it every minute');
+});
+
+test('page: the fog outlook reads the same dock alerts - a fog advisory makes it likely, and is not repeated in the NWS banner', async () => {
+  const now = etDate('2026-10-02', 7).getTime();
+  const fog = nwsAlert(now, { event: 'Dense Fog Advisory', severity: 'Moderate', ends: etDate('2026-10-02', 9).toISOString() });
+  const net = fakeNet([[/models=/, () => reply(FOG_FX.dry.response)], [/alerts\/active\?point=41\.3685,-73\.1478$/, () => reply(nwsFeed(fog))]]);
+  const { site, els } = loadSite(now, net.fetch);
+  await site.loadFogOutlook();
+  assert.ok(/NWS Dense Fog Advisory in effect until 9:00/.test(els['fog-outlook'].innerHTML), els['fog-outlook'].innerHTML.slice(0, 300));
+  assert.strictEqual(els['warn-fog'].style.display, 'flex');
+  assert.strictEqual(els['warn-nws'].style.display, 'none', 'one banner for the fog, not two');
+  assert.ok(/No other NWS alerts in effect for the dock\./.test(els['nws-outlook'].innerHTML));
+  assert.strictEqual(net.count(/alerts\/active/), 1, 'one request serves both');
+});
+
+test('page: a fog advisory issued between fog refreshes shows at the next 5-minute alerts check', async () => {
+  const now = etDate('2026-10-02', 6).getTime();
+  let alerts = nwsFeed();
+  const net = fakeNet([[/models=/, () => reply(FOG_FX.dry.response)], [/alerts\/active/, () => reply(alerts)]]);
+  const { site, els } = loadSite(now, net.fetch);
+  await site.loadFogOutlook();
+  assert.ok(!/Dense Fog Advisory/.test(els['fog-outlook'].innerHTML), 'sanity: none yet');
+  alerts = nwsFeed(nwsAlert(now, { event: 'Dense Fog Advisory', ends: etDate('2026-10-02', 9).toISOString() }));
+  await site.loadNwsAlerts();                    // the 5-minute timer - not the 30-minute fog one
+  assert.ok(/NWS Dense Fog Advisory in effect until 9:00/.test(els['fog-outlook'].innerHTML), els['fog-outlook'].innerHTML.slice(0, 200));
+  assert.strictEqual(els['warn-fog'].style.display, 'flex');
+  assert.strictEqual(net.count(/models=/), 1, 'the models were not asked again');
+});
+
+test('page: nothing the NWS sends can break the page - the banner and block simply hold what they can', async () => {
+  const now = etDate('2026-10-31', 10).getTime();
+  const bomb = new Proxy({}, { get() { throw new Error('boom'); } });
+  const { site, els } = loadSite(now);
+  for (const [a, f] of [[bomb, bomb], [{ features: bomb }, { properties: bomb }], [{ features: [{ properties: bomb }] }, { properties: { periods: [bomb] } }]]) {
+    Object.assign(site.state, { nwsAlertsLoaded: true, nwsForecastLoaded: true, nwsAlerts: a, nwsForecast: f });
+    site.renderNwsOutlook();   // must not throw
+  }
+  assert.ok(els.__logged.some(l => /NWS alerts failed/.test(String(l[1]))), 'the failure is logged');
+});
+
+test('page: refreshAll and the timers load the NWS alerts every 5 minutes and the forecast every 30', () => {
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8');
+  const body = html.match(/function refreshAll\(\) \{([\s\S]*?)\n\}/)[1];
+  assert.ok(/loadNwsForecast\(\)/.test(body) && /loadFogOutlook\(\)/.test(body), body);
+  assert.ok(/setInterval\(loadNwsAlerts, 300_000\)/.test(html));
+  assert.ok(/setInterval\(loadNwsForecast, 1_800_000\)/.test(html));
+  const fog = html.slice(html.indexOf('function loadFogOutlook()'), html.indexOf('const FOG_KEEP_MS'));
+  assert.ok(/loadNwsAlerts\(\)/.test(fog), 'the fog outlook loads the alerts through the shared loader');
+  assert.ok(!/alerts\/active/.test(fog), 'and does not fetch them itself');
+});
+
+test('page: the page load asks the NWS once for each: alerts, /points, the hourly forecast', async () => {
+  const t = etDate('2026-10-31', 10).getTime();
+  const net = fakeNet([
+    [/^data\.json/, () => reply(makeRaw(66, new Date(t - 60000)))], [/^history\.json/, () => reply(histUpTo(t - 60000, 66))],
+    [/api\.open-meteo\.com.*models=/, () => reply(FOG_FX.dry.response)], [/api\.open-meteo\.com/, () => reply(WEATHER_FORECAST)],
+    [/api\.weather\.gov\/stations\//, () => reply(stationObs(t))], [/alerts\/active/, () => reply(nwsFeed())],
+    [/api\.weather\.gov\/points\//, () => reply(nwsPoints())], [/forecast\/hourly$/, () => reply(nwsHourly(t))],
+    [/stageflow/, (u) => reply(riverSeries(t, 3, /observed$/.test(u) ? 'observed' : 'forecast'))],
+  ]);
+  const { els } = loadSite(t, net.fetch);
+  els.__fire('window', 'DOMContentLoaded');
+  await settle();
+  assert.deepStrictEqual([/alerts\/active/, /\/points\//, /forecast\/hourly$/].map(r => net.count(r)), [1, 1, 1]);
+  assert.ok(/No NWS alerts in effect/.test(els['nws-outlook'].innerHTML), els['nws-outlook'].innerHTML);
+});
+
+// ── The email ───────────────────────────────────────────────────────────────
+
+function nwsDigest({ alerts, forecast, now = new Date() } = {}) {
+  return M.computeDigest(logic, { raw: makeRaw(66), history: historyAtTemp(66) },
+    { level: 5, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
+    { available: true, code: 3, tempF: 60, feelsF: null, windMph: 8, gustMph: 14, dir: 'NW', atMs: Date.now() }, now,
+    { response: null, alerts }, forecast);
+}
+
+test('email: alerts and thunder in a box under the rules banner, red for a warning, with the NWS link', () => {
+  const now = Date.now();
+  const d = nwsDigest({ alerts: nwsFeed(nwsAlert(now, { event: 'Flood Warning', severity: 'Severe' }), nwsAlert(now)),
+    forecast: nwsHourly(now, thunderAt(3, 2, 70, 'Showers And Thunderstorms')) });
+  const html = M.renderEmailHtml(d);
+  assert.strictEqual(d.nws.level, 'danger');
+  for (const s of ['NWS Flood Warning until', 'NWS Wind Advisory until', 'Thunderstorms in the NWS forecast,', 'Northwest winds 20 to 30 mph',
+    'chance of rain up to 70%', 'https://forecast.weather.gov/MapClick.php?lat=41.3685&amp;lon=-73.1478']) {
+    assert.ok(html.includes(s), `${s} missing`);
+  }
+  assert.ok(html.indexOf('NWS Flood Warning') < html.indexOf('Boat restrictions'.toUpperCase()) || html.indexOf('NWS Flood Warning') < html.indexOf('Boat restrictions'), 'above the boats');
+  assert.ok(html.includes('#96201f'), 'the red of a "no" status');
+  assert.ok(!/[^\x00-\x7f]/.test(html), 'ASCII only');
+  assert.ok(!/rgba\(|\sclass=|<style/i.test(html));
+});
+
+test('email: no alerts and no thunder - one line in the weather section; failures said there too', () => {
+  const now = Date.now();
+  const quiet = M.renderEmailHtml(nwsDigest({ alerts: nwsFeed(), forecast: nwsHourly(now) }));
+  assert.ok(/No NWS alerts in effect for the dock\. No thunderstorms in the NWS hourly forecast for the next 24 hours\./.test(quiet));
+  assert.ok(!/full text at weather\.gov/.test(quiet), 'no box');
+  const failed = M.renderEmailHtml(nwsDigest({ alerts: null, forecast: null }));
+  assert.ok(/NWS alerts could not be loaded\. The NWS hourly forecast could not be loaded, so thunderstorms are not shown\./.test(failed));
+  // A digest built without the NWS inputs (as older callers do) says nothing about them.
+  const none = M.renderEmailHtml(M.computeDigest(logic, { raw: makeRaw(66), history: historyAtTemp(66) },
+    { level: 5, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() }, { available: false }, new Date()));
+  assert.ok(!/NWS alerts|NWS hourly/.test(none));
+});
+
+test('email subject: an NWS warning leads it, then likely thunderstorms; advisories, watches and slight chances do not', () => {
+  const now = Date.now();
+  const subj = (alerts, forecast) => M.renderSubject(nwsDigest({ alerts, forecast }));
+  assert.ok(/^NHRC \S+ \d+ - NWS High Wind Warning - /.test(subj(nwsFeed(nwsAlert(now, { event: 'High Wind Warning' })), nwsHourly(now))));
+  assert.ok(/^NHRC \S+ \d+ - THUNDERSTORMS LIKELY - /.test(subj(nwsFeed(), nwsHourly(now, thunderAt(5, 2, 60)))));
+  assert.ok(/ - NWS Severe Thunderstorm Warning - /.test(subj(nwsFeed(nwsAlert(now, { event: 'Severe Thunderstorm Warning' })), nwsHourly(now, thunderAt(1, 2, 80)))),
+    'the warning, not both');
+  for (const [a, f] of [[nwsFeed(nwsAlert(now)), nwsHourly(now)], [nwsFeed(nwsAlert(now, { event: 'Tornado Watch' })), nwsHourly(now)],
+    [nwsFeed(), nwsHourly(now, thunderAt(5, 2, 20, 'Slight Chance Showers And Thunderstorms'))], [null, null]]) {
+    const s = subj(a, f);
+    assert.ok(!/NWS|THUNDER/.test(s), s);
+  }
+  // Fog and a warning together: both, the warning first.
+  const both = M.renderSubject(Object.assign(nwsDigest({ alerts: nwsFeed(nwsAlert(now, { event: 'Flood Warning' })), forecast: nwsHourly(now) }),
+    { fog: { level: 'likely' } }));
+  assert.ok(/ - NWS Flood Warning - FOG RISK - /.test(both), both);
+});
+
+test('email: the NWS loaders - the dock\'s alerts, /points then the hourly forecast, with the NWS headers; null on any failure', async () => {
+  const realFetch = global.fetch;
+  const calls = [];
+  const answer = (url) => {
+    if (/alerts\/active/.test(url)) return nwsFeed(nwsAlert(Date.now()));
+    if (/\/points\//.test(url)) return nwsPoints();
+    if (/forecast\/hourly$/.test(url)) return nwsHourly(Date.now(), thunderAt(2, 2));
+    if (/models=/.test(url)) return FOG_FX.dry.response;
+    throw new Error('unexpected ' + url);
+  };
+  global.fetch = async (url, opts) => { calls.push({ url: String(url), headers: (opts && opts.headers) || {} }); return { ok: true, status: 200, json: async () => answer(String(url)) }; };
+  try {
+    const fi = await M.loadFogInputs(logic);
+    assert.strictEqual(fi.alerts.features.length, 1);
+    const f = await M.loadNwsForecast(logic);
+    assert.ok(f && f.properties.periods.length === 156);
+    const nws = calls.filter(c => /api\.weather\.gov/.test(c.url));
+    assert.deepStrictEqual(nws.map(c => c.url), ['https://api.weather.gov/alerts/active?point=41.3685,-73.1478',
+      'https://api.weather.gov/points/41.3685,-73.1478', NWS_HOURLY_URL]);
+    for (const c of nws) assert.ok(/roworno\.com/.test(c.headers['User-Agent']) && c.headers.Accept === 'application/geo+json', JSON.stringify(c.headers));
+    global.fetch = async (url) => ({ ok: true, status: 200, json: async () => (/\/points\//.test(String(url)) ? nwsPoints('https://evil.example/x') : nwsHourly(Date.now())) });
+    assert.strictEqual(await M.loadNwsForecast(logic), null, 'a foreign forecast address is refused');
+    global.fetch = async () => { throw new Error('offline'); };
+    assert.strictEqual(await M.loadNwsForecast(logic), null);
+    assert.strictEqual((await M.loadFogInputs(logic)).alerts, null);
+    global.fetch = async () => ({ ok: true, status: 200, json: async () => ({ error: 'busy' }) });
+    assert.strictEqual((await M.loadFogInputs(logic)).alerts, null, 'not an alerts list is a failure, not "none"');
+  } finally { global.fetch = realFetch; }
+  const src = fsT.readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8');
+  assert.ok(/loadFogInputs\(logic\), loadNwsForecast\(logic\),/.test(src) && /computeDigest\(logic, local, river, weather, new Date\(\), fogInputs, nwsForecast\)/.test(src), 'build() uses them');
+});
+
+test('email: a broken NWS answer never stops the email', () => {
+  const bomb = new Proxy({}, { get() { throw new Error('boom'); } });
+  for (const [a, f] of [[bomb, bomb], [{ features: bomb }, { properties: bomb }]]) {
+    const d = nwsDigest({ alerts: a, forecast: f });
+    const html = M.renderEmailHtml(d);
+    assert.ok(/NWS alerts could not be loaded\./.test(html), 'stated as unavailable');
+    assert.ok(/Boat restrictions/i.test(html), 'the rest of the email is there');
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
