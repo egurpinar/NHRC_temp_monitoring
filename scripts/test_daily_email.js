@@ -4125,7 +4125,12 @@ test('water: the 3-morning rule counts the Worker\'s mornings that history.json 
 });
 
 test('water: history.json (over 1 MB) is downloaded again only every 30 minutes while the Worker keeps up', async () => {
-  let t = Date.now();
+  // A fixed afternoon, not the real clock: from 3 PM, 14 days miss the
+  // morning 14 days back (5-11 AM), so the rules need the archive. Before
+  // 11 AM the same 14 days hold every morning the rules read, the archive is
+  // not needed at all, and the counts below would not be these. The 2 Nov
+  // 2026 email run at 1:58 AM failed on exactly that.
+  let t = etDate('2026-10-31', 15).getTime();
   const p = waterPage(() => t, { repo: () => reply(makeRaw(66, new Date(t - 2 * HOUR))), archive: () => reply(histUpTo(t - 2 * HOUR, 66)),
     latest: () => reply(makeRaw(64, new Date(t))), recent: () => reply(workerDays(t, 64)) });
   const counts = [];
@@ -4181,7 +4186,12 @@ test('water: newest, merged, normalized - the pieces on their own', () => {
 test('water, email: the Worker\'s fresh reading and its days, together with the checkout\'s files', async () => {
   const realFetch = global.fetch;
   const local = M.loadLocalData();
-  const t = Date.now() + 60000;   // newer than anything in the checkout
+  // Newer than anything in the checkout, by the checkout's own times: on a
+  // clock set back before its last fetch (the time-travel runs), Date.now()
+  // alone is not.
+  const newest = local.history.reduce((m, h) => Math.max(m, h.ts),
+    Math.max(Date.now(), Date.parse(local.raw && local.raw.fetchedAt) || 0));
+  const t = newest + 60000;
   global.fetch = async (url) => {
     if (url === W_LATEST) return { ok: true, status: 200, json: async () => makeRaw(57.5, new Date(t)) };
     if (url === W_RECENT) return { ok: true, status: 200, json: async () => workerDays(t, 57.5, 1) };
@@ -4287,7 +4297,9 @@ test('NWS: alerts in force or still to come; tests, cancellations, ended ones, r
 
 test('NWS: an alert whose every VTEC code ends, cancels or upgrades it is over - the feed lists those as updates until they expire', () => {
   // As the live feed had them on 31 Oct 2026: "The threat for winds ... has ended."
-  const now = etDate('2026-10-31', 10).getTime();
+  // Times from the real clock: fogAdvisory reads it (Date.now()), so alerts
+  // set on a fixed day would all be past their end time on any later day.
+  const now = Date.now();
   const vtec = (...v) => ({ parameters: { VTEC: v } });
   const ended = nwsAlert(now, Object.assign({ messageType: 'Update', description: 'The threat for winds gusting up to Wind Advisory criteria has ended.' },
     vtec('/O.EXP.KOKX.WI.Y.0043.000000T0000Z-261031T1500Z/')));

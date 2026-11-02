@@ -20,6 +20,7 @@ status using the site's own functions and compares against the email output.
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
 | `test_daily_email.js` | Test suite (301 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, and the NWS alerts and thunderstorms |
+| `test_time_travel.js` | Runs `test_daily_email.js` with the clock set (`fakenow.js`) to the hours the email job really runs it (1-2 AM), the morning window's edges, the next daylight-saving changes, the season's edges and the new year. Run it before pushing a change to the page or the email: the 2 Nov 2026 email did not go out because two tests passed in the afternoon and failed at 1:58 AM |
 | `test_site_theme.js` | The website's light and dark themes (20 tests): contrast of every colour where it is used (WCAG AA), dark kept as the original design, the switch, the device default, the charts |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
@@ -301,6 +302,7 @@ node scripts/daily_email.js --json    # print computed values
 node scripts/daily_email.js --send    # send (respects the season gate)
 node scripts/daily_email.js --send --force   # send even if off-season
 node scripts/test_daily_email.js      # run the tests
+node scripts/test_time_travel.js      # the same tests at 1-2 AM, DST, new year... (a few minutes)
 node scripts/test_site_theme.js       # the website's light/dark themes
 ```
 
