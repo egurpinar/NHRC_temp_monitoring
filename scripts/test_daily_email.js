@@ -4183,42 +4183,117 @@ test('water: newest, merged, normalized - the pieces on their own', () => {
   assert.deepStrictEqual(JSON.parse(JSON.stringify(site.mergeHistory(null, null))), []);
 });
 
-test('water, email: the Worker\'s fresh reading and its days, together with the checkout\'s files', async () => {
-  const realFetch = global.fetch;
-  const local = M.loadLocalData();
-  // Newer than anything in the checkout, by the checkout's own times: on a
-  // clock set back before its last fetch (the time-travel runs), Date.now()
-  // alone is not.
-  const newest = local.history.reduce((m, h) => Math.max(m, h.ts),
-    Math.max(Date.now(), Date.parse(local.raw && local.raw.fetchedAt) || 0));
-  const t = newest + 60000;
-  global.fetch = async (url) => {
+/**
+ * The checkout's data.json and history.json as given (text; null: not there)
+ * while fn runs - stand-ins, not the repository's own files. What those hold
+ * on the morning of a run (minutes or days old, cut short, missing) is not
+ * the email code's doing, and must not decide whether its tests pass: these
+ * read the real files until 2 Nov 2026, so an empty or broken history.json
+ * would have failed them - and stopped the email - with the email itself fine.
+ */
+async function withCheckout(files, fn) {
+  const root = path.resolve(__dirname, '..');
+  const stand = new Map([[path.join(root, 'data.json'), files.data], [path.join(root, 'history.json'), files.history]]);
+  const real = fsT.readFileSync;
+  fsT.readFileSync = function (p, ...rest) {
+    const k = typeof p === 'string' ? path.resolve(p) : null;
+    if (k !== null && stand.has(k)) {
+      if (stand.get(k) == null) { const e = new Error(`ENOENT: no such file or directory, open '${k}'`); e.code = 'ENOENT'; throw e; }
+      return stand.get(k);
+    }
+    return real.call(this, p, ...rest);
+  };
+  try { return await fn(); } finally { fsT.readFileSync = real; }
+}
+/** A checkout as the job finds it: data.json two hours old, history.json the ten days up to it. */
+const usualCheckout = (t) => ({ data: JSON.stringify(makeRaw(58, new Date(t - 2 * HOUR))), history: JSON.stringify(histUpTo(t - 2 * HOUR, 58)) });
+/** The Worker answering with a reading at t and its day up to t - or not answering. */
+function workerAt(t) {
+  return async (url) => {
     if (url === W_LATEST) return { ok: true, status: 200, json: async () => makeRaw(57.5, new Date(t)) };
     if (url === W_RECENT) return { ok: true, status: 200, json: async () => workerDays(t, 57.5, 1) };
     throw new Error('unexpected ' + url);
   };
+}
+const workerDown = async () => { throw new Error('offline'); };
+
+test('water, email: the Worker\'s fresh reading and its days, together with the checkout\'s files', async () => {
+  const t = Date.now();
+  const realFetch = global.fetch;
+  global.fetch = workerAt(t);
   try {
-    const w = await M.loadWater(logic);
-    assert.strictEqual(w.source, 'worker');
-    assert.strictEqual(w.raw.fetchedAt, new Date(t).toISOString());
-    assert.strictEqual(w.history[w.history.length - 1].ts, Date.parse(new Date(t).toISOString().replace(/\.\d{3}Z$/, 'Z')));
-    assert.ok(w.history.length >= local.history.length, 'the archive is all still there');
-    assert.strictEqual(w.history[0].ts, local.history[0].ts);
+    await withCheckout(usualCheckout(t), async () => {
+      const local = M.loadLocalData();
+      const w = await M.loadWater(logic);
+      assert.strictEqual(w.source, 'worker');
+      assert.strictEqual(w.raw.fetchedAt, new Date(t).toISOString());
+      assert.strictEqual(w.history[w.history.length - 1].ts, Date.parse(new Date(t).toISOString().replace(/\.\d{3}Z$/, 'Z')));
+      assert.ok(w.history.length > local.history.length, 'the archive is all still there, and the Worker\'s newer readings with it');
+      assert.strictEqual(w.history[0].ts, local.history[0].ts);
+    });
   } finally { global.fetch = realFetch; }
 });
 
 test('water, email: without the Worker, exactly the checkout\'s data.json and history.json', async () => {
+  const t = Date.now();
   const realFetch = global.fetch;
-  global.fetch = async () => { throw new Error('offline'); };
+  global.fetch = workerDown;
   try {
-    const w = await M.loadWater(logic);
-    const local = M.loadLocalData();
-    assert.strictEqual(w.source, 'repo');
-    assert.deepStrictEqual(w.raw, local.raw);
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(w.history)), JSON.parse(JSON.stringify(local.history)));
+    await withCheckout(usualCheckout(t), async () => {
+      const w = await M.loadWater(logic);
+      const local = M.loadLocalData();
+      assert.strictEqual(w.source, 'repo');
+      assert.deepStrictEqual(w.raw, local.raw);
+      assert.deepStrictEqual(JSON.parse(JSON.stringify(w.history)), JSON.parse(JSON.stringify(local.history)));
+      assert.strictEqual(w.history.length, histUpTo(t - 2 * HOUR, 58).length);
+    });
   } finally { global.fetch = realFetch; }
   const src = fsT.readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8');
   assert.ok(/const local = await loadWater\(logic\);/.test(src), 'build() uses it');
+});
+
+test('water, email: a checkout cut short or missing - the Worker\'s reading and days carry the email; without the Worker a broken data.json stops it, loudly', async () => {
+  const t = Date.now();
+  const good = usualCheckout(t);
+  const cut = (s) => s.slice(0, Math.floor(s.length / 2));
+  const noTemp = JSON.stringify({ data: { devices: [{ deviceName: 'NHRC Water Sensor', deviceExt: { lastDeviceData: '{"online":false}' } }] },
+    fetchedAt: new Date(t - 2 * HOUR).toISOString() });
+  const states = {
+    'data.json missing': { data: null, history: good.history },
+    'data.json cut short': { data: cut(good.data), history: good.history },
+    'data.json without a temperature': { data: noTemp, history: good.history },
+    'history.json missing': { data: good.data, history: null },
+    'history.json cut short': { data: good.data, history: cut(good.history) },
+    'history.json empty': { data: good.data, history: '[]' },
+    'both missing': { data: null, history: null },
+  };
+  const realFetch = global.fetch;
+  try {
+    for (const [name, files] of Object.entries(states)) {
+      global.fetch = workerAt(t);
+      await withCheckout(files, async () => {
+        const w = await M.loadWater(logic);
+        assert.strictEqual(w.source, 'worker', name);
+        assert.strictEqual(w.raw.fetchedAt, new Date(t).toISOString(), name);
+        assert.ok(w.history.length >= workerDays(t, 57.5, 1).length, `${name}: the Worker's day at least`);
+      });
+    }
+    global.fetch = workerDown;
+    for (const name of ['data.json missing', 'data.json cut short', 'both missing']) {
+      await withCheckout(states[name], async () => {
+        await assert.rejects(M.loadWater(logic), /Could not read data\.json/, name);
+      });
+    }
+    for (const name of ['history.json missing', 'history.json cut short', 'history.json empty']) {
+      await withCheckout(states[name], async () => {
+        const w = await M.loadWater(logic);
+        assert.strictEqual(w.source, 'repo', name);
+        assert.strictEqual(logic.extractTemp(w.raw), logic.extractTemp(JSON.parse(good.data)), `${name}: the reading is still there`);
+        assert.ok(logic.extractTemp(w.raw) > 14 && logic.extractTemp(w.raw) < 15, `${name}: 58 F, in C`);
+        assert.deepStrictEqual(w.history, [], name);
+      });
+    }
+  } finally { global.fetch = realFetch; }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

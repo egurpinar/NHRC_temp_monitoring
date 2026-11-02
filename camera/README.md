@@ -1349,7 +1349,15 @@ of the slow ones), or only the tests whose names match:
 ```bash
 TEST_SHARD=1/3 node camera/test_snapshot_service.js
 TEST_ONLY='battery' node camera/test_snapshot_service.js
+node camera/test_at_slot_marks.js   # each end-to-end test begun just before a slot mark
 ```
+
+A test that counts one slot's captures calls `awayFromSlotMark()` before
+starting the service: five did not, and failed whenever they began in the last
+seconds before a 5-minute mark, where the next slot's captures joined in
+(found in November 2026 by starting each with the clock moved there;
+`test_at_slot_marks.js` keeps checking it). GitHub runs all of this on every
+push and every evening (`.github/workflows/tests.yml`).
 
 301 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including

@@ -21,6 +21,35 @@ const S = require('./snapshot_service.js');
 // not confused by another test run on the same machine.
 process.env.TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-camtest-'));
 
+// What the run sets for every process it starts: test_time_travel.js's moved
+// clock, without_network.sh's cut-off network. The services and scripts
+// started here get environments of their own, so they are handed these too -
+// or they would run on the real clock, and disagree with this file's. Empty
+// in a plain run.
+const CLOCK_ENV = Object.fromEntries(['NODE_OPTIONS', 'FAKE_OFFSET_MS', 'NO_NETWORK_LOG']
+  .filter(k => process.env[k]).map(k => [k, process.env[k]]));
+
+// The stand-in cameras' RTP relays get a receive buffer as large as the system
+// allows (Linux caps it: twice the default). A 1080p keyframe arrives as a
+// burst of packets; with two test runs side by side the default buffer
+// overflowed once, and a "clean" stream arrived with 8 packets missing that no
+// camera had lost.
+const RELAY_BUFFER = 4 << 20;
+
+/**
+ * Waits, when the next 5-minute mark is closer than `secs`, until just past
+ * it. At every mark a new slot starts - a timelapse frame every 5 minutes, a
+ * dock photo every 15 - so a test that expects one slot's captures, begun in
+ * the last seconds before a mark, met the next slot's as well and failed.
+ * Five did, whenever they began within about 5 seconds of a mark (found by
+ * starting each with the clock moved to just before one). Any test that
+ * counts one slot's captures calls this before starting the service.
+ */
+async function awayFromSlotMark(secs = 30) {
+  const step = 5 * 60000, left = step - (Date.now() % step);
+  if (left < secs * 1000) await new Promise(r => setTimeout(r, left + 1500));
+}
+
 let passed = 0, failed = 0;
 const failures = [];
 // Async tests run one after another, each with a deadline, and the summary
@@ -1059,7 +1088,7 @@ async function e2eSandbox(cameras, hostOpts, opts = {}) {
       env: Object.assign({ PATH: process.env.PATH, HOME: dir, RING_TOKEN_FILE: path.join(dir, 'token'),
         CAMERA_UPLOAD_URL: `https://${WORKER_HOST}/latest.jpg`, CAMERA_UPLOAD_SECRET: baseCfg.uploadSecret,
         RING_CAMERA_NAME: 'Dock Wired', RING_BACKUP_CAMERA_NAME: 'Downstream Lot',
-        CAMERA_RETRIES: '1', CAMERA_RETRY_DELAY_SECONDS: '0' }, env),
+        CAMERA_RETRIES: '1', CAMERA_RETRY_DELAY_SECONDS: '0' }, CLOCK_ENV, env),
     });
     let out = '';
     child.stdout.on('data', d => { out += d; });
@@ -1093,13 +1122,14 @@ test('end to end: --once and --once-backup upload from the right camera, with it
 
 test('end to end: the running service uploads the dock camera, and leaves the battery camera alone', async () => {
   const box = await e2eSandbox([{ name: 'Dock Wired' }, { name: 'Downstream Lot' }]);
+  await awayFromSlotMark();
   const r = await box.run([], {}, { stopAfter: 1, settleMs: 1500 });
   assert.deepStrictEqual(r.uploads.map(u => u.role), ['primary'], r.out);
   assert.ok(/Primary camera: "Dock Wired" — every 15 min, around the clock/.test(r.out), r.out);
   assert.ok(/Backup camera: "Downstream Lot" — only after 2 missed primary captures in a row/.test(r.out));
   assert.deepStrictEqual(box.ringEvents().filter(e => e.ev === 'snapshot').map(e => e.camera), ['Dock Wired'],
     'the battery camera was never asked for a snapshot');
-});
+}, 70000);
 
 test('end to end: with the dock camera down, the running service switches to the backup', async () => {
   const box = await e2eSandbox([{ name: 'Dock Wired', down: true }, { name: 'Downstream Lot' }]);
@@ -2480,7 +2510,7 @@ function liveRingLibrary(dir, ringLog) {
         this.sender = spawn(${JSON.stringify(path.join(dir, 'ffsender'))}, ['-v', 'error', '-re', '-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=15', '-t', '40',
           '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-bf', '0', '-an', '-f', 'rtp', '-sdp_file', sdpFile, 'rtp://127.0.0.1:' + rp],
           { env: senderEnv });
-        this.relay = dgram.createSocket('udp4'); this.out = dgram.createSocket('udp4');
+        this.relay = dgram.createSocket({ type: 'udp4', recvBufferSize: ${RELAY_BUFFER} }); this.out = dgram.createSocket('udp4');
         this.relay.on('message', (m) => { const nal = m[12] & 31;
           if (closing && (nal === 7 || nal === 8 || nal === 24)) return;
           const seq = m.readUInt16BE(2); this.subs.forEach(fn => fn({ header: { sequenceNumber: seq }, payload: m.subarray(12) }));
@@ -3827,7 +3857,7 @@ class FakeLiveCall {
     delete senderEnv.FFREPORT;
     this.sender = spawnProc(SENDER, ['-v', 'error', ...input, '-an', '-f', 'rtp', '-sdp_file', sdpFile, `rtp://127.0.0.1:${relayPort}`],
       { env: senderEnv });
-    this.relay = dgram.createSocket('udp4'); this.out = dgram.createSocket('udp4');
+    this.relay = dgram.createSocket({ type: 'udp4', recvBufferSize: RELAY_BUFFER }); this.out = dgram.createSocket('udp4');
     let start = null, i = 0;
     this.relay.on('message', (msg) => {
       i++;
@@ -4138,7 +4168,7 @@ if (HAVE_FFMPEG) {
         env: Object.assign({ PATH: process.env.PATH, HOME: dir, TMPDIR: tmp, RING_TOKEN_FILE: path.join(dir, 'token'),
           CAMERA_UPLOAD_URL: 'https://nhrc-camera.club-acct.workers.dev/latest.jpg', CAMERA_UPLOAD_SECRET: baseCfg.uploadSecret,
           RING_CAMERA_NAME: 'Dock Wired', RING_BACKUP_CAMERA_NAME: 'Downstream Lot', TIMELAPSE_DIR: tlOut,
-          CAMERA_RETRIES: '1', CAMERA_RETRY_DELAY_SECONDS: '0' }, env),
+          CAMERA_RETRIES: '1', CAMERA_RETRY_DELAY_SECONDS: '0' }, CLOCK_ENV, env),
       });
       let out = '';
       child.stdout.on('data', d => { out += d; });
@@ -4399,6 +4429,7 @@ if (HAVE_FFMPEG) {
 
   test('end to end: every 5 minutes (all day, for the test) - the first frame right after the first dock photo, in the day\'s folder, noted on disk', async () => {
     const box = timelapseSandbox();
+    await awayFromSlotMark();
     const t0 = Date.now();
     const r = await box.run([], Object.assign({ TIMELAPSE_RECORD_SECONDS: '20', TIMELAPSE_WORK_DIR: path.join(box.dir, 'run') }, allDay),
       { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)/.test(o), maxMs: 45000 });
@@ -4416,7 +4447,7 @@ if (HAVE_FFMPEG) {
     const ev = box.events().filter(e => e.camera === 'Downstream Lot').map(e => e.ev);
     assert.deepStrictEqual(ev, ['health', 'live'], 'the battery read, then the live view - never a snapshot of the battery camera');
     assert.deepStrictEqual(fs.readdirSync(path.join(box.dir, 'run')), [], 'nothing left where it recorded');
-  }, 60000);
+  }, 95000);
 
   test('end to end: the battery under 40% - no live view, said once; the dock photos as usual', async () => {
     const box = timelapseSandbox();
@@ -4474,6 +4505,7 @@ if (HAVE_FFMPEG) {
     const box = timelapseSandbox();
     fs.mkdirSync(path.join(box.tmp, 'nhrc-timelapse-left-behind'));
     fs.writeFileSync(path.join(box.tmp, 'nhrc-timelapse-left-behind', 'clip.mkv'), 'x');
+    await awayFromSlotMark();
     const r = await box.run([], Object.assign({ TIMELAPSE_WORK_DIR: '/proc/nhrc-camera', TIMELAPSE_RECORD_SECONDS: '8' }, allDay),
       { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)/.test(o), maxMs: 45000 });
     require('child_process').spawnSync('pkill', ['-KILL', '-f', box.dir]);
@@ -4481,7 +4513,7 @@ if (HAVE_FFMPEG) {
     assert.ok(/Timelapse: removed 1 recording left behind by an earlier run\./.test(r.out), r.out);
     assert.ok(/: saved \S+ - 1920x1080/.test(r.out), r.out);
     assert.deepStrictEqual(fs.readdirSync(box.tmp).filter(f => f.startsWith('nhrc-timelapse-')), []);
-  }, 60000);
+  }, 95000);
 } else {
   test('(real ffmpeg tests skipped: ffmpeg is not installed here)', () => {});
 }
@@ -4519,8 +4551,8 @@ function piFolder() {
 }
 
 /** The Pi's forced command, asked `request` (SSH_ORIGINAL_COMMAND). */
-const exportAsk = (dir, request) => run2(POSIX_SH, [EXPORT_SH], { env: { PATH: process.env.PATH,
-  NHRC_TIMELAPSE_DIR: dir, SSH_ORIGINAL_COMMAND: request } });
+const exportAsk = (dir, request) => run2(POSIX_SH, [EXPORT_SH], { env: Object.assign({ PATH: process.env.PATH,
+  NHRC_TIMELAPSE_DIR: dir, SSH_ORIGINAL_COMMAND: request }, CLOCK_ENV) });
 
 /** A Mac (its own HOME) and a stand-in ssh that refuses unless it could never ask for a password. */
 function macRig() {
@@ -4564,7 +4596,7 @@ function macRig() {
   };
   const exec = (args, env = {}) => run2('bash', [ICLOUD_SH, ...args], { encoding: 'utf8', env: Object.assign({
     PATH: process.env.PATH, HOME: home, NHRC_TIMELAPSE_SSH: fakeSsh, NHRC_TIMELAPSE_DEST: dest,
-    FAKE_PI_DIR: pi.dir, FAKE_PI_DIR_STANDBY: standby.dir, FAKE_EXPORT: EXPORT_SH, FAKE_SH: POSIX_SH }, env) });
+    FAKE_PI_DIR: pi.dir, FAKE_PI_DIR_STANDBY: standby.dir, FAKE_EXPORT: EXPORT_SH, FAKE_SH: POSIX_SH }, CLOCK_ENV, env) });
   const copy = (today, hour, env = {}, pis = ['emre@pihole2']) => exec(['run', ...pis],
     Object.assign({ NHRC_TIMELAPSE_TODAY: today, NHRC_TIMELAPSE_HOUR: hour }, env));
   const lastLog = () => fs.readFileSync(logFile, 'utf8').trim().split('\n').pop();
@@ -4667,8 +4699,8 @@ test('the Mac\'s copy when things go wrong: Pi unreachable, a transfer cut short
   assert.ok(/ could not write to iCloud Drive \(.*(Permission denied|not permitted).*\) - allow "NHRC Timelapse" in System Settings > Privacy & Security > Files & Folders$/.test(m.lastLog()), m.lastLog());
   // iCloud Drive off: the folder would never be uploaded - said, nothing copied.
   m = macRig();
-  run2('bash', [ICLOUD_SH, 'run', 'emre@pihole2'], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: m.home,
-    NHRC_TIMELAPSE_SSH: '/bin/false', NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' } });
+  run2('bash', [ICLOUD_SH, 'run', 'emre@pihole2'], { encoding: 'utf8', env: Object.assign({ PATH: process.env.PATH, HOME: m.home,
+    NHRC_TIMELAPSE_SSH: '/bin/false', NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' }, CLOCK_ENV) });
   assert.ok(/ iCloud Drive cannot be found: is it on \(System Settings > Apple Account > iCloud\), and may "NHRC Timelapse" use it/.test(m.lastLog()), m.lastLog());
 });
 
@@ -4760,7 +4792,12 @@ test('the Mac\'s copy: one at a time; a lock left by a copy that died is taken o
   m.copy('2026-10-14', '21');
   assert.ok(/ another copy is running; this one stops$/.test(m.lastLog()), m.lastLog());
   assert.ok(!fs.existsSync(m.dest) || fs.readdirSync(m.dest).length === 0);
-  const old = new Date(Date.now() - 3 * 3600 * 1000);
+  // Three hours older than a file made now, by the file system's clock: the
+  // one `find -mmin` reads (the same as this file's, outside a time-travel run).
+  const probe = path.join(m.support, '.now');
+  fs.writeFileSync(probe, '');
+  const old = new Date(fs.statSync(probe).mtimeMs - 3 * 3600 * 1000);
+  fs.unlinkSync(probe);
   fs.utimesSync(lock, old, old);
   m.copy('2026-10-14', '21');
   assert.ok(/ copied 3 days/.test(m.lastLog()), m.lastLog());
@@ -4790,8 +4827,8 @@ if (fs.existsSync('/usr/sbin/sshd') && fs.existsSync('/usr/bin/ssh-keygen')) {
       const wrapper = path.join(t, 'ssh');
       fs.writeFileSync(wrapper, `#!/bin/bash\nexec ssh -F ${t}/ssh_config "$@"\n`, { mode: 0o755 });
       await new Promise(r => setTimeout(r, 700));
-      const r = run2('bash', [ICLOUD_SH, 'run', `${user}@pi`], { encoding: 'utf8', env: { PATH: process.env.PATH, HOME: m.home,
-        NHRC_TIMELAPSE_SSH: wrapper, NHRC_TIMELAPSE_DEST: m.dest, NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' } });
+      const r = run2('bash', [ICLOUD_SH, 'run', `${user}@pi`], { encoding: 'utf8', env: Object.assign({ PATH: process.env.PATH, HOME: m.home,
+        NHRC_TIMELAPSE_SSH: wrapper, NHRC_TIMELAPSE_DEST: m.dest, NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' }, CLOCK_ENV) });
       assert.strictEqual(r.status, 0, r.stderr);
       assert.strictEqual(m.lastLog().slice(20), `copied 3 days, 9 frames, from ${user}@pi to iCloud Drive/NHRC Timelapse`);
       assert.deepStrictEqual(fs.readdirSync(m.dest).sort(), ['2026-10-12', '2026-10-13', '2026-10-14']);
@@ -4839,8 +4876,8 @@ if (fs.existsSync('/usr/sbin/sshd') && fs.existsSync('/usr/bin/ssh-keygen')) {
       const wrapper = path.join(t, 'ssh');
       fs.writeFileSync(wrapper, `#!/bin/bash\nexec ssh -F ${t}/ssh_config "$@"\n`, { mode: 0o755 });
       await new Promise(r => setTimeout(r, 700));
-      const r = run2('bash', [ICLOUD_SH, 'run', `${user}@main`, `${user}@standby`], { encoding: 'utf8', env: { PATH: process.env.PATH,
-        HOME: m.home, NHRC_TIMELAPSE_SSH: wrapper, NHRC_TIMELAPSE_DEST: m.dest, NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' } });
+      const r = run2('bash', [ICLOUD_SH, 'run', `${user}@main`, `${user}@standby`], { encoding: 'utf8', env: Object.assign({ PATH: process.env.PATH,
+        HOME: m.home, NHRC_TIMELAPSE_SSH: wrapper, NHRC_TIMELAPSE_DEST: m.dest, NHRC_TIMELAPSE_TODAY: '2026-10-14', NHRC_TIMELAPSE_HOUR: '21' }, CLOCK_ENV) });
       assert.strictEqual(r.status, 0, r.stderr);
       assert.deepStrictEqual(m.logLines(), [`copied 3 days, 9 frames, from ${user}@main to iCloud Drive/NHRC Timelapse`,
         `copied 1 day, 2 frames, from ${user}@standby to iCloud Drive/NHRC Timelapse`]);
@@ -5435,7 +5472,7 @@ if (HAVE_FFMPEG) {
           RING_TOKEN_FILE: path.join(dir, `token-${pi}`), TIMELAPSE_DIR: tlOut(pi), TIMELAPSE_WORK_DIR: path.join(dir, `run-${pi}`),
           CAMERA_UPLOAD_URL: `https://${WORKER_HOST}/latest.jpg`, CAMERA_UPLOAD_SECRET: baseCfg.uploadSecret,
           RING_CAMERA_NAME: 'Dock Wired', RING_BACKUP_CAMERA_NAME: 'Downstream Lot', CAMERA_RETRIES: '1', CAMERA_RETRY_DELAY_SECONDS: '0',
-          TIMELAPSE_EVERY_MINUTES: '5', TIMELAPSE_FROM: '0:00', TIMELAPSE_UNTIL: '23:59', TIMELAPSE_RECORD_SECONDS: '20' }, env),
+          TIMELAPSE_EVERY_MINUTES: '5', TIMELAPSE_FROM: '0:00', TIMELAPSE_UNTIL: '23:59', TIMELAPSE_RECORD_SECONDS: '20' }, CLOCK_ENV, env),
       });
       let out = '';
       child.stdout.on('data', d => { out += d; });
@@ -5459,6 +5496,7 @@ if (HAVE_FFMPEG) {
     const box = await twoPiBox();
     try {
       let mainDone = false;
+      await awayFromSlotMark();
       const mainRun = box.run('main', [], {}, { until: anyFrame, settleMs: 500, maxMs: 45000 }).then((r) => { mainDone = true; return r; });
       // The standby starts once the main Pi has checked in, as when both have been running.
       for (let i = 0; i < 200 && !box.host.checkIns('main').length; i++) await new Promise(r => setTimeout(r, 50));
@@ -5479,11 +5517,12 @@ if (HAVE_FFMPEG) {
     } finally {
       box.cleanup();
     }
-  }, 70000);
+  }, 105000);
 
   test('end to end: the main Pi quiet for 20 minutes - the standby takes over and films the timelapse into its own folder, after its dock photo', async () => {
     const box = await twoPiBox();
     try {
+      await awayFromSlotMark();
       await seedMain(box, 20);
       const r = await box.run('standby', [], {}, { until: anyFrame, settleMs: 300, maxMs: 45000 });
       assert.ok(/The main Pi has not checked in for 20 min - this Pi is taking over the cameras/.test(r.out), r.out);
@@ -5503,7 +5542,7 @@ if (HAVE_FFMPEG) {
     } finally {
       box.cleanup();
     }
-  }, 60000);
+  }, 95000);
 
   test('end to end: the main Pi back between the standby\'s check and its live view - the Worker, asked again, says so: the camera is not woken', async () => {
     let box = null, back = false;

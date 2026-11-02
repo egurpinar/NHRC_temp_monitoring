@@ -1,0 +1,90 @@
+name: Tests
+
+# Every test suite, on GitHub's own runner - the kind of machine the daily
+# email job runs its tests on at 1 AM - at each push, every evening, and on
+# demand (Actions > Tests > Run workflow).
+#
+# WHY
+# ---
+# The email job will not send if one of its tests fails. On 2 Nov 2026 two
+# tests that passed by day failed at 1:58 AM, and no email went out. This
+# workflow runs the same tests hours earlier - and at 1-2 AM, across daylight
+# saving and the season's edges, with the clock moved (test_time_travel.js),
+# and with the network cut off (without_network.sh) - so a failing test shows
+# up here, with a failure email from GitHub, while there is time to fix it.
+# It sends nothing and changes nothing.
+
+on:
+  push:
+    # The fetch job's readings commits change nothing the tests read.
+    paths-ignore:
+      - 'data.json'
+      - 'history.json'
+  schedule:
+    - cron: '30 22 * * *'   # 6:30 PM EDT / 5:30 PM EST: hours before the 1 AM email
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    # About 35 minutes: the camera suite's real video, at three moments and
+    # one run at a time, is most of it.
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          # The whole history: the camera suite runs the code as deployed before
+          # (from git) against the new, and skips that test without it.
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'   # as daily_email.yml
+
+      - name: The tools the suites use
+        # ffmpeg and sshd run in the camera suite's end-to-end tests, which are
+        # skipped without them; jq and bc are fetch_temp.sh's.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends jq bc ffmpeg openssh-server \
+            || echo "::warning::could not install the tools - the camera suite's ffmpeg and ssh tests will be skipped"
+          node --version; jq --version || true; ffmpeg -version | head -1 || true
+
+      - name: The email job's tests, exactly as it runs them
+        run: |
+          bash scripts/test_send_window.sh
+          bash scripts/test_refresh_checkout.sh
+          node scripts/test_daily_email.js
+
+      - name: Every other suite
+        run: |
+          node scripts/test_map.js
+          node scripts/test_offline.js
+          node scripts/test_site_theme.js
+          node scripts/test_hazard_map.js
+          node camera/test_pi_check.js
+          bash scripts/test_fetch_temp.sh
+          node camera/test_snapshot_service.js
+
+      - name: Every suite at 1-2 AM, across daylight saving, the season's edges and the new year - with no network
+        env:
+          TT_JOBS: '4'
+        run: bash scripts/without_network.sh node scripts/test_time_travel.js
+
+      - name: The camera's end-to-end tests, each begun just before a slot mark
+        run: bash scripts/without_network.sh node camera/test_at_slot_marks.js
+
+      - name: The email from today's live data (built, not sent)
+        # The live services as the 1 AM job will find them. A service that is
+        # down is reported in the email, not a failure here; only a crash is.
+        run: |
+          node scripts/daily_email.js --json > "$RUNNER_TEMP/digest.json"
+          head -40 "$RUNNER_TEMP/digest.json"

@@ -19,8 +19,11 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
-| `test_daily_email.js` | Test suite (301 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, and the NWS alerts and thunderstorms |
-| `test_time_travel.js` | Runs `test_daily_email.js` with the clock set (`fakenow.js`) to the hours the email job really runs it (1-2 AM), the morning window's edges, the next daylight-saving changes, the season's edges and the new year. Run it before pushing a change to the page or the email: the 2 Nov 2026 email did not go out because two tests passed in the afternoon and failed at 1:58 AM |
+| `test_daily_email.js` | Test suite (302 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, and the NWS alerts and thunderstorms. It reads no live data: not the network, not the checkout's `data.json`/`history.json` (stand-ins), so what those hold on the morning of a run cannot stop the email |
+| `test_time_travel.js` | Runs every test suite with the clock moved (`fakenow.js`, and a stand-in `date`) to the hours the email job really runs them (1-2 AM), the morning window's edges, the next daylight-saving changes, the season's edges and the new year. The 2 Nov 2026 email did not go out because two tests passed in the afternoon and failed at 1:58 AM. GitHub runs it on every push and every evening (`tests.yml`) |
+| `fakenow.js` | The moved clock for `test_time_travel.js`: node's `Date`, in every process and vm context a run starts |
+| `without_network.sh`, `no_network.js` | Run a command with the network cut off for every process it starts, and fail if anything tried to reach it - no test may depend on a server somewhere else |
+| `../.github/workflows/tests.yml` | Every suite on GitHub's runner at each push, each evening at 6:30 PM (hours before the 1 AM email), and on demand: as the email job runs them, then time-travelled with no network, then the camera's end-to-end tests each begun just before a slot mark (`../camera/test_at_slot_marks.js`), then the email built from live data (not sent). A failure is emailed by GitHub |
 | `test_site_theme.js` | The website's light and dark themes (20 tests): contrast of every colour where it is used (WCAG AA), dark kept as the original design, the switch, the device default, the charts |
 | `fixtures/fog_mornings.json` | Archived forecasts for four real mornings, used by the fog tests |
 | `send_window.sh` | Decides whether a run sends now, waits for 1 AM, or skips |
@@ -302,7 +305,8 @@ node scripts/daily_email.js --json    # print computed values
 node scripts/daily_email.js --send    # send (respects the season gate)
 node scripts/daily_email.js --send --force   # send even if off-season
 node scripts/test_daily_email.js      # run the tests
-node scripts/test_time_travel.js      # the same tests at 1-2 AM, DST, new year... (a few minutes)
+node scripts/test_time_travel.js      # every suite at 1-2 AM, DST, new year... (minutes)
+bash scripts/without_network.sh node scripts/test_time_travel.js   # ...and with no network, as tests.yml
 node scripts/test_site_theme.js       # the website's light/dark themes
 ```
 
