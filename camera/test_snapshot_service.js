@@ -2591,11 +2591,15 @@ const leftoverWorkDirs = () => fs.readdirSync(os.tmpdir()).filter(f => f.startsW
 test('the timelapse decodes single-threaded, refuses damaged frames, and is bounded at every step', () => {
   const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
   const decode = src.slice(src.indexOf('async function decodeKeyframe'), src.indexOf('/** Counts RTP packets'));
-  assert.ok(/'-threads', '1'/.test(decode) && decode.indexOf("'-threads'") < decode.indexOf("'-i'"), 'decoder limited to one thread');
-  assert.ok(/'-xerror', '-err_detect', 'explode'/.test(decode), 'a damaged keyframe is an error, not a picture');
-  assert.ok(/'-ss', String\(t\), '-t', String\(KEYFRAME_READ_SECONDS\), '-i', clip/.test(decode),
-    'only the keyframe\'s moment is read: ffmpeg 7+ reads ahead, and a later damaged keyframe failed a clean one');
-  assert.ok(/const KEYFRAME_READ_SECONDS = 0\.1;/.test(src));
+  // Two runs: the keyframe copied out alone (nothing decoded), then that copy decoded.
+  const cutRun = decode.slice(decode.indexOf('const cut'), decode.indexOf('const r ='));
+  const decodeRun = decode.slice(decode.indexOf('const r ='));
+  assert.ok(/'-ss', String\(t\), '-i', clip, '-map', '0:v:0', '-c', 'copy',\s*'-frames:v', '1'/.test(cutRun),
+    'the keyframe is copied out on its own: decoded from the clip, ffmpeg 7+ decodes ahead, and a later damaged keyframe failed a clean one');
+  assert.ok(!/-threads|-xerror|-skip_frame/.test(cutRun), 'the copy decodes nothing');
+  assert.ok(/'-threads', '1'/.test(decodeRun) && decodeRun.indexOf("'-threads'") < decodeRun.indexOf("'-i', one"), 'decoder limited to one thread');
+  assert.ok(/'-xerror', '-err_detect', 'explode'/.test(decodeRun), 'a damaged keyframe is an error, not a picture');
+  assert.ok(/finally \{\s*try \{ fs\.unlinkSync\(one\)/.test(decode), 'the copy is never left behind');
   const tool = src.slice(src.indexOf('function runTool'), src.indexOf('/** Keyframe times'));
   assert.ok(/const kill = \(\) => \{ try \{ p\.kill\('SIGKILL'\)/.test(tool) && /setTimeout\(kill, timeoutMs\)/.test(tool),
     'every ffmpeg run is killed at its deadline');
