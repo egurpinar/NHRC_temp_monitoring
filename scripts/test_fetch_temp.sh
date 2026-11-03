@@ -24,6 +24,11 @@ section(){ echo; echo "$1"; echo "${1//?/-}"; }
 
 TEMP_OK='{"payload":{"capabilities":[{"instance":"online","state":{"value":true}},{"instance":"sensorTemperature","state":{"value":73.36}}]}}'
 
+# Temperatures are checked as numbers ("jq '... + 0'"), not as written: jq 1.7
+# and later print a number as it stands in the file (99.00), jq 1.6 as a
+# number (99). GitHub's runners have the newer jq; the first run there failed
+# on exactly that, though the files are the same JSON either way.
+
 # Sections 1-5 test polling the sensor directly - what the job does without the
 # Worker. Section 6 turns the Worker back on, with stand-in files.
 export WORKER_ARCHIVE=0
@@ -44,7 +49,7 @@ export GOVEE_FAKE_RESPONSE="$TEMP_OK"
 LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1
 chk "exit 0 on a good reading" "$?" "0"
 chk "history appended" "$(jq length history.json)" "2"
-chk "tempF recorded" "$(jq -r '.[-1].tempF' history.json)" "73.36"
+chk "tempF recorded" "$(jq -r '.[-1].tempF + 0' history.json)" "73.36"
 chk "tem is Celsius x100" "$(jq -r '.data.devices[0].deviceExt.lastDeviceData' data.json | jq -r .tem)" "2297"
 chk "online recorded" "$(jq -r '.data.devices[0].deviceExt.lastDeviceData' data.json | jq -r .online)" "true"
 
@@ -76,8 +81,8 @@ section "3. Value ranges"
 reading(){ export GOVEE_FAKE_RESPONSE="{\"payload\":{\"capabilities\":[{\"instance\":\"sensorTemperature\",\"state\":{\"value\":$1}}]}}"
            LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1; }
 reading 31
-chk "integer value accepted" "$(jq -r '.[-1].tempF' history.json)" "31"
-chk "below 0°C converts to C" "$(jq -r '.[-1].tempC' history.json)" "-0.55"
+chk "integer value accepted" "$(jq -r '.[-1].tempF + 0' history.json)" "31"
+chk "below 0°C converts to C" "$(jq -r '.[-1].tempC + 0' history.json)" "-0.55"
 # Between -1 and 1 °C bc writes ".55" / "-.55" - not valid JSON. Every file must
 # stay strictly valid, checked here with Python's parser, which (unlike jq)
 # rejects a missing leading zero.
@@ -107,7 +112,7 @@ chk "history untouched by implausible readings" "$(jq length history.json)" "$n"
 reading 28; chk "28F (the floor) accepted" "$?" "0"
 reading 100; chk "100F (the ceiling) accepted" "$?" "0"
 MIN_PLAUSIBLE_F=-40 LOOP_MINUTES=0 GIT_COMMIT=0 GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":-4.5}}]}}' bash "$SCRIPT" >/dev/null 2>&1
-chk "the bounds can be overridden" "$(jq -r '.[-1].tempC' history.json)" "-20.27"
+chk "the bounds can be overridden" "$(jq -r '.[-1].tempC + 0' history.json)" "-20.27"
 # The replacement sensor advertises no "online" capability at all.
 export GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":70.0}}]}}'
 LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1
@@ -141,7 +146,7 @@ cd "$G" && git clone -q "$ORIGIN" work && cd work
 export GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":73.4}}]}}'
 LOOP_MINUTES=0 GIT_COMMIT=1 bash "$SCRIPT" > a.log 2>&1
 chk "clean push exits 0" "$?" "0"
-chk "reading reached origin" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq -r '.[-1].tempF')" "73.4"
+chk "reading reached origin" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq -r '.[-1].tempF + 0')" "73.4"
 
 # Someone else pushes between our checkout and our push.
 git clone -q "$ORIGIN" ../other
@@ -151,7 +156,7 @@ LOOP_MINUTES=0 GIT_COMMIT=1 bash "$SCRIPT" > b.log 2>&1
 chk "survives a push race" "$?" "0"
 chk "noticed the rejection" "$(grep -c 'push rejected' b.log)" "1"
 chk "their commit survived" "$(git --git-dir="$ORIGIN" cat-file -p main:NOTES.md)" "unrelated"
-chk "our reading survived" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq -r '.[-1].tempF')" "74.1"
+chk "our reading survived" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq -r '.[-1].tempF + 0')" "74.1"
 chk "no readings lost" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq length)" "3"
 
 # A conflicting append to the same file, which cannot be rebased automatically.
@@ -161,14 +166,14 @@ LOOP_MINUTES=0 GIT_COMMIT=1 bash "$SCRIPT" > c.log 2>&1
 chk "fails loudly rather than losing a reading" "$?" "1"
 chk "repo not stranded mid-rebase" "$(test -d .git/rebase-merge -o -d .git/rebase-apply && echo BROKEN || echo clean)" "clean"
 chk "origin JSON still valid" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq -e . >/dev/null 2>&1 && echo valid)" "valid"
-chk "the other run's data intact" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq -r '.[-1].tempF')" "33.8"
+chk "the other run's data intact" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq -r '.[-1].tempF + 0')" "33.8"
 
 # The next scheduled run gets a fresh checkout and must simply work.
 cd "$G" && git clone -q "$ORIGIN" work2 && cd work2
 export GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":76.3}}]}}'
 LOOP_MINUTES=0 GIT_COMMIT=1 bash "$SCRIPT" > d.log 2>&1
 chk "next run recovers" "$?" "0"
-chk "its reading landed" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq -r '.[-1].tempF')" "76.3"
+chk "its reading landed" "$(git --git-dir="$ORIGIN" cat-file -p main:history.json | jq -r '.[-1].tempF + 0')" "76.3"
 
 before=$(git rev-parse HEAD)
 export GOVEE_FAKE_RESPONSE='{"payload":{"capabilities":[{"instance":"sensorTemperature","state":{"value":77.0}}]}}'
@@ -211,7 +216,7 @@ latest_json "$C" 1400 > "$F/latest.json"
 LOOP_MINUTES=180 GIT_COMMIT=0 bash "$SCRIPT" > w1.log 2>&1
 chk "a healthy Worker: exit 0" "$?" "0"
 chk "its readings archived, in time order" "$(jq -c '[.[].ts]' history.json)" "[\"$OLD\",\"$B\",\"$C\"]"
-chk "a moment already archived keeps its value" "$(jq -r '.[0].tempF' history.json)" "71.6"
+chk "a moment already archived keeps its value" "$(jq -r '.[0].tempF + 0' history.json)" "71.6"
 chk "data.json is the Worker's latest" "$(jq -r .fetchedAt data.json)" "$C"
 chk "the sensor is not polled from here" "$(jq '[.[] | select(.tempF == 99)] | length' history.json)" "0"
 chk "and no three-hour loop" "$(grep -c sleeping w1.log)" "0"
@@ -222,12 +227,12 @@ echo "[{\"ts\":\"$(ago 120)\",\"tempC\":14,\"tempF\":57.2}]" > "$F/recent.json"
 latest_json "$(ago 120)" 1400 > "$F/latest.json"
 LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" > w2.log 2>&1
 chk "a Worker two hours behind: its readings kept" "$(jq '[.[] | select(.tempF == 57.2)] | length' history.json)" "1"
-chk "and the sensor polled directly" "$(jq -r '.[-1].tempF' history.json)" "99"
+chk "and the sensor polled directly" "$(jq -r '.[-1].tempF + 0' history.json)" "99"
 chk "the log says why" "$(grep -c 'over 45 minutes old' w2.log)" "1"
 
 reset; rm -f "$F/recent.json" "$F/latest.json"
 LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" > w3.log 2>&1
-chk "no Worker: the sensor polled, as before" "$(jq -r '.[-1].tempF' history.json)" "99"
+chk "no Worker: the sensor polled, as before" "$(jq -r '.[-1].tempF + 0' history.json)" "99"
 chk "the log says the Worker could not be reached" "$(grep -c 'could not be reached' w3.log)" "1"
 
 for junk in '{"not":"an array"}' 'not json' '[]' '[1,"x",null]' \
@@ -238,7 +243,7 @@ for junk in '{"not":"an array"}' 'not json' '[]' '[1,"x",null]' \
   "[{\"ts\":\"$C\",\"tempC\":-17.7,\"tempF\":0}]"; do
   reset; printf '%s' "$junk" > "$F/recent.json"; latest_json "$C" 1400 > "$F/latest.json"
   LOOP_MINUTES=0 GIT_COMMIT=0 bash "$SCRIPT" >/dev/null 2>&1
-  chk "junk never archived: ${junk:0:40}" "$(jq -c '[.[].tempF]' history.json)" "[71.6,99]"
+  chk "junk never archived: ${junk:0:40}" "$(jq -c '[.[].tempF + 0]' history.json)" "[71.6,99]"
 done
 
 reset; echo "{\"fetchedAt\":\"$(ago 1)\",\"marker\":1}" > data.json

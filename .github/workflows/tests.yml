@@ -52,38 +52,53 @@ jobs:
 
       - name: The tools the suites use
         # ffmpeg and sshd run in the camera suite's end-to-end tests, which are
-        # skipped without them; jq and bc are fetch_temp.sh's.
+        # skipped without them; jq and bc are fetch_temp.sh's. The versions go
+        # on the run page: the runner's tools are newer than a laptop's, and
+        # that is where a test meets them first.
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends jq bc ffmpeg openssh-server \
             || echo "::warning::could not install the tools - the camera suite's ffmpeg and ssh tests will be skipped"
-          node --version; jq --version || true; ffmpeg -version | head -1 || true
+          v() { "$@" 2>&1 | head -1 || true; }
+          echo "::notice title=The runner::$(. /etc/os-release && echo "$PRETTY_NAME") | node $(node --version) | $(v jq --version) | $(v bash --version | sed 's/ (.*//') | $(v date --version) | $(v git --version) | $(v bc --version) | $(v python3 --version) | $(v ffmpeg -version | cut -d' ' -f1-3) | $(v ssh -V)"
 
+      # Each suite through run_suite.js: its failing tests become annotations,
+      # on the run page and in GitHub's email, readable without signing in.
+      # And every suite runs, even after one fails - all of them reported at once.
       - name: The email job's tests, exactly as it runs them
         run: |
-          bash scripts/test_send_window.sh
-          bash scripts/test_refresh_checkout.sh
-          node scripts/test_daily_email.js
+          fail=0
+          node scripts/run_suite.js bash scripts/test_send_window.sh || fail=1
+          node scripts/run_suite.js bash scripts/test_refresh_checkout.sh || fail=1
+          node scripts/run_suite.js node scripts/test_daily_email.js || fail=1
+          exit $fail
 
       - name: Every other suite
+        if: success() || failure()
         run: |
-          node scripts/test_send_notice.js
-          node scripts/test_map.js
-          node scripts/test_offline.js
-          node scripts/test_site_theme.js
-          node scripts/test_hazard_map.js
-          node camera/test_pi_check.js
-          bash scripts/test_fetch_temp.sh
-          node camera/test_snapshot_service.js
+          fail=0
+          node scripts/run_suite.js node scripts/test_run_suite.js || fail=1
+          node scripts/run_suite.js node scripts/test_send_notice.js || fail=1
+          node scripts/run_suite.js node scripts/test_map.js || fail=1
+          node scripts/run_suite.js node scripts/test_offline.js || fail=1
+          node scripts/run_suite.js node scripts/test_site_theme.js || fail=1
+          node scripts/run_suite.js node scripts/test_hazard_map.js || fail=1
+          node scripts/run_suite.js node camera/test_pi_check.js || fail=1
+          node scripts/run_suite.js bash scripts/test_fetch_temp.sh || fail=1
+          node scripts/run_suite.js node camera/test_snapshot_service.js || fail=1
+          exit $fail
 
       - name: Every suite at 1-2 AM, across daylight saving, the season's edges and the new year - with no network
+        if: success() || failure()
         env:
           TT_JOBS: '4'
-        run: bash scripts/without_network.sh node scripts/test_time_travel.js
+        run: node scripts/run_suite.js bash scripts/without_network.sh node scripts/test_time_travel.js
 
       - name: The camera's end-to-end tests, each begun just before a slot mark
-        run: bash scripts/without_network.sh node camera/test_at_slot_marks.js
+        if: success() || failure()
+        run: node scripts/run_suite.js bash scripts/without_network.sh node camera/test_at_slot_marks.js
 
       - name: The email from today's live data (built, not sent)
+        if: success() || failure()
         # The live services as the 1 AM job will find them. A service that is
         # down is reported in the email, not a failure here; only a crash is.
         run: |

@@ -349,7 +349,7 @@ test('in the email job, with daily_email.js broken, these still pass - the check
 
 test('GitHub runs these at each push and every evening, with the clock moved and the network cut off', () => {
   const tests = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'tests.yml'), 'utf8');
-  assert.ok(/\n {10}node scripts\/test_send_notice\.js\n/.test(tests));
+  assert.ok(/\n {10}node scripts\/run_suite\.js node scripts\/test_send_notice\.js \|\| fail=1\n/.test(tests));
   const tt = fs.readFileSync(path.join(__dirname, 'test_time_travel.js'), 'utf8');
   assert.ok(/name: 'send_notice',\s+cmd: \['node', 'scripts\/test_send_notice\.js'\]/.test(tt));
 });
