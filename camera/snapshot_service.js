@@ -1422,6 +1422,7 @@ const LIVE_START_TIMEOUT_MS = 30 * 1000;      // to get the live view going
 const LIVE_EXTRA_MS = 45 * 1000;              // connection set-up, on top of the recording itself
 const FFMPEG_STEP_TIMEOUT_MS = 45 * 1000;     // each ffprobe or decode run
 const MAX_KEYFRAMES_TRIED = 4;
+const KEYFRAME_READ_SECONDS = 0.1;            // of the clip read to decode one keyframe: that moment, nothing after
 const CAPTURE_TIMEOUT_MS = 6 * 60 * 1000;     // the whole capture, fallback included, whatever happens
 const SOCKET_BUFFER_BYTES = 8 * 1024 * 1024;  // ffmpeg's receive buffer (the system caps it at net.core.rmem_max)
 const LIVE_MEMORY_NEED_MB = 40;               // headroom, on top of TIMELAPSE_MIN_MEMORY_MB, to start the live video
@@ -1804,8 +1805,13 @@ async function pickKeyframe(ffmpeg, ffprobe, clip, frame, halt = null) {
  */
 async function decodeKeyframe(ffmpeg, clip, t, out, halt = null) {
   try { fs.unlinkSync(out); } catch (e) { /* none */ }
+  // -t before -i: only that moment of the clip is read. From ffmpeg 7 on, the
+  // reading and decoding run ahead of the output, so a damaged keyframe
+  // seconds later stopped this clean one too (-xerror): with damage late in a
+  // recording, every keyframe came out "damaged" (ffmpeg 8, November 2026).
   const r = await runTool(ffmpeg, ['-v', 'error', '-threads', '1', '-xerror', '-err_detect', 'explode',
-    '-skip_frame', 'nokey', '-ss', String(t), '-i', clip, '-frames:v', '1', '-q:v', '2', '-y', out], FFMPEG_STEP_TIMEOUT_MS, halt);
+    '-skip_frame', 'nokey', '-ss', String(t), '-t', String(KEYFRAME_READ_SECONDS), '-i', clip,
+    '-frames:v', '1', '-q:v', '2', '-y', out], FFMPEG_STEP_TIMEOUT_MS, halt);
   return r.code === 0 && !r.stderr.trim() && fs.existsSync(out) && fs.statSync(out).size > 0;
 }
 

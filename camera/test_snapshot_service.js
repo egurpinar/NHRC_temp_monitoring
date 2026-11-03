@@ -2593,6 +2593,9 @@ test('the timelapse decodes single-threaded, refuses damaged frames, and is boun
   const decode = src.slice(src.indexOf('async function decodeKeyframe'), src.indexOf('/** Counts RTP packets'));
   assert.ok(/'-threads', '1'/.test(decode) && decode.indexOf("'-threads'") < decode.indexOf("'-i'"), 'decoder limited to one thread');
   assert.ok(/'-xerror', '-err_detect', 'explode'/.test(decode), 'a damaged keyframe is an error, not a picture');
+  assert.ok(/'-ss', String\(t\), '-t', String\(KEYFRAME_READ_SECONDS\), '-i', clip/.test(decode),
+    'only the keyframe\'s moment is read: ffmpeg 7+ reads ahead, and a later damaged keyframe failed a clean one');
+  assert.ok(/const KEYFRAME_READ_SECONDS = 0\.1;/.test(src));
   const tool = src.slice(src.indexOf('function runTool'), src.indexOf('/** Keyframe times'));
   assert.ok(/const kill = \(\) => \{ try \{ p\.kill\('SIGKILL'\)/.test(tool) && /setTimeout\(kill, timeoutMs\)/.test(tool),
     'every ffmpeg run is killed at its deadline');
@@ -3703,11 +3706,13 @@ test('a capture is made in the work folder it was given, and nothing is left the
 });
 
 test('an ffmpeg still running after a capture is stopped - it can never sit on memory Pi-hole needs', async () => {
-  // A stand-in "ffmpeg" (a copy of sleep), started by this process and left running.
+  // A stand-in "ffmpeg", started by this process and left running: node under
+  // that name - a link, so the kernel names the process "ffmpeg". It was a
+  // copy of sleep, until Ubuntu 26.04: there sleep is one program of many
+  // (uutils), which runs as whatever it is called - and has no "ffmpeg".
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-bin-'));
-  fs.copyFileSync('/bin/sleep', path.join(bin, 'ffmpeg'));
-  fs.chmodSync(path.join(bin, 'ffmpeg'), 0o755);
-  const stray = require('child_process').spawn(path.join(bin, 'ffmpeg'), ['30'], { stdio: 'ignore' });
+  fs.symlinkSync(process.execPath, path.join(bin, 'ffmpeg'));
+  const stray = require('child_process').spawn(path.join(bin, 'ffmpeg'), ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' });
   await new Promise(r => setTimeout(r, 100));
   assert.deepStrictEqual(S.strayFfmpeg(), [stray.pid], 'found as a child of this process');
   const tl = S.createTimelapse(tlCfg(tlDir()), { camera: () => ({ name: 'L' }), now: () => ny(DAY, 20, 0),

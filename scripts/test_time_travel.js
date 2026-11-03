@@ -164,7 +164,15 @@ function runOne(suite, ms) {
       fs.rmSync(tmp, { recursive: true, force: true });
       const sum = (out.match(/^\d+ passed, \d+ failed\b.*$/m) || [])[0]
         || (signal ? `stopped (${signal}) - out of memory or too slow? Try TT_JOBS=1` : `no summary (exit ${code})`);
-      const fails = out.split('\n').filter(l => /^\s*FAIL\b/.test(l)).map(l => l.trim());
+      // Each failing test with what it said - the indented lines after it -
+      // so the run page (run_suite.js's annotations) has the reason too.
+      const lines = out.split('\n'), fails = [];
+      lines.forEach((l, i) => {
+        if (!/^\s*FAIL\b/.test(l)) return;
+        const why = [];
+        for (let j = i + 1; j < lines.length && why.length < 4 && /^\s{6,}/.test(lines[j]); j++) if (lines[j].trim()) why.push(lines[j].trim());
+        fails.push([l.trim(), ...why.map(w => w.slice(0, 300))].join('\n        '));
+      });
       let log = null;
       if (code !== 0) {
         log = path.join(os.tmpdir(), `nhrc-time-travel-${suite.name}-${iso.replace(/:/g, '-')}.log`);
