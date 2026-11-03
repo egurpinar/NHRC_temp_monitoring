@@ -28,6 +28,13 @@ name: Daily Conditions Email
 # scripts/daily_email.js, which asks Buttondown what has already gone out today
 # before sending (a slug alone does NOT prevent duplicates -- that assumption
 # once sent everyone two copies).
+#
+# IF THE TESTS, THE BUILD OR THE SEND FAIL
+# ----------------------------------------
+# No report goes out, and since November 2026 the subscribers are told so: a
+# short "no conditions report today - check roworno.com" notice (the last
+# step, scripts/send_notice.js), at most one a day. On 2 Nov 2026 a failing
+# test stopped the report and members heard nothing.
 
 on:
   schedule:
@@ -109,14 +116,17 @@ jobs:
         run: bash scripts/refresh_checkout.sh
 
       - name: Run test suite
+        id: tests
         if: steps.gate.outputs.proceed == 'true'
-        # The rules logic is safety-critical. If the tests fail, do not send.
+        # The rules logic is safety-critical. If the tests fail, do not send
+        # the report (the last step tells the subscribers there is none).
         run: |
           bash scripts/test_send_window.sh
           bash scripts/test_refresh_checkout.sh
           node scripts/test_daily_email.js
 
       - name: Build email (dry run preview)
+        id: build
         if: steps.gate.outputs.proceed == 'true'
         run: |
           node scripts/daily_email.js --json > /tmp/digest.json
@@ -124,6 +134,7 @@ jobs:
           head -40 /tmp/digest.json
 
       - name: Send via Buttondown
+        id: send
         # The script applies the rowing-season gate itself and exits quietly
         # (success, nothing sent) when today falls outside the season.
         if: steps.gate.outputs.proceed == 'true' && github.event.inputs.dry_run != 'true'
@@ -135,3 +146,20 @@ jobs:
           else
             node scripts/daily_email.js --send
           fi
+
+      - name: No report today - tell the subscribers instead
+        # The tests, the build or the send failed, so today's report has not
+        # gone out. Instead of silence, a short notice: no report today, check
+        # roworno.com (scripts/send_notice.js). A script of its own that loads
+        # none of the code that failed, and its own tests first - a notice that
+        # is itself broken stays unsent. Never once today's report or notice
+        # is out (so never twice, and no report after it), never off-season,
+        # never on a dry run.
+        if: >-
+          failure() && steps.gate.outputs.proceed == 'true' && github.event.inputs.dry_run != 'true' &&
+          (steps.tests.outcome == 'failure' || steps.build.outcome == 'failure' || steps.send.outcome == 'failure')
+        env:
+          BUTTONDOWN_API_KEY: ${{ secrets.BUTTONDOWN_API_KEY }}
+        run: |
+          NOTICE_PREFLIGHT=1 node scripts/test_send_notice.js
+          node scripts/send_notice.js --send

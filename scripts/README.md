@@ -19,6 +19,8 @@ status using the site's own functions and compares against the email output.
 | File | Purpose |
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
+| `send_notice.js` | The "No conditions report today - check roworno.com" notice, sent instead when the job's tests, build or send fail (see Safety behaviour) |
+| `test_send_notice.js` | Its tests (22): the words, the season and the day as `daily_email.js` has them, at most one email a day against a stand-in Buttondown, working with `daily_email.js` broken, and how the job runs it |
 | `test_daily_email.js` | Test suite (302 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, and the NWS alerts and thunderstorms. It reads no live data: not the network, not the checkout's `data.json`/`history.json` (stand-ins), so what those hold on the morning of a run cannot stop the email |
 | `test_time_travel.js` | Runs every test suite with the clock moved (`fakenow.js`, and a stand-in `date`) to the hours the email job really runs them (1-2 AM), the morning window's edges, the next daylight-saving changes, the season's edges and the new year. The 2 Nov 2026 email did not go out because two tests passed in the afternoon and failed at 1:58 AM. GitHub runs it on every push and every evening (`tests.yml`) |
 | `fakenow.js` | The moved clock for `test_time_travel.js`: node's `Date`, in every process and vm context a run starts |
@@ -362,7 +364,16 @@ It never fails the job; if the remote cannot be reached the email is still sent.
 
 ## Safety behaviour
 
-- If the tests fail, the workflow stops and nothing is sent.
+- If the tests, the build or the send fail, no report is sent - and since
+  November 2026 the subscribers are told: a short "No conditions report today -
+  check roworno.com" notice goes out instead (`send_notice.js`, the job's last
+  step). It loads none of the code that failed and runs its own tests first
+  (`test_send_notice.js`, which skip their checks against a `daily_email.js`
+  that does not load, so that cannot stop the notice too). At most one email a
+  day: none outside the season, none if today's report or notice is already
+  out, none if Buttondown cannot say; and once the notice is out, a later run
+  sends no report (its duplicate check counts the notice, whose slug starts
+  with the day's).
 - If the water sensor is stale (>3h), the email says so, and the subject marks
   the temperature "(old reading)".
 - A manual Safety Committee zone setting (`ZONE_OVERRIDE` in `index.html`) is

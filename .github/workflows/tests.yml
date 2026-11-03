@@ -66,6 +66,7 @@ jobs:
 
       - name: Every other suite
         run: |
+          node scripts/test_send_notice.js
           node scripts/test_map.js
           node scripts/test_offline.js
           node scripts/test_site_theme.js

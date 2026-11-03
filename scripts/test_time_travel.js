@@ -41,6 +41,8 @@ const SUITES = [
   { name: 'daily_email',      cmd: ['node', 'scripts/test_daily_email.js'], gate: true },
   { name: 'send_window',      cmd: ['bash', 'scripts/test_send_window.sh'], gate: true, shell: true },
   { name: 'refresh_checkout', cmd: ['bash', 'scripts/test_refresh_checkout.sh'], gate: true, shell: true },
+  // The "no report today" notice: what the email job sends when the three above fail.
+  { name: 'send_notice',      cmd: ['node', 'scripts/test_send_notice.js'] },
   { name: 'map',              cmd: ['node', 'scripts/test_map.js'] },
   { name: 'offline',          cmd: ['node', 'scripts/test_offline.js'] },
   { name: 'site_theme',       cmd: ['node', 'scripts/test_site_theme.js'] },
