@@ -4435,13 +4435,18 @@ if (HAVE_FFMPEG) {
   // ── Every 5 minutes, end to end: the real service process ──
 
   const allDay = { TIMELAPSE_EVERY_MINUTES: '5', TIMELAPSE_FROM: '0:00', TIMELAPSE_UNTIL: '23:59' };
+  /** No recording folder (nhrc-timelapse-...) left in dir - or no dir at all. */
+  const noRecordingIn = (dir) => { try { return !fs.readdirSync(dir).some(f => f.startsWith('nhrc-timelapse-')); } catch (e) { return true; } };
 
   test('end to end: every 5 minutes (all day, for the test) - the first frame right after the first dock photo, in the day\'s folder, noted on disk', async () => {
     const box = timelapseSandbox();
     await awayFromSlotMark();
     const t0 = Date.now();
+    // Stopped once the frame is saved AND its recording removed: the service
+    // says "saved" first and clears up just after, and stopping it at the
+    // first word beat the clearing up now and then (on GitHub's runner).
     const r = await box.run([], Object.assign({ TIMELAPSE_RECORD_SECONDS: '20', TIMELAPSE_WORK_DIR: path.join(box.dir, 'run') }, allDay),
-      { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)/.test(o), maxMs: 45000 });
+      { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)/.test(o) && noRecordingIn(path.join(box.dir, 'run')), maxMs: 45000 });
     assert.ok(/Timelapse: "Downstream Lot" every 5 min from 00:00 to 23:59 \(today 00:00-23:59, 288 frames\) -> \S+timelapse\/YYYY-MM-DD\/ \(the sharpest frame of up to 20 s of live video, stopping once a 1080-line keyframe has arrived; a frame that fails is skipped; paused under 40% battery; keeps 40 MB of memory for Pi-hole and 500 MB of disk free\); recorded in \S+\/run( \((in memory|on the SD card)\))?\. Test it now with: sudo kill -USR2 \d+/.test(r.out), r.out);
     const saved = /Timelapse (\d{4}-\d\d-\d\d) (\d\d):(\d\d): saved (\S+) - 1920x1080, \d+ KB, from live video \(\d+ s; stopped once 1920x1080 had arrived; \d+ of \d+ packets missing; resolution 1920x1080 from [\d.]+ s; keyframes checked: [\d.]+ s 1920x1080 clean\); took \d+ s\. Battery 87%\. Memory: this program \d+ MB.*; the Pi had at least \d+ MB available throughout\./.exec(r.out);
     assert.ok(saved, r.out);
@@ -4515,8 +4520,9 @@ if (HAVE_FFMPEG) {
     fs.mkdirSync(path.join(box.tmp, 'nhrc-timelapse-left-behind'));
     fs.writeFileSync(path.join(box.tmp, 'nhrc-timelapse-left-behind', 'clip.mkv'), 'x');
     await awayFromSlotMark();
+    // Stopped once the frame is saved AND its recording removed (see above).
     const r = await box.run([], Object.assign({ TIMELAPSE_WORK_DIR: '/proc/nhrc-camera', TIMELAPSE_RECORD_SECONDS: '8' }, allDay),
-      { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)/.test(o), maxMs: 45000 });
+      { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)/.test(o) && noRecordingIn(box.tmp), maxMs: 45000 });
     require('child_process').spawnSync('pkill', ['-KILL', '-f', box.dir]);
     assert.ok(/Timelapse: TIMELAPSE_WORK_DIR \/proc\/nhrc-camera cannot be used \(E[A-Z]+\); recording in \S+\/tmp instead\./.test(r.out), r.out);
     assert.ok(/Timelapse: removed 1 recording left behind by an earlier run\./.test(r.out), r.out);
