@@ -188,6 +188,10 @@ const CONFIG = {
     // (roworno.com/newboathouse). Every-few-minutes timetable only. Off (the
     // default): nothing leaves the Pi, as before. See createPublisher.
     publish: String(process.env.TIMELAPSE_PUBLISH || '').trim().toLowerCase(),
+    // A one-time catch-up, YYYY-MM-DD: every finished day from this one is
+    // sent too, oldest first, not only the last 3 - for the days filmed before
+    // the sending was turned on. Remove the line once the journal says so.
+    publishSince: String(process.env.TIMELAPSE_PUBLISH_SINCE || '').trim(),
   },
 
   // Ring battery cameras cannot take a snapshot while recording, so a capture
@@ -374,8 +378,23 @@ function publishProblems(cfg = CONFIG) {
   if (PUBLISH_ON.includes(v) && timelapseOn(cfg) && !intervalOn(cfg)) {
     return ['TIMELAPSE_PUBLISH works with TIMELAPSE_EVERY_MINUTES only (the frames of TIMELAPSE_TIMES are not sent)'];
   }
+  const since = String((cfg.timelapse && cfg.timelapse.publishSince) || '');
+  if (since && !realDay(since)) return [`TIMELAPSE_PUBLISH_SINCE must be a day like 2026-10-14; it is "${since.slice(0, 20)}"`];
   return [];
 }
+
+/** A real calendar day, YYYY-MM-DD. */
+function realDay(s) {
+  const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(String(s));
+  if (!m) return false;
+  const t = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return t.getUTCFullYear() === Number(m[1]) && t.getUTCMonth() === Number(m[2]) - 1 && t.getUTCDate() === Number(m[3]);
+}
+
+// The Worker takes a Pi's frames of the last 40 days only (TL_RECENT_DAYS in
+// camera/cloudflare_worker.js); a catch-up sends nothing older than this, which
+// leaves a day's margin for the clocks.
+const PUBLISH_MAX_DAYS = 39;
 
 /**
  * "8:00,12:00,15:00" -> [{ minutes: 480, label: '08:00' }, ...], sorted, each
@@ -2925,25 +2944,48 @@ function createPublisher(cfg, deps = {}) {
       return new Set(fs.readFileSync(record, 'utf8').split('\n').map((s) => s.trim()).filter((s) => /^\d{4}-\d\d-\d\d$/.test(s)));
     } catch (e) { return new Set(); }
   };
+  // TIMELAPSE_PUBLISH_SINCE: a one-time catch-up from that day (or null).
+  const since = realDay(tl.publishSince) ? tl.publishSince : null;
   const notePublished = (day, today) => {
-    const keep = dayBefore(today, PUBLISH_KEEP_DAYS);
+    // The days sent are remembered 10 days - and, during a catch-up, back to its first day, so none is asked about again.
+    let keep = dayBefore(today, PUBLISH_KEEP_DAYS);
+    if (since && since < keep) keep = since;
     const days = [...published(), day].filter((d) => d >= keep);
     makeDir(tl.dir);
     saveAtomically(Buffer.from([...new Set(days)].sort().map((d) => `${d}\n`).join('')), record);
   };
 
-  /** A day's frames on this Pi, oldest first: [{ name: 'HHMM.jpg', file }]. Not tests/ or snapshots. */
+  /**
+   * A day's frames on this Pi, oldest first: [{ name: 'HHMM.jpg', file }] -
+   * from its folder (every few minutes), and the few set-time frames of the
+   * first days, kept beside the folders (YYYY-MM-DD_HHMM.jpg). Not tests/ or snapshots.
+   */
   const localFrames = (day) => {
-    let names = [];
-    try { names = fs.readdirSync(path.join(tl.dir, day)); } catch (e) { return []; }
     const re = new RegExp(`^${day}_(\\d{4})\\.jpg$`);
-    return names.map((n) => { const m = re.exec(n); return m ? { name: `${m[1]}.jpg`, file: path.join(tl.dir, day, n) } : null; })
-      .filter(Boolean).sort((a, b) => (a.name < b.name ? -1 : 1));
+    const found = new Map();
+    const from = (dir) => {
+      let names = [];
+      try { names = fs.readdirSync(dir); } catch (e) { return; }
+      for (const n of names) {
+        const m = re.exec(n);
+        if (m && !found.has(m[1])) found.set(m[1], { name: `${m[1]}.jpg`, file: path.join(dir, n) });
+      }
+    };
+    from(path.join(tl.dir, day));
+    from(tl.dir);
+    return [...found.values()].sort((a, b) => (a.name < b.name ? -1 : 1));
   };
 
-  /** The day folders on this Pi. */
+  /** The days with frames on this Pi: its day folders, and the days of set-time frames. */
   const localDays = () => {
-    try { return fs.readdirSync(tl.dir).filter((d) => /^\d{4}-\d\d-\d\d$/.test(d)).sort(); } catch (e) { return []; }
+    let names = [];
+    try { names = fs.readdirSync(tl.dir); } catch (e) { return []; }
+    const days = new Set();
+    for (const n of names) {
+      const m = /^(\d{4}-\d\d-\d\d)(?:_\d{4}\.jpg)?$/.exec(n);
+      if (m) days.add(m[1]);
+    }
+    return [...days].sort();
   };
 
   /**
@@ -3045,6 +3087,16 @@ function createPublisher(cfg, deps = {}) {
     }
     const done = await call('PUT', `/timelapse/frames/${day}/done-${pi}.json`, JSON.stringify({ frames: frames.length }),
       { 'Content-Type': 'application/json' });
+    // A day the Worker will not take at all (too old for it, by its clock): said once and left - never
+    // tried again every 30 minutes, which could only fail the same way.
+    if (done.status === 400) {
+      notePublished(day, today);
+      st.gaveUp.add(day);
+      st.refused.delete(day);
+      say(`Timelapse ${day}: not sent to the website - the Worker would not take it (${done.text.replace(/[^\x20-\x7e]+/g, ' ').trim().slice(0, 100)}); `
+        + 'its frames stay on this Pi.');
+      return 'done';
+    }
     if (!done.ok) throw refusal(done, `saying ${day} is complete`);
     notePublished(day, today);
     const refused = st.refused.get(day);
@@ -3067,17 +3119,37 @@ function createPublisher(cfg, deps = {}) {
       const today = slot.date;
       // Today's frames only once its filming is over; days before, at any slot outside the filming hours.
       const todayOver = !!slot.window && slot.minutes > slot.window.until;
-      const first = dayBefore(today, PUBLISH_DAYS - 1);
+      // The last 3 days - or, catching up, every day from TIMELAPSE_PUBLISH_SINCE, oldest
+      // first; never one older than the Worker takes.
+      const oldest = dayBefore(today, PUBLISH_MAX_DAYS);
+      const usual = dayBefore(today, PUBLISH_DAYS - 1);
+      const first = since && since < usual ? (since > oldest ? since : oldest) : usual;
       const done = published();
       const days = localDays().filter((d) => !done.has(d) && d <= today && (d < today || todayOver));
-      for (const d of days.filter((x) => x < first)) {
+      // A day left out is said once - only the days of the week before (older ones were said when they were left out),
+      // and those a catch-up asked for that the Worker would not take.
+      const lately = dayBefore(usual, 7);
+      for (const d of days.filter((x) => x < first && (x >= lately || (since && x >= since)))) {
         if (st.gaveUp.has(d)) continue;
         st.gaveUp.add(d);
-        say(`Timelapse ${d}: not sent to the website - more than ${PUBLISH_DAYS} days old now (its frames stay on this Pi).`);
+        say(since && d >= since
+          ? `Timelapse ${d}: not sent to the website - older than the ${PUBLISH_MAX_DAYS + 1} days the Worker takes (its frames stay on this Pi).`
+          : `Timelapse ${d}: not sent to the website - more than ${PUBLISH_DAYS} days old now (its frames stay on this Pi; `
+            + `TIMELAPSE_PUBLISH_SINCE=${d} sends it, camera/README.md).`);
       }
       const deadline = Math.min(t + PUBLISH_BUDGET_MS, slot.end - PUBLISH_SLOT_MARGIN_MS);
+      let stopped = false;
       for (const day of days.filter((x) => x >= first)) {
-        if ((await publishDay(day, today, deadline)) === 'later') break;
+        if ((await publishDay(day, today, deadline)) === 'later') { stopped = true; break; }
+      }
+      // A catch-up done: said once, with what to do.
+      if (since && !stopped && !st.caughtUp) {
+        const sent = published();
+        if (localDays().every((d) => d < first || d >= today || sent.has(d))) {
+          st.caughtUp = true;
+          say(`Timelapse: caught up - every day from ${first} is on the website (or on its way to it). `
+            + 'The TIMELAPSE_PUBLISH_SINCE line can go now (camera/README.md).');
+        }
       }
       if (st.failing) say(`Timelapse: sending to the website works again (it failed from ${hhmm(localDateParts(new Date(st.failingSince), cfg).minutes)}).`);
       st.failing = null;
@@ -3259,6 +3331,10 @@ async function main() {
       log(`  to website   : ${pubProblems.length ? 'NOT SENT - TIMELAPSE_PUBLISH has problems (above)' : publishOn(CONFIG)
         ? `each evening after the last frame, the day's frames -> ${new URL('/timelapse/', CONFIG.uploadUrl).href} (TIMELAPSE_PUBLISH=1)`
         : 'off - the frames stay on this Pi (TIMELAPSE_PUBLISH=1 sends them for the website\'s daily video)'}`);
+      if (!pubProblems.length && publishOn(CONFIG) && CONFIG.timelapse.publishSince) {
+        log(`  catching up  : every finished day from ${CONFIG.timelapse.publishSince} too, oldest first - none older than `
+          + `${PUBLISH_MAX_DAYS} days (TIMELAPSE_PUBLISH_SINCE; remove the line once the journal says it has caught up)`);
+      }
     }
     if (tlProblems.length || pubProblems.length) process.exitCode = 1;
     return;
@@ -3468,7 +3544,7 @@ module.exports = {
   createMainCheckIn, createStandby, ringReadiness, printStatus, runStandby, setUpTimelapse,
   // Sending the frames to the website
   publishOn, publishProblems, createPublisher, looksLikeJpegFile, dayBefore,
-  PUBLISH_DAYS, PUBLISH_FRAME_TIMEOUT_MS, PUBLISH_BUDGET_MS, PUBLISH_SLOT_MARGIN_MS, PUBLISH_RETRY_MS,
+  PUBLISH_DAYS, PUBLISH_MAX_DAYS, realDay, PUBLISH_FRAME_TIMEOUT_MS, PUBLISH_BUDGET_MS, PUBLISH_SLOT_MARGIN_MS, PUBLISH_RETRY_MS,
   PUBLISH_MEMORY_EXTRA_MB, PUBLISH_KEEP_DAYS, PUBLISH_ANSWER_MAX,
 };
 

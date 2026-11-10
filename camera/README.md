@@ -1075,6 +1075,7 @@ sudo systemctl restart nhrc-camera
 | `TIMELAPSE_MIN_DISK_MB` | 500 | Disk always kept free; at least 100 |
 | `TIMELAPSE_SNAPSHOT_PAUSE_SECONDS` | 20 | Set times: after a failed live video, the wait before the fallback snapshot (tried twice, 30 s apart): a battery camera cannot take one while it is still streaming |
 | `TIMELAPSE_PUBLISH` | (off) | `1`: each evening, the day's frames go to the Worker for the website's daily video (next section). Every 5 minutes only. A wrong value stops only the sending, and fails `--check` |
+| `TIMELAPSE_PUBLISH_SINCE` | (none) | A day, `2026-10-01`: a one-time catch-up - every earlier day from it is sent too, oldest first (at most 39 days back: the Worker's limit). Take the line out once the journal says it has caught up ("Catching up", next section) |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | `ffprobe` must be next to it |
 
 ## The timelapse on the website
@@ -1221,6 +1222,31 @@ To make a day's video at once rather than wait for the evening run: GitHub →
 **Actions → Timelapse → Run workflow**, with the day (e.g. `2026-11-09`) or
 empty for every finished day.
 
+### Catching up: the days filmed before the sending was on
+
+A Pi sends the last 3 days only. Once, to send every earlier day it still
+has (the Pis keep them all), add a line to its `env` and restart - on both
+Pis, so the days the standby filmed come too. The days before the first frame
+are simply not there, so an early date does:
+
+```bash
+grep -q '^TIMELAPSE_PUBLISH_SINCE=' /opt/nhrc-camera/env || echo 'TIMELAPSE_PUBLISH_SINCE=2026-10-01' | sudo tee -a /opt/nhrc-camera/env
+sudo systemctl restart nhrc-camera
+```
+
+It sends as it always does - outside the filming hours, oldest day first, 4
+minutes a slot at most, after the dock photo, never short of memory - about
+30 MB a day of frames. The Worker takes a Pi's frames of the last 40 days only:
+older days are said in the journal and stay on the Pi. The first days' few
+set-time frames (`TIMELAPSE_DIR/YYYY-MM-DD_HHMM.jpg`, before the every-5-minutes
+timetable) go too. When the journal says `Timelapse: caught up - every day from
+...`, run the workflow (or wait for the evening's), then take the line out:
+
+```bash
+sudo sed -i '/^TIMELAPSE_PUBLISH_SINCE=/d' /opt/nhrc-camera/env
+sudo systemctl restart nhrc-camera
+```
+
 What the journal says:
 
 | Journal | Meaning |
@@ -1232,7 +1258,9 @@ What the journal says:
 | `Timelapse: not sending to the website yet - 52 MB of memory available, it waits for 60 MB ...` | Memory short for now (Pi-hole first): it tries again each slot; said hourly while it lasts |
 | `... this Worker does not take timelapse frames yet: update it` | Step 2 above |
 | `... the upload secret was refused` | `CAMERA_UPLOAD_SECRET` differs from the Worker's `UPLOAD_SECRET` |
-| `Timelapse 2026-11-05: not sent to the website - more than 3 days old now` | The Pi was away too long; the frames stay on the Pi and in iCloud |
+| `Timelapse 2026-11-05: not sent to the website - more than 3 days old now` | The Pi was away too long; the frames stay on the Pi and in iCloud. "Catching up" sends them (said for the week before only, not for every old day at each restart) |
+| `Timelapse: caught up - every day from 2026-10-02 is on the website ...` | The catch-up is done: take the `TIMELAPSE_PUBLISH_SINCE` line out |
+| `... older than the 40 days the Worker takes` | A catch-up day the Worker will not take; it stays on the Pi |
 
 A video from a day's frames on your Mac (with `brew install ffmpeg`), the
 same way, without sending anything:

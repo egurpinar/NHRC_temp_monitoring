@@ -898,6 +898,102 @@ test('days more than 3 days old are not sent - said once; the days before yester
   await tickAt(DAY, '06:05');
   assert.deepStrictEqual(e.BUCKET.keys().filter((k) => k.endsWith('.jpg')), [`timelapse/frames/${D2}/0700.jpg`, `timelapse/frames/${PREV}/0700.jpg`]);
   assert.strictEqual(lines.filter((l) => l.includes(`Timelapse ${OLD}: not sent to the website - more than 3 days old now`)).length, 1);
+  assert.ok(lines.some((l) => l.includes(`TIMELAPSE_PUBLISH_SINCE=${OLD} sends it`)), 'and how to send it after all');
+});
+
+test('without a catch-up, only the week before is said: the old days of months past are not listed at every restart', async () => {
+  const [week, month] = [etDay(-9), etDay(-10)];
+  const dir = piDir({ [week]: ['0700'], [month]: ['0700'], [etDay(-40)]: ['0700'] });
+  const { tickAt, lines } = publisher(piCfg(dir), env());
+  await tickAt(DAY, '06:00');
+  assert.strictEqual(lines.filter((l) => / not sent to the website - more than 3 days old/.test(l)).length, 1, lines.join('\n'));
+  assert.ok(lines.some((l) => l.startsWith(`LOG Timelapse ${week}:`)));
+});
+
+/** Days, each a folder of frames: the catch-up's days, at 0700 and 1200. */
+const catchUpDir = (days) => piDir(Object.fromEntries(days.map((d) => [d, ['0700', '1200']])));
+
+test('a one-time catch-up (TIMELAPSE_PUBLISH_SINCE): every finished day from it, oldest first, remembered - then said caught up, and nothing more', async () => {
+  const days = [etDay(-20), etDay(-12), etDay(-6), PREV];
+  const dir = catchUpDir(days.concat([DAY]));
+  const cfg = piCfg(dir, { timelapse: { publishSince: days[0] } });
+  const e = env();
+  const { tickAt, lines, fetch } = publisher(cfg, e);
+  await tickAt(DAY, '20:00');
+  const dones = fetch.log.filter((r) => /done-main\.json$/.test(r.path)).map((r) => r.path.split('/')[3]);
+  assert.deepStrictEqual(dones, days.concat([DAY]), 'oldest first, today\'s too once filmed');
+  assert.strictEqual(e.BUCKET.keys().filter((k) => k.endsWith('.jpg')).length, 10);
+  // Remembered back to the catch-up's first day (not only 10 days): never asked about again.
+  assert.deepStrictEqual(fs.readFileSync(path.join(dir, '.published'), 'utf8').trim().split('\n'), days.concat([DAY]));
+  assert.ok(lines.some((l) => l === `LOG Timelapse: caught up - every day from ${days[0]} is on the website (or on its way to it). `
+    + 'The TIMELAPSE_PUBLISH_SINCE line can go now (camera/README.md).'), lines.join('\n'));
+  fetch.log.length = 0;
+  await tickAt(DAY, '20:05');
+  await tickAt(DAY, '20:10');
+  assert.deepStrictEqual(fetch.log, [], 'nothing more to ask');
+  assert.strictEqual(lines.filter((l) => /caught up/.test(l)).length, 1, 'said once');
+  // Days before the catch-up's first are not its business.
+  const dir2 = catchUpDir([etDay(-25), etDay(-20)]);
+  const two = publisher(piCfg(dir2, { timelapse: { publishSince: etDay(-20) } }), env());
+  await two.tickAt(DAY, '06:00');
+  assert.deepStrictEqual(two.fetch.log.filter((r) => /done-/.test(r.path)).map((r) => r.path.split('/')[3]), [etDay(-20)]);
+  assert.ok(!two.lines.some((l) => l.includes(etDay(-25))), two.lines.join('\n'));
+});
+
+test('a catch-up reaching further back than the Worker takes (40 days): those days said once and left, the rest sent', async () => {
+  const [tooOld, older, ok] = [etDay(-45), etDay(-41), etDay(-38)];
+  const dir = catchUpDir([tooOld, older, ok, PREV]);
+  const { tickAt, lines, fetch } = publisher(piCfg(dir, { timelapse: { publishSince: tooOld } }), env());
+  await tickAt(DAY, '06:00');
+  assert.deepStrictEqual(fetch.log.filter((r) => /done-/.test(r.path)).map((r) => r.path.split('/')[3]), [ok, PREV]);
+  assert.ok(!fetch.log.some((r) => r.path.includes(tooOld) || r.path.includes(older)), 'not even asked about');
+  for (const d of [tooOld, older]) {
+    assert.strictEqual(lines.filter((l) => l === `LOG Timelapse ${d}: not sent to the website - older than the 40 days the Worker takes (its frames stay on this Pi).`).length, 1, lines.join('\n'));
+  }
+  await tickAt(DAY, '06:05');
+  assert.strictEqual(lines.filter((l) => l.includes(tooOld)).length, 1, 'said once');
+});
+
+test('the set-time frames of the first days (beside the folders, YYYY-MM-DD_HHMM.jpg) go too - not their snapshots, not other files', async () => {
+  const first = etDay(-25), both = etDay(-24);
+  const dir = catchUpDir([both]);
+  for (const name of [`${first}_0800.jpg`, `${first}_1200.jpg`, `${first}_1600_snapshot.jpg`, `${first}_notes.txt`, `${both}_1200.jpg`, `${both}_1500.jpg`]) {
+    fs.writeFileSync(path.join(dir, name), jpeg(500));
+  }
+  const e = env();
+  const { tickAt } = publisher(piCfg(dir, { timelapse: { publishSince: first } }), e);
+  await tickAt(DAY, '06:00');
+  const sent = (d) => e.BUCKET.keys().filter((k) => k.startsWith(`timelapse/frames/${d}/`) && k.endsWith('.jpg')).map((k) => k.split('/').pop());
+  assert.deepStrictEqual(sent(first), ['0800.jpg', '1200.jpg']);
+  // A day with both: the folder's frame where they share a time, and the other set time too.
+  assert.deepStrictEqual(sent(both), ['0700.jpg', '1200.jpg', '1500.jpg']);
+  assert.ok(e.BUCKET.bytes(`timelapse/frames/${both}/1200.jpg`).equals(fs.readFileSync(path.join(dir, both, `${both}_1200.jpg`))), 'the folder\'s');
+});
+
+test('a day the Worker will not take at all (400 for the day): said once and left - never tried again every 30 minutes', async () => {
+  const dir = catchUpDir([D2]);
+  const e = env();
+  const base = workerFetch(e);
+  const fetch = async (url, opts) => (/done-main\.json$/.test(url)
+    ? new Response('Not a day the Pi can be sending frames for', { status: 400 }) : base(url, opts));
+  fetch.log = base.log;
+  const { tickAt, lines, p } = publisher(piCfg(dir), e, { fetch });
+  await tickAt(DAY, '06:00');
+  assert.ok(lines.some((l) => l === `LOG Timelapse ${D2}: not sent to the website - the Worker would not take it (Not a day the Pi can be sending frames for); its frames stay on this Pi.`), lines.join('\n'));
+  assert.strictEqual(p.state().retryAt, 0, 'not a failure to try again');
+  base.log.length = 0;
+  await tickAt(DAY, '06:05');
+  assert.deepStrictEqual(base.log, [], 'and not asked about again');
+});
+
+test('TIMELAPSE_PUBLISH_SINCE must be a real day: anything else is a problem that stops only the sending', () => {
+  const cfg = (since) => piCfg('/tmp', { timelapse: { publishSince: since } });
+  assert.deepStrictEqual(S.publishProblems(cfg('2026-10-14')), []);
+  assert.deepStrictEqual(S.publishProblems(cfg('')), []);
+  for (const bad of ['2026-02-30', '14/10/2026', 'yesterday', '2026-10-14T00:00']) {
+    assert.ok(/TIMELAPSE_PUBLISH_SINCE must be a day like 2026-10-14/.test(S.publishProblems(cfg(bad)).join()), bad);
+  }
+  assert.strictEqual(S.PUBLISH_MAX_DAYS, 39, 'within the Worker\'s 40 days');
 });
 
 test('a day with no frames (every live view failed) is simply noted - no request', async () => {

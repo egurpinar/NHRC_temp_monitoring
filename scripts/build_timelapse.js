@@ -43,7 +43,7 @@ const CRF = 23;
 const MIN_FRAMES = 2;                 // one frame is not a timelapse
 const READY_HOUR = 6;                 // a day no Pi has called complete is made from 6 AM the day after
 const KEEP_FRAMES_DAYS = 3;           // frames stay on the Worker this long after their video, for late ones
-const DROP_FRAMES_DAYS = 30;          // and never longer than this, video or not
+const DROP_FRAMES_DAYS = 45;          // and never longer than this, video or not: past the 40 days a Pi may still send (a catch-up)
 const DOWNLOADS_AT_ONCE = 4;
 const TRIES = 3;
 // Ring's live view comes at 1920x1080, 1280x720 - and now and then at 848x480,

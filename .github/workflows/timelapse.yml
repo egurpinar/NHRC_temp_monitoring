@@ -45,7 +45,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A day takes under a minute; a catch-up of a month of days, about 20. (A run
+    # stopped part-way loses nothing: each day is listed as it is made.)
+    timeout-minutes: 60
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5

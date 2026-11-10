@@ -155,13 +155,15 @@ test('the words: the day, the time under the drag bar, the hours and the lengths
   assert.deepStrictEqual(['0005', '06:35', '1200', '1615'].map(P.clock12), ['12:05 AM', '6:35 AM', '12:00 PM', '4:15 PM']);
   const [d] = P.daysFrom({ days: [day('2026-11-09')] });
   assert.strictEqual(P.dayNote(d), '112 photos, 6:35 AM to 4:15 PM - 11 seconds');
-  assert.strictEqual(P.wholeNote(raw.timelineFrom(INDEX)), '3 days so far, a frame for each quarter hour of daylight - 1 second in all');
+  // The continuous timelapse's title: the days it spans, as they are.
+  assert.strictEqual(P.spanTitle(raw.timelineFrom(INDEX)), 'Nov 9, 2026 to Nov 11, 2026');
   const quarters = Array.from({ length: 96 }, (_, i) => `${String(Math.floor(i / 4)).padStart(2, '0')}${String((i % 4) * 15).padStart(2, '0')}`).join(',');
-  const long = raw.timelineFrom({ timeline: { fps: 10, chunks: [chunk('2026-11-01', [['2026-11-09', quarters]])] } });
-  assert.strictEqual(P.wholeNote(long), '1 day so far, a frame for each quarter hour of daylight - 10 seconds in all');
-  const month = raw.timelineFrom({ timeline: { fps: 10, chunks: ['01', '11', '21'].map((s) => chunk(`2026-11-${s}`,
-    Array.from({ length: 10 }, (_, i) => [`2026-11-${String(Number(s) + i).padStart(2, '0')}`, quarters]))) } });
-  assert.strictEqual(P.wholeNote(month), '30 days so far, a frame for each quarter hour of daylight - 5 minutes in all');
+  const one = raw.timelineFrom({ timeline: { fps: 10, chunks: [chunk('2026-11-01', [['2026-11-09', quarters]])] } });
+  assert.strictEqual(P.spanTitle(one), 'Nov 9, 2026');
+  const across = raw.timelineFrom({ timeline: { fps: 10, chunks: [chunk('2026-09-01', [['2026-09-06', '0700']]), chunk('2026-12-01', [['2026-12-09', '0700']])] } });
+  assert.strictEqual(P.spanTitle(across), 'Sep 6, 2026 to Dec 9, 2026');
+  // Over the days below.
+  assert.deepStrictEqual([1, 2, 28].map(P.lastDays), ['Last 1 day', 'Last 2 days', 'Last 28 days']);
 });
 
 test('a link to a day (#2026-11-08) is that day; anything else is none, and the day player shows the newest', () => {
@@ -215,7 +217,7 @@ function dom(responses, opts = {}) {
     return v;
   };
   const els = {};
-  for (const id of ['whole-title', 'stage', 'tl-controls', 'tl-play', 'tl-range', 'tl-full', 'tl-when', 'tl-ends', 'tl-note', 'tl-message',
+  for (const id of ['whole-title', 'stage', 'tl-controls', 'tl-play', 'tl-range', 'tl-full', 'tl-when', 'tl-ends', 'tl-message', 'day-label',
     'day-card', 'day-title', 'day-note', 'day-message', 'days', 'theme-toggle']) els[id] = make('div', id);
   for (const id of ['stage', 'tl-controls', 'day-card', 'tl-message', 'day-message']) els[id].hidden = true;
   els['tl-a'] = video('tl-a');
@@ -285,7 +287,7 @@ test('it plays from the first day at once: the first chunk on screen, the next m
   const d = dom(OK);
   await d.startPage();
   assert.deepStrictEqual(d.fetched, [`${WORKER}/timelapse/index.json`]);
-  assert.strictEqual(d.els['whole-title'].textContent, 'Monday, November 9, 2026 to Wednesday, November 11, 2026');
+  assert.strictEqual(d.els['whole-title'].textContent, 'Nov 9, 2026 to Nov 11, 2026', 'the days it spans');
   assert.strictEqual(d.els['tl-ends'].textContent, 'Nov 9, 2026 → Nov 11, 2026');
   assert.deepStrictEqual([d.els.stage.hidden, d.els['tl-controls'].hidden], [false, false]);
   assert.strictEqual(d.a.src, src('2026-11-01'));
@@ -297,7 +299,7 @@ test('it plays from the first day at once: the first chunk on screen, the next m
   assert.strictEqual(d.els['tl-play'].getAttribute('aria-label'), 'Pause');
   assert.strictEqual(d.els['tl-when'].textContent, 'Mon, Nov 9, 2026 · 7:00 AM');
   assert.strictEqual(d.range.getAttribute('aria-valuetext'), 'Mon, Nov 9, 2026 · 7:00 AM');
-  assert.strictEqual(d.els['tl-note'].textContent, '3 days so far, a frame for each quarter hour of daylight - 1 second in all');
+  assert.ok(!/so far|quarter hour/.test(Object.values(d.els).map((e) => e.textContent).join(' ')), 'no count of days and frames under it');
   // The bar follows the video, frame by frame.
   d.a.ready();
   d.a.currentTime = 0.35;
@@ -424,6 +426,7 @@ test('below: each whole day - the newest ready, any other at a touch, and in the
   assert.strictEqual(d.els['day-card'].hidden, false);
   assert.strictEqual(d.els['day-title'].textContent, 'Wednesday, November 11, 2026');
   assert.strictEqual(d.els['day-note'].textContent, '98 photos, 6:35 AM to 4:15 PM - 11 seconds');
+  assert.strictEqual(d.els['day-label'].textContent, 'Last 3 days', 'over the days below: how many');
   const buttons = d.dayButtons();
   assert.deepStrictEqual(buttons.map((b) => b.getAttribute('data-date')), ['2026-11-11', '2026-11-10', '2026-11-09']);
   assert.strictEqual(buttons[2].children[0].src, `${WORKER}/timelapse/posters/2026-11-09-0123456789ab.jpg`);
@@ -502,7 +505,7 @@ test('a page left open: on the way back to the first day it reads the list again
   await d.advance(1600);
   assert.strictEqual(d.fetched.length, 2);
   assert.strictEqual(d.range.max, '10', 'the drag bar now spans the new day too');
-  assert.strictEqual(d.els['whole-title'].textContent, 'Monday, November 9, 2026 to Saturday, November 21, 2026');
+  assert.strictEqual(d.els['whole-title'].textContent, 'Nov 9, 2026 to Nov 21, 2026');
   assert.strictEqual(d.visible().src, src('2026-11-01'), 'from the first day again');
   assert.strictEqual(d.range.value, '0');
   assert.strictEqual(d.visible().paused, false);

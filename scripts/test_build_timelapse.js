@@ -705,20 +705,22 @@ test('a chunk too large to send (busy summer days): re-encoded smaller until it 
   } finally { await w.close(); }
 }, 150000);
 
-test('frames are deleted from the Worker 3 days after their video - kept until then, and never kept past 30 days', async () => {
+test('frames are deleted from the Worker 3 days after their video - kept until then, and never kept past 45 days (a Pi may send 40 days back)', async () => {
   if (needVideo()) return 'skip';
   const w = await setUp();
   try {
-    const [d1, d3, d31] = [etDay(-1), etDay(-3), etDay(-31)];
+    const [d1, d3, d31, d46] = [etDay(-1), etDay(-3), etDay(-31), etDay(-46)];
     await w.send(d1, ['0705', '0710']);
     await w.send(d3, ['0705', '0710']);
-    await w.env.BUCKET.put(`timelapse/frames/${d31}/0705.jpg`, 'old');     // older than a Pi may send: straight into storage
+    await w.env.BUCKET.put(`timelapse/frames/${d46}/0705.jpg`, 'old');     // older than a Pi may send: straight into storage
+    await w.env.BUCKET.put(`timelapse/frames/${d31}/0705.jpg`, 'catching up');   // a catch-up's day, its frames still arriving
     const r = await w.build({ now: at6pm(etDay(0)) });
     assert.deepStrictEqual(r.built.map((b) => b.date).sort(), [d3, d1].sort(), w.lines.join('\n'));
-    assert.deepStrictEqual(r.pruned.sort(), [d31, d3].sort());
+    assert.deepStrictEqual(r.pruned.sort(), [d46, d3].sort());
     const keys = w.env.BUCKET.keys();
     assert.ok(keys.some((k) => k.startsWith(`timelapse/frames/${d1}/`)), 'yesterday\'s kept, for a late frame');
-    assert.ok(!keys.some((k) => k.startsWith(`timelapse/frames/${d3}/`) || k.startsWith(`timelapse/frames/${d31}/`)));
+    assert.ok(!keys.some((k) => k.startsWith(`timelapse/frames/${d3}/`) || k.startsWith(`timelapse/frames/${d46}/`)));
+    assert.ok(keys.some((k) => k.startsWith(`timelapse/frames/${d31}/`)), 'a day a Pi may still be sending is kept');
     assert.deepStrictEqual(w.index().days.map((d) => d.date), [d1, d3], 'the videos stay');
   } finally { await w.close(); }
 }, 120000);
