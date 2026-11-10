@@ -561,8 +561,13 @@ async function handleStatus(env) {
 //                                   DELETE /timelapse/frames/YYYY-MM-DD/
 //                                   PUT, DELETE /timelapse/videos/YYYY-MM-DD-<id>.mp4
 //                                   PUT, DELETE /timelapse/posters/YYYY-MM-DD-<id>.jpg
+//                                   PUT, GET, DELETE /timelapse/segments/YYYY-MM-DD.mp4
+//                                          a day's piece of the continuous timelapse (never public)
+//                                   PUT, DELETE /timelapse/whole/YYYY-MM-DD-<id>.mp4
+//                                          the continuous timelapse, in chunks from the 1st, 11th and 21st
 //                                   PUT    /timelapse/index.json
-//   everyone                        GET    /timelapse/index.json, /timelapse/videos/..., /timelapse/posters/...
+//   everyone                        GET    /timelapse/index.json, /timelapse/videos/..., /timelapse/posters/...,
+//                                          /timelapse/whole/...
 //
 // A video's name changes whenever it is made again (<id> comes from its
 // bytes), so videos and posters can be kept by browsers for good.
@@ -572,7 +577,9 @@ const TL_INDEX = 'timelapse/index.json';
 const TL_FRAME_MAX = 8 * 1024 * 1024;     // as the photo's
 const TL_POSTER_MAX = 2 * 1024 * 1024;
 const TL_VIDEO_MAX = 95 * 1024 * 1024;    // a Worker accepts 100 MB at most; a day is about 5-15 MB
-const TL_INDEX_MAX = 512 * 1024;
+// The list grows by about 300 KB a year (each day's entry, and its frames' times in the
+// continuous timelapse): room for about three years. The builder warns from 800 KB.
+const TL_INDEX_MAX = 1024 * 1024;
 const TL_DAYS_MAX = 2000;
 const TL_RECENT_DAYS = 40;                // a Pi may send the frames of a day this far back, or tomorrow's (clocks)
 const TL_CORS = { 'Access-Control-Allow-Origin': '*', 'X-Content-Type-Options': 'nosniff' };
@@ -744,12 +751,94 @@ function sanitizeTimelapseIndex(obj) {
     if (!(typeof d.seconds === 'number' && Number.isFinite(d.seconds) && d.seconds > 0 && d.seconds <= 3600)) return null;
     if (!hhmm(d.first) || !hhmm(d.last) || d.first > d.last) return null;
     if (typeof d.set !== 'string' || !/^[0-9a-f]{8,64}$/.test(d.set)) return null;
+    // The day's frames in the continuous timelapse, "0700,0715,..." (optional).
+    if (d.timeline !== undefined && !timesList(d.timeline)) return null;
     seen.add(d.date);
-    days.push({ date: d.date, video: d.video, poster, frames: d.frames, first: d.first, last: d.last,
-      seconds: Math.round(d.seconds * 100) / 100, bytes: d.bytes, width: d.width, height: d.height, set: d.set });
+    const day = { date: d.date, video: d.video, poster, frames: d.frames, first: d.first, last: d.last,
+      seconds: Math.round(d.seconds * 100) / 100, bytes: d.bytes, width: d.width, height: d.height, set: d.set };
+    if (d.timeline !== undefined) day.timeline = d.timeline;
+    days.push(day);
   }
   days.sort((a, b) => (a.date < b.date ? 1 : -1));
-  return { updated: new Date().toISOString(), days };
+  const out = { updated: new Date().toISOString(), days };
+  if (obj.timeline !== undefined) {
+    const timeline = sanitizeTimeline(obj.timeline);
+    if (!timeline) return null;
+    out.timeline = timeline;
+  }
+  return out;
+}
+
+/** "0700,0715,1630": times of the day, each real, in order - or null. At most 96 (every quarter hour). */
+function timesList(s) {
+  if (typeof s !== 'string' || !/^\d{4}(,\d{4})*$/.test(s)) return null;
+  const list = s.split(',');
+  if (list.length > 96) return null;
+  for (let i = 0; i < list.length; i++) {
+    if (!/^([01]\d|2[0-3])[0-5]\d$/.test(list[i]) || (i && list[i] <= list[i - 1])) return null;
+  }
+  return list;
+}
+
+/** The chunk of the continuous timelapse a day belongs to: the 1st, 11th or 21st of its month. */
+function chunkStartOf(day) {
+  const d = Number(day.slice(8, 10));
+  return `${day.slice(0, 8)}${d <= 10 ? '01' : d <= 20 ? '11' : '21'}`;
+}
+
+/**
+ * The continuous timelapse in the index: { fps, slotMinutes, chunks: [{ start,
+ * video, frames, seconds, bytes, days: [{ date, set, times }] }] }, every part
+ * well formed and consistent - each chunk's days in its own 10 or 11 days, its
+ * frames the sum of theirs - or null.
+ */
+function sanitizeTimeline(t) {
+  const int = (x, lo, hi) => Number.isInteger(x) && x >= lo && x <= hi;
+  if (!t || typeof t !== 'object' || !int(t.fps, 1, 60) || !int(t.slotMinutes, 1, 60) || !Array.isArray(t.chunks) || t.chunks.length > 1000) return null;
+  const chunks = [];
+  for (const c of t.chunks) {
+    if (!c || typeof c !== 'object' || !validDay(c.start) || chunkStartOf(c.start) !== c.start) return null;
+    if (chunks.length && c.start <= chunks[chunks.length - 1].start) return null;
+    const v = /^whole\/(\d{4}-\d\d-\d\d)-[0-9a-f]{8,16}\.mp4$/.exec(typeof c.video === 'string' ? c.video : '');
+    if (!v || v[1] !== c.start) return null;
+    if (!int(c.frames, 1, 20000) || !int(c.bytes, 1, TL_VIDEO_MAX)) return null;
+    if (!(typeof c.seconds === 'number' && Number.isFinite(c.seconds) && c.seconds > 0 && c.seconds <= 36000)) return null;
+    if (!Array.isArray(c.days) || c.days.length < 1 || c.days.length > 11) return null;
+    const days = [];
+    let frames = 0;
+    for (const d of c.days) {
+      if (!d || typeof d !== 'object' || !validDay(d.date) || chunkStartOf(d.date) !== c.start) return null;
+      if (days.length && d.date <= days[days.length - 1].date) return null;
+      if (typeof d.set !== 'string' || !/^[0-9a-f]{8,64}$/.test(d.set)) return null;
+      const times = timesList(d.times);
+      if (!times) return null;
+      frames += times.length;
+      days.push({ date: d.date, set: d.set, times: d.times });
+    }
+    if (frames !== c.frames) return null;
+    chunks.push({ start: c.start, video: c.video, frames: c.frames, seconds: Math.round(c.seconds * 100) / 100, bytes: c.bytes, days });
+  }
+  return { fps: t.fps, slotMinutes: t.slotMinutes, chunks };
+}
+
+/**
+ * An MP4 from the builder, straight through to storage - a video need never
+ * be held in this Worker's memory - and checked for an MP4's start ('ftyp')
+ * once stored, before anything lists it; anything else is removed again.
+ */
+async function putMp4(request, env, key) {
+  const length = Number(request.headers.get('Content-Length'));
+  if (!(length > 0)) return tlText(411, 'Content-Length required');
+  if (length > TL_VIDEO_MAX) return tlText(413, 'Too large');
+  if (!/^video\/mp4\b/.test(request.headers.get('Content-Type') || '')) return tlText(415, 'Expected video/mp4');
+  await env.BUCKET.put(key, request.body, { httpMetadata: { contentType: 'video/mp4' } });
+  const start = await env.BUCKET.get(key, { range: { offset: 0, length: 12 } });
+  const b = start ? new Uint8Array(await start.arrayBuffer()) : new Uint8Array(0);
+  if (!(b.length >= 8 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70)) {
+    await env.BUCKET.delete(key);
+    return tlText(415, 'Body is not an MP4 video');
+  }
+  return json({ ok: true });
 }
 
 async function handleTimelapse(request, env, url) {
@@ -806,21 +895,43 @@ async function handleTimelapse(request, env, url) {
         await env.BUCKET.put(key, body, { httpMetadata: { contentType: 'image/jpeg' } });
         return json({ ok: true });
       }
-      // The video goes straight through to storage - a day's video need never
-      // be held in this Worker's memory - and is checked for an MP4's start
-      // ('ftyp') once stored, before anything lists it.
-      const length = Number(request.headers.get('Content-Length'));
-      if (!(length > 0)) return tlText(411, 'Content-Length required');
-      if (length > TL_VIDEO_MAX) return tlText(413, 'Too large');
-      if (!/^video\/mp4\b/.test(request.headers.get('Content-Type') || '')) return tlText(415, 'Expected video/mp4');
-      await env.BUCKET.put(key, request.body, { httpMetadata: { contentType: 'video/mp4' } });
-      const start = await env.BUCKET.get(key, { range: { offset: 0, length: 12 } });
-      const b = start ? new Uint8Array(await start.arrayBuffer()) : new Uint8Array(0);
-      if (!(b.length >= 8 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70)) {
+      return await putMp4(request, env, key);
+    }
+
+    // The continuous timelapse, in chunks of up to 11 days: public, as the day videos are.
+    m = /^whole\/(\d{4}-\d\d-(?:01|11|21))-[0-9a-f]{8,16}\.mp4$/.exec(p);
+    if (m && validDay(m[1])) {
+      const key = `timelapse/${p}`;
+      if (read) return await serveTimelapseFile(request, env, key, 'video/mp4', 'public, max-age=31536000, immutable');
+      if (method !== 'PUT' && method !== 'DELETE') return tlText(405, 'Method not allowed');
+      const ok = builder();
+      if (ok === null) return notSetUp();
+      if (!ok) return tlText(401, 'Unauthorized');
+      if (method === 'DELETE') {
         await env.BUCKET.delete(key);
-        return tlText(415, 'Body is not an MP4 video');
+        return json({ ok: true });
       }
-      return json({ ok: true });
+      return await putMp4(request, env, key);
+    }
+
+    // Each day's piece of it, which the chunks are joined from: the builder's alone, never public.
+    m = /^segments\/(\d{4}-\d\d-\d\d)\.mp4$/.exec(p);
+    if (m && validDay(m[1])) {
+      const ok = builder();
+      if (ok === null) return notSetUp();
+      if (!ok) return tlText(401, 'Unauthorized');
+      const key = `timelapse/${p}`;
+      if (method === 'GET') {
+        const o = await env.BUCKET.get(key);
+        if (!o) return tlText(404, 'Not found');
+        return new Response(o.body, { headers: Object.assign({ 'Content-Type': 'video/mp4', 'Cache-Control': 'no-store' }, TL_CORS) });
+      }
+      if (method === 'DELETE') {
+        await env.BUCKET.delete(key);
+        return json({ ok: true });
+      }
+      if (method === 'PUT') return await putMp4(request, env, key);
+      return tlText(405, 'Method not allowed');
     }
 
     if (p === 'frames/') {

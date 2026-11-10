@@ -121,6 +121,55 @@ test('the poster is the frame nearest noon; a value in an ffmpeg filter is escap
   assert.strictEqual(B.filterValue("/a:b\\c'd"), "/a\\:b\\\\c\\'d");
 });
 
+test('soft frames (under 720 lines) are left out of a day\'s video - unless the day has fewer than 2 sharp ones', () => {
+  const f = (n, w, h) => ({ name: `${n}.jpg`, width: w, height: h });
+  let r = B.sharpFrames([f('0700', 1280, 720), f('0705', 848, 480), f('0710', 1920, 1080), f('0715', 0, 0)]);
+  assert.deepStrictEqual([r.keep.map((x) => x.name), r.soft.map((x) => x.name)], [['0700.jpg', '0710.jpg'], ['0705.jpg', '0715.jpg']]);
+  r = B.sharpFrames([f('0700', 1280, 720), f('0705', 848, 480), f('0710', 848, 480)]);
+  assert.deepStrictEqual([r.keep.length, r.soft], [3, []], 'one sharp frame: all kept rather than a one-frame video');
+});
+
+test('the continuous timelapse: each quarter hour\'s sharpest frame; of equals, the one nearest the quarter; empty quarters skipped', () => {
+  const f = (n, w, h) => ({ name: `${n}.jpg`, width: w, height: h });
+  const picks = B.slotPicks([
+    f('0700', 1280, 720), f('0705', 1920, 1080), f('0710', 1280, 720),      // 7:00-7:14: the 1080
+    f('0715', 848, 480), f('0720', 1280, 720), f('0725', 1280, 720),       // 7:15-7:29: 7:20, nearest 7:15 of the sharp
+    f('0730', 1280, 720), f('0735', 1280, 720),                            // 7:30-7:44: 7:30
+    f('0800', 640, 360),                                                   // 8:00-8:14: soft, but all there is
+    f('1214', 1280, 720), f('1215', 1280, 720),                            // either side of 12:15
+  ]);
+  assert.deepStrictEqual(picks.map((x) => x.name), ['0705.jpg', '0720.jpg', '0730.jpg', '0800.jpg', '1214.jpg', '1215.jpg']);
+  // A whole day at 5 minutes: one in three.
+  const day = Array.from({ length: 108 }, (_, i) => { const m = 7 * 60 + i * 5; return f(`${String(Math.floor(m / 60)).padStart(2, '0')}${String(m % 60).padStart(2, '0')}`, 1280, 720); });
+  assert.strictEqual(B.slotPicks(day).length, 36);
+  assert.deepStrictEqual(B.slotPicks([]), []);
+});
+
+test('the continuous timelapse is kept in chunks from the 1st, 11th and 21st - month ends and leap days included', () => {
+  const cases = { '2026-11-01': '2026-11-01', '2026-11-10': '2026-11-01', '2026-11-11': '2026-11-11', '2026-11-20': '2026-11-11',
+    '2026-11-21': '2026-11-21', '2026-11-30': '2026-11-21', '2026-12-31': '2026-12-21', '2028-02-29': '2028-02-21', '2027-01-01': '2027-01-01' };
+  for (const [d, start] of Object.entries(cases)) assert.strictEqual(B.chunkStart(d), start, d);
+  const idx = { days: [{ date: '2026-11-11', set: 'a1', timeline: '0700' }, { date: '2026-11-09', set: 'b2', timeline: '0700,0715' },
+    { date: '2026-11-10', set: 'c3' }, { date: '2026-11-02', set: 'd4', timeline: '1200' }, null, { date: 'junk', timeline: '0700' }] };
+  const by = B.chunkDays(idx);
+  assert.deepStrictEqual([...by.keys()], ['2026-11-01', '2026-11-11']);
+  assert.deepStrictEqual(by.get('2026-11-01').map((d) => d.date), ['2026-11-02', '2026-11-09'], 'in order; a day with no timeline left out');
+});
+
+test('a JPEG\'s size is read from its header, whatever kind of JPEG; anything else is no size', () => {
+  if (needVideo()) return 'skip';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-size-'));
+  for (const [size, extra] of [['1920x1080', []], ['848x480', []], ['1280x720', ['-q:v', '2']]]) {
+    const f = path.join(dir, `${size}.jpg`);
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `testsrc2=s=${size}`, '-frames:v', '1', ...extra, '-y', f]);
+    assert.strictEqual(r.status, 0);
+    const [w, h] = size.split('x').map(Number);
+    assert.deepStrictEqual(B.jpegSize(fs.readFileSync(f)), { width: w, height: h });
+  }
+  assert.strictEqual(B.jpegSize(Buffer.from('not a picture at all, just words')), null);
+  assert.strictEqual(B.jpegSize(Buffer.alloc(0)), null);
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 section('2. The video, made with real ffmpeg');
 // ═══════════════════════════════════════════════════════════════════════════
@@ -152,13 +201,17 @@ function dayOfFrames(sizes, { damaged = [] } = {}) {
   return { dir, frames };
 }
 
-test('frames of every size Ring sends, into one 1280x720 H.264 video: a tenth of a second each, ready to play as it loads', async () => {
+test('frames of every size Ring sends, into one 1280x720 H.264 video: a tenth of a second each, ready to play as it loads - the soft ones left out', async () => {
   if (needVideo()) return 'skip';
   const { frames } = dayOfFrames([['0705', '1920x1080'], ['0710', '1280x720'], ['0715', '848x480'], ['1200', '640x360'], ['1610', '1280x720']]);
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-'));
   const v = await B.buildVideo({ day: '2026-11-09', frames, workDir: work });
-  assert.deepStrictEqual([v.frames, v.first, v.last, v.width, v.height, v.skipped], [5, '07:05', '16:10', 1280, 720, []]);
-  assert.ok(Math.abs(v.seconds - 0.5) < 0.05, String(v.seconds));
+  assert.deepStrictEqual([v.frames, v.first, v.last, v.width, v.height, v.skipped], [3, '07:05', '16:10', 1280, 720, []]);
+  assert.deepStrictEqual(v.soft, ['0715.jpg', '1200.jpg'], 'under 720 lines: out of the day\'s video');
+  assert.ok(Math.abs(v.seconds - 0.3) < 0.05, String(v.seconds));
+  // The continuous timelapse: each quarter hour's sharpest - a soft one only where nothing better was filmed.
+  assert.deepStrictEqual(v.timeline, ['0705', '0715', '1200', '1610']);
+  assert.strictEqual((await B.checkVideo(v.segment, 4)).width, 1280);
   assert.strictEqual(v.bytes, fs.statSync(v.video).size);
   // By name: ffprobe lists the fields in its own order, which can change between versions.
   const probe = JSON.parse(spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,profile,pix_fmt,width,height',
@@ -175,7 +228,7 @@ test('the date and time are on every frame, bottom right - each frame its own; t
   const { frames } = dayOfFrames([['0705', '1280x720'], ['0710', '1280x720']]);
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-'));
   await B.buildVideo({ day: '2026-11-09', frames, workDir: work });
-  const [a, b] = ['00001.jpg', '00002.jpg'].map((f) => path.join(work, 'stamped', f));
+  const [a, b] = ['0705.jpg', '0710.jpg'].map((f) => path.join(work, 'stamped', f));
   // Bottom right: the dark box and white letters. Top left: the plain grey picture.
   const corner = region(a, 420, 70, 1280 - 440, 720 - 80);
   assert.ok(corner.spread > 150, `letters on a dark box: spread ${corner.spread}`);
@@ -235,6 +288,37 @@ test('the check refuses a video that would not play while it loads, or has the w
   await assert.rejects(B.checkVideo(small, 20), /640x360/);
 });
 
+test('days\' pieces join into one video without re-encoding: every frame there, in order, playing as it loads; a piece made otherwise is refused', async () => {
+  if (needVideo()) return 'skip';
+  const one = await B.buildVideo({ day: '2026-11-09', frames: dayOfFrames([['0700', '1280x720'], ['0715', '1920x1080'], ['0730', '1280x720']]).frames,
+    workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-')) });
+  const two = await B.buildVideo({ day: '2026-11-10', frames: dayOfFrames([['0800', '1280x720'], ['0815', '1280x720']]).frames,
+    workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-')) });
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-join-'));
+  const j = await B.joinSegments({ files: [one.segment, two.segment], frames: 5, workDir: work });
+  assert.strictEqual(j.joined, 'copied');
+  const out = j.file;
+  assert.ok(Math.abs((await B.checkVideo(out, 5)).seconds - 0.5) < 0.05);
+  const ts = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'packet=pts_time,flags', '-of', 'csv=p=0', out], { encoding: 'utf8' })
+    .stdout.trim().split('\n').map((l) => l.split(','));
+  assert.deepStrictEqual(ts.map((x) => Number(x[0]).toFixed(1)), ['0.0', '0.1', '0.2', '0.3', '0.4'], 'evenly, across the join');
+  assert.ok(ts[3][1].startsWith('K'), 'the second day starts on a keyframe');
+  // A piece encoded otherwise (another ffmpeg on GitHub one day; here, another size and B-frames) is never
+  // copied in - it would break the video where it joins: the chunk is re-encoded, every frame kept.
+  const odd = path.join(work, 'odd.mp4');
+  spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=10', '-frames:v', '4', '-c:v', 'libx264',
+    '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', odd]);
+  assert.notStrictEqual(await B.encoding(odd), await B.encoding(one.segment));
+  const k = await B.joinSegments({ files: [one.segment, odd], frames: 7, workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-join-')) });
+  assert.strictEqual(k.joined, 're-encoded');
+  const info = await B.checkVideo(k.file, 7);
+  assert.deepStrictEqual([info.width, info.height], [1280, 720]);
+  const clean = spawnSync('ffmpeg', ['-v', 'error', '-i', k.file, '-f', 'null', '-'], { encoding: 'utf8' });
+  assert.strictEqual(clean.stderr.trim(), '', 'decodes cleanly from end to end');
+  // And the copied one too.
+  assert.strictEqual(spawnSync('ffmpeg', ['-v', 'error', '-i', out, '-f', 'null', '-'], { encoding: 'utf8' }).stderr.trim(), '');
+}, 90000);
+
 // ═══════════════════════════════════════════════════════════════════════════
 section('3. With the real Worker: made, sent, listed - once');
 // ═══════════════════════════════════════════════════════════════════════════
@@ -279,7 +363,7 @@ test('a day a Pi has finished: made, sent, listed - the public video plays in pi
     assert.strictEqual(e.date, day);
     assert.deepStrictEqual([e.frames, e.first, e.last, e.width, e.height], [4, '07:05', '16:10', 1280, 720]);
     assert.ok(new RegExp(`^videos/${day}-[0-9a-f]{12}\\.mp4$`).test(e.video) && e.poster === e.video.replace('videos/', 'posters/').replace('.mp4', '.jpg'));
-    assert.ok(w.lines.some((l) => new RegExp(`^${day}: made - 4 frames, 07:05 to 16:10, 0\\.4 s, [\\d.]+ MB; took \\d+ s\\.$`).test(l)), w.lines.join('\n'));
+    assert.ok(w.lines.some((l) => new RegExp(`^${day}: made - 4 frames, 07:05 to 16:10, 0\\.4 s, [\\d.]+ MB; 3 frames for the continuous timelapse; took \\d+ s\\.$`).test(l)), w.lines.join('\n'));
     // As the page asks for it.
     const res = await fetch(`${w.host.url}/timelapse/${e.video}`, { headers: { Range: 'bytes=0-1' } });
     assert.strictEqual(res.status, 206);
@@ -288,10 +372,22 @@ test('a day a Pi has finished: made, sent, listed - the public video plays in pi
     fs.writeFileSync(file, Buffer.from(await whole.arrayBuffer()));
     assert.strictEqual((await B.checkVideo(file, 4)).height, 720, 'what is served is the video');
     assert.strictEqual((await fetch(`${w.host.url}/timelapse/${e.poster}`)).status, 200);
+    // And its piece of the continuous timelapse, in its chunk: public, every quarter hour's frame.
+    const c = idx.timeline.chunks[0];
+    assert.deepStrictEqual([idx.timeline.fps, idx.timeline.slotMinutes, c.start, c.frames, c.days], [10, 15, B.chunkStart(day), 3,
+      [{ date: day, set: e.set, times: '0705,1200,1610' }]]);
+    assert.strictEqual(e.timeline, '0705,1200,1610');
+    const chunk = await fetch(`${w.host.url}/timelapse/${c.video}`);
+    assert.strictEqual(chunk.status, 200);
+    const cf = path.join(path.dirname(file), 'c.mp4');
+    fs.writeFileSync(cf, Buffer.from(await chunk.arrayBuffer()));
+    assert.strictEqual((await B.checkVideo(cf, 3)).width, 1280);
+    assert.ok(w.env.BUCKET.keys().includes(`timelapse/segments/${day}.mp4`), 'its piece kept, for the chunk');
+    assert.strictEqual((await fetch(`${w.host.url}/timelapse/segments/${day}.mp4`)).status, 401, 'not public');
     // Made once: the next run makes nothing.
     w.lines.length = 0;
     const again = await w.build({ now: at6pm(day) });
-    assert.deepStrictEqual([again.built.length, again.failed.length], [0, 0], w.lines.join('\n'));
+    assert.deepStrictEqual([again.built.length, again.failed.length, again.chunks], [0, 0, undefined], w.lines.join('\n'));
   } finally { await w.close(); }
 }, 120000);
 
@@ -338,6 +434,57 @@ test('not yet: today\'s frames with no Pi done; yesterday\'s before 6 AM - and o
   } finally { await w.close(); }
 }, 120000);
 
+/** A day of the index as the builder writes it (its video need not exist for these tests). */
+const dayEntry = (date, set, timeline) => ({ date, video: `videos/${date}-0123456789ab.mp4`, poster: `posters/${date}-0123456789ab.jpg`,
+  frames: 2, first: '07:00', last: '13:00', seconds: 0.2, bytes: 1000, width: 1280, height: 720, set, timeline });
+
+test('the continuous timelapse: each chunk made from its days\' pieces - and made again only when one of its days changes', async () => {
+  if (needVideo()) return 'skip';
+  const w = await setUp();
+  try {
+    const entries = [];
+    for (const [day, times] of [['2026-11-09', ['0700', '0715']], ['2026-11-10', ['0800']], ['2026-11-11', ['0900', '0915', '0930']]]) {
+      const v = await B.buildVideo({ day, frames: dayOfFrames(times.map((t) => [t, '1280x720']).concat(times.length === 1 ? [['1300', '1280x720']] : [])).frames,
+        workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-')) });
+      await w.client.putSegment(day, fs.readFileSync(v.segment));
+      entries.push(dayEntry(day, `${day.replace(/-/g, '')}aa`, v.timeline.join(',')));
+    }
+    let index = { days: entries.slice().reverse() };
+    const result = { failed: [] };
+    index = await B.rebuildChunks({ client: w.client, index, result, say: (l) => w.lines.push(l) });
+    assert.deepStrictEqual(result, { failed: [], chunks: ['2026-11-01', '2026-11-11'] }, w.lines.join('\n'));
+    const t = w.index().timeline;
+    assert.deepStrictEqual(t.chunks.map((c) => [c.start, c.frames, c.days.map((d) => d.date)]),
+      [['2026-11-01', 4, ['2026-11-09', '2026-11-10']], ['2026-11-11', 3, ['2026-11-11']]]);
+    const first = t.chunks[0].video, second = t.chunks[1].video;
+    // Nothing changed: nothing made.
+    let r2 = { failed: [] };
+    index = await B.rebuildChunks({ client: w.client, index, result: r2, say: () => {} });
+    assert.deepStrictEqual(r2, { failed: [] });
+    // The 10th made again (a late frame): its chunk only - the old video deleted, the other chunk untouched.
+    const v = await B.buildVideo({ day: '2026-11-10', frames: dayOfFrames([['0800', '1280x720'], ['0815', '1280x720'], ['1300', '1280x720']]).frames,
+      workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-')) });
+    await w.client.putSegment('2026-11-10', fs.readFileSync(v.segment));
+    index = B.mergeIndex(index, dayEntry('2026-11-10', '20261110bb', v.timeline.join(',')));
+    r2 = { failed: [] };
+    index = await B.rebuildChunks({ client: w.client, index, result: r2, say: () => {} });
+    assert.deepStrictEqual(r2.chunks, ['2026-11-01']);
+    const after = w.index().timeline;
+    assert.strictEqual(after.chunks[0].frames, 5);
+    assert.notStrictEqual(after.chunks[0].video, first);
+    assert.strictEqual(after.chunks[1].video, second);
+    assert.ok(!w.env.BUCKET.keys().includes(`timelapse/${first}`) && w.env.BUCKET.keys().includes(`timelapse/${second}`));
+    // A missing piece fails that chunk alone, said; the index keeps the chunk it had.
+    await w.env.BUCKET.delete('timelapse/segments/2026-11-11.mp4');
+    index = B.mergeIndex(index, dayEntry('2026-11-11', '20261111cc', '0900,0915,0930'));
+    r2 = { failed: [] };
+    await B.rebuildChunks({ client: w.client, index, result: r2, say: () => {} });
+    assert.deepStrictEqual(r2.failed.map((f) => f.day), ['timelapse from 2026-11-11']);
+    assert.ok(/segments\/2026-11-11\.mp4: the Worker answered HTTP 404/.test(r2.failed[0].error), r2.failed[0].error);
+    assert.strictEqual(w.index().timeline.chunks[1].video, second);
+  } finally { await w.close(); }
+}, 150000);
+
 test('frames are deleted from the Worker 3 days after their video - kept until then, and never kept past 30 days', async () => {
   if (needVideo()) return 'skip';
   const w = await setUp();
@@ -362,13 +509,15 @@ test('nothing from the Worker reaches outside its day: odd days, file names and 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-odd-'));
   const good = fs.readFileSync(frame(path.join(dir, 'good.jpg')));
   const asked = [], removed = [];
+  const segments = new Map();
   const client = {
     days: async () => ['../../etc', `${day}/../..`, 'not-a-day', day, 42],
     day: async (d) => { asked.push(`day ${d}`); return { frames: [{ name: '../../escape.jpg', size: 9 }, { name: '0705.jpg', size: good.length },
       { name: '0710.jpg', size: good.length }, { name: '0715.jpg/../../x', size: 1 }, null], done: { main: { frames: 2 } } }; },
     frame: async (d, n) => { asked.push(`frame ${d} ${n}`); return good; },
     index: async () => ({ days: [{ date: day, video: '../latest.jpg', poster: `posters/${etDay(-2)}-0123456789ab.jpg`, set: 'old' }] }),
-    putVideo: async () => {}, putPoster: async () => {}, putIndex: async () => {},
+    putVideo: async () => {}, putPoster: async () => {}, putIndex: async () => {}, putChunk: async () => {},
+    putSegment: async (d, bytes) => { segments.set(d, bytes); }, segment: async (d) => segments.get(d),
     remove: async (p) => { removed.push(p); },
     dropFrames: async () => {},
   };
@@ -417,7 +566,8 @@ test('the index cannot be updated: that day fails (and is tried again next time)
     const day = etDay(-1);
     await w.send(day, ['0705', '0710']);
     let r = await w.build({ now: at6pm(etDay(0)) });
-    assert.deepStrictEqual(r.failed.map((f) => f.day), [day]);
+    // The day - and its chunk of the continuous timelapse, which also needs the index.
+    assert.deepStrictEqual(r.failed.map((f) => f.day), [day, `timelapse from ${B.chunkStart(day)}`]);
     assert.ok(/PUT \/timelapse\/index\.json: the Worker answered HTTP 500 \(R2 busy\)/.test(r.failed[0].error), r.failed[0].error);
     assert.strictEqual(w.index(), null);
     assert.ok(!r.pruned.includes(day), 'its frames are kept for the next try');
@@ -531,6 +681,28 @@ test('GitHub runs both timelapse suites at each push and every evening, with the
   assert.ok(/name: 'timelapse_web',\s+cmd: \['node', 'camera\/test_timelapse_web\.js'\]/.test(tt));
   assert.ok(/name: 'build_timelapse',\s+cmd: \['node', 'scripts\/test_build_timelapse\.js'\]/.test(tt));
   assert.ok(/name: 'newboathouse',\s+cmd: \['node', 'scripts\/test_newboathouse\.js'\]/.test(tt));
+});
+
+test('an index nearing the Worker\'s 1 MB is warned about well before it is refused - in the log and on GitHub\'s run page', async () => {
+  const sent = [];
+  const client = B.workerClient({ base: 'http://127.0.0.1:9', secret: BUILDER_SECRET, backoffMs: 0,
+    fetchImpl: async (url, opts) => { sent.push(opts.body.length); return { ok: true, status: 200, json: async () => ({ ok: true }) }; } });
+  const said = [];
+  const log = console.log;
+  const was = process.env.GITHUB_ACTIONS;
+  console.log = (m) => said.push(String(m));
+  process.env.GITHUB_ACTIONS = 'true';
+  try {
+    await client.putIndex({ days: [{ pad: 'x'.repeat(700 * 1024) }] });
+    assert.deepStrictEqual(said, []);
+    await client.putIndex({ days: [{ pad: 'x'.repeat(850 * 1024) }] });
+  } finally {
+    console.log = log;
+    if (was === undefined) delete process.env.GITHUB_ACTIONS; else process.env.GITHUB_ACTIONS = was;
+  }
+  assert.strictEqual(sent.length, 2, 'still sent');
+  assert.ok(/^The timelapse's index is 850 KB, near the Worker's 1 MB limit/.test(said[0]), said.join('\n'));
+  assert.ok(/^::warning::The timelapse's index is 850 KB/.test(said[1]), said.join('\n'));
 });
 
 test('on GitHub: a server\'s words never become a workflow command, even when the whole run fails', async () => {

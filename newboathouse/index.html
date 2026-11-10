@@ -6,10 +6,10 @@
 <!-- Only what this page needs, from where it needs it: its own two scripts
      (by their hashes - scripts/test_newboathouse.js checks them), and the
      timelapse from the club's Worker. Nothing else can run or load here. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rrqDV8A+5BVbukieSciXebfrs7j0k/Zju4UwfagvbkU=' 'sha256-YeexXQzw1/mYXlAmgXtcaIKl73KvxMMb7oGRLuv1hps='; style-src 'unsafe-inline'; img-src 'self' https://nhrc-camera.gurpinar-emre.workers.dev; media-src https://nhrc-camera.gurpinar-emre.workers.dev; connect-src https://nhrc-camera.gurpinar-emre.workers.dev; base-uri 'none'; form-action 'none'"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rrqDV8A+5BVbukieSciXebfrs7j0k/Zju4UwfagvbkU=' 'sha256-72wfKs/9IGqBlOayeoqoi5P388ytnylAmR3mVPqCeSo='; style-src 'unsafe-inline'; img-src 'self' https://nhrc-camera.gurpinar-emre.workers.dev; media-src https://nhrc-camera.gurpinar-emre.workers.dev; connect-src https://nhrc-camera.gurpinar-emre.workers.dev; base-uri 'none'; form-action 'none'"/>
 <meta name="referrer" content="strict-origin-when-cross-origin"/>
 <title>New Boathouse Timelapse - New Haven Rowing Club</title>
-<meta name="description" content="Each day at the new boathouse: a photo every 5 minutes from sunrise to sunset, as a short video."/>
+<meta name="description" content="The new boathouse going up: a timelapse of every day so far, and each whole day on its own."/>
 <link rel="icon" type="image/png" sizes="32x32" href="../favicon-32.png"/>
 <link rel="icon" type="image/png" sizes="16x16" href="../favicon-16.png"/>
 <link rel="apple-touch-icon" sizes="180x180" href="../apple-touch-icon.png"/>
@@ -47,7 +47,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
              radial-gradient(ellipse 50% 40% at 90% 100%,var(--glow-green),transparent 60%);}
 #app{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:28px 16px 60px;}
 a{color:var(--gold);}
-a:focus-visible,button:focus-visible,video:focus-visible{outline:3px solid var(--focus);outline-offset:2px;}
+a:focus-visible,button:focus-visible,video:focus-visible,input:focus-visible{outline:3px solid var(--focus);outline-offset:2px;}
+[hidden]{display:none !important;}
 
 .header{position:relative;display:flex;align-items:center;gap:16px;margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--border);padding-right:56px;}
 .header-logo-wrap{width:64px;height:64px;border-radius:50%;background:#ffffff;border:3px solid #0d1f3c;outline:2px solid #f0b429;outline-offset:2px;
@@ -65,18 +66,33 @@ a:focus-visible,button:focus-visible,video:focus-visible{outline:3px solid var(-
 
 .card{background:var(--navy2);border:1px solid var(--border);border-radius:14px;padding:18px 16px;margin-bottom:16px;}
 .label{font-size:.66rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);margin-bottom:8px;}
-#day-title{font-size:1.15rem;font-weight:700;margin-bottom:12px;line-height:1.3;}
-.video-wrap{border-radius:10px;overflow:hidden;border:1px solid rgba(var(--ink),.08);background:#000;line-height:0;aspect-ratio:16/9;}
-.video-wrap video{width:100%;height:100%;display:block;background:#000;}
+h2{font-size:1.15rem;font-weight:700;margin-bottom:12px;line-height:1.3;}
+.video-wrap{position:relative;border-radius:10px;overflow:hidden;border:1px solid rgba(var(--ink),.08);background:#000;line-height:0;aspect-ratio:16/9;}
+.video-wrap video{position:absolute;inset:0;width:100%;height:100%;display:block;background:#000;}
+.video-wrap:fullscreen{border-radius:0;border:0;}
+
+/* The drag bar under the continuous timelapse. */
+.scrub{display:flex;align-items:center;gap:10px;margin-top:12px;}
+.round{flex:0 0 44px;width:44px;height:44px;border-radius:50%;border:1px solid rgba(var(--ink),.25);background:transparent;color:var(--white);
+  cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
+.round svg{width:20px;height:20px;display:block;}
+.round .icon-play{display:none;}
+.round[data-state="paused"] .icon-play{display:block;}
+.round[data-state="paused"] .icon-pause{display:none;}
+#tl-range{flex:1 1 auto;min-width:0;height:44px;accent-color:var(--gold);cursor:pointer;background:transparent;}
+.when{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;margin-top:6px;}
+#tl-when{font-size:.95rem;font-weight:700;}
+.ends{font-size:.72rem;color:var(--muted);}
+
 .speeds{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;font-size:.78rem;color:var(--muted);}
 .speeds button{min-width:52px;min-height:36px;padding:6px 12px;border-radius:8px;border:1px solid rgba(var(--ink),.25);background:transparent;
   color:var(--white);font:inherit;font-size:.8rem;cursor:pointer;}
 .speeds button[aria-pressed="true"]{background:var(--gold);border-color:var(--gold);color:var(--navy);font-weight:700;}
 .note{font-size:.8rem;color:var(--muted);margin-top:10px;line-height:1.6;}
-.message{font-size:.9rem;line-height:1.6;color:var(--white);}
+.message{font-size:.9rem;line-height:1.6;color:var(--white);margin-top:8px;}
 .message.problem{color:var(--bad);}
 
-.days{list-style:none;display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px;}
+.days{list-style:none;display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px;margin-top:14px;}
 .days button{width:100%;padding:0;border:1px solid rgba(var(--ink),.12);border-radius:10px;overflow:hidden;background:var(--navy3);
   color:var(--white);cursor:pointer;text-align:left;font:inherit;}
 .days button[aria-current="true"]{border-color:var(--gold);box-shadow:0 0 0 2px var(--gold);}
@@ -93,7 +109,7 @@ footer{font-size:.74rem;color:var(--muted);line-height:1.7;margin-top:8px;}
     <div class="header-logo-wrap"><img src="../nhrc-logo-header.png" width="240" height="200" alt="NHRC Logo"/></div>
     <div>
       <h1>The New Boathouse</h1>
-      <p>Each day at the building site: a photo every 5 minutes from sunrise to sunset, as a short video.</p>
+      <p>The building going up, day by day: every day so far in one timelapse, and each whole day on its own.</p>
       <a class="back" href="../">&larr; Rowing conditions on roworno.com</a>
     </div>
     <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to light mode" title="Switch to light mode">
@@ -103,42 +119,66 @@ footer{font-size:.74rem;color:var(--muted);line-height:1.7;margin-top:8px;}
   </header>
 
   <main>
-    <section class="card" id="player-card" aria-labelledby="day-title">
-      <div class="label">Timelapse</div>
-      <h2 id="day-title">Loading the timelapse&hellip;</h2>
-      <div class="video-wrap" id="video-wrap" hidden>
-        <video id="player" controls playsinline preload="metadata" aria-label="The day's timelapse"></video>
+    <section class="card" id="whole-card" aria-labelledby="whole-title">
+      <div class="label">Every day so far</div>
+      <h2 id="whole-title">Loading the timelapse&hellip;</h2>
+      <div class="video-wrap" id="stage" hidden>
+        <video id="tl-a" playsinline muted preload="auto" aria-label="The timelapse of every day so far"></video>
+        <video id="tl-b" playsinline muted preload="auto" aria-hidden="true" hidden></video>
       </div>
-      <div class="speeds" id="speeds" hidden role="group" aria-label="Playback speed">
-        <span>Speed</span>
-        <button type="button" data-rate="0.5" aria-pressed="false">0.5&times;</button>
-        <button type="button" data-rate="1" aria-pressed="true">1&times;</button>
-        <button type="button" data-rate="2" aria-pressed="false">2&times;</button>
+      <div id="tl-controls" hidden>
+        <div class="scrub">
+          <button type="button" class="round" id="tl-play" data-state="paused" aria-label="Play">
+            <svg class="icon-play" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>
+            <svg class="icon-pause" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor"><path d="M6 4.5h4.5v15H6zM13.5 4.5H18v15h-4.5z"/></svg>
+          </button>
+          <input type="range" id="tl-range" min="0" max="0" value="0" step="1" aria-label="Day and time in the timelapse"/>
+          <button type="button" class="round" id="tl-full" aria-label="Full screen" title="Full screen">
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+          </button>
+        </div>
+        <div class="when"><span id="tl-when"></span><span class="ends" id="tl-ends"></span></div>
+        <div class="speeds" id="tl-speeds" role="group" aria-label="Playback speed">
+          <span>Speed</span>
+          <button type="button" data-rate="0.5" aria-pressed="false">0.5&times;</button>
+          <button type="button" data-rate="1" aria-pressed="true">1&times;</button>
+          <button type="button" data-rate="2" aria-pressed="false">2&times;</button>
+          <button type="button" data-rate="4" aria-pressed="false">4&times;</button>
+        </div>
+        <p class="note" id="tl-note"></p>
       </div>
-      <p class="note" id="day-note"></p>
-      <p class="message" id="message" hidden></p>
+      <p class="message" id="tl-message" hidden></p>
     </section>
 
-    <section class="card" id="days-card" hidden aria-labelledby="days-title">
-      <div class="label" id="days-title">Every day so far</div>
-      <ul class="days" id="days"></ul>
+    <section class="card" id="day-card" aria-labelledby="day-title" hidden>
+      <div class="label">A whole day</div>
+      <h2 id="day-title"></h2>
+      <div class="video-wrap">
+        <video id="day-player" controls playsinline preload="metadata" aria-label="The whole day's timelapse"></video>
+      </div>
+      <p class="note" id="day-note"></p>
+      <p class="message" id="day-message" hidden></p>
+      <ul class="days" id="days" aria-label="Pick a day"></ul>
     </section>
   </main>
 
   <footer>
-    From the club's Downstream Lot camera. Each day's video is made automatically in the evening, from that day's photos;
-    the date and time on each frame are the boathouse's. Days the camera could not film are missing.
+    From the club's Downstream Lot camera, a photo every 5 minutes from sunrise to sunset. Every evening the day is added
+    automatically: to the timelapse above, the sharpest photo of each quarter hour; below, the whole day. The date and time
+    on each frame are the boathouse's. Days the camera could not film are missing.
   </footer>
 </div>
 
 <script id="page">
 'use strict';
 // The timelapse lives on the club's Worker (camera/cloudflare_worker.js): the
-// list of days at index.json, each day's video and poster beside it. The
-// list is checked before anything in it is used, and shown only as text.
+// list of days at index.json - the continuous timelapse in chunks, and each
+// day's own video - beside them. The list is checked before anything in it is
+// used, and shown only as text.
 const TIMELAPSE_BASE = 'https://nhrc-camera.gurpinar-emre.workers.dev/timelapse/';
 const INDEX_URL = TIMELAPSE_BASE + 'index.json';
 const LOAD_TIMEOUT_MS = 10000;
+const LOOP_PAUSE_MS = 1500;     // on the last frame, before it starts again from the first day
 const THEME_KEY = 'nhrc-theme';
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -176,6 +216,52 @@ function daysFrom(index) {
   return out.filter((d, i) => i === 0 || d.date !== out[i - 1].date);
 }
 
+/**
+ * The continuous timelapse from the list: { fps, total, chunks: [{ start,
+ * video, frames, offset, days: [{ date, times: ['0700', ...], offset }] }] } -
+ * offsets counted in frames from the very first - or null when there is none.
+ * A chunk that is not well formed ends it there: what is shown is always one
+ * unbroken run of days, from the first.
+ */
+function timelineFrom(index) {
+  const t = index && index.timeline;
+  if (!t || typeof t !== 'object' || !Number.isInteger(t.fps) || t.fps < 1 || t.fps > 60 || !Array.isArray(t.chunks)) return null;
+  const chunks = [];
+  let offset = 0;
+  for (const c of t.chunks) {
+    if (!c || typeof c !== 'object' || !validDate(c.start)) break;
+    if (typeof c.video !== 'string' || !new RegExp(`^whole/${c.start}-[0-9a-f]{8,16}\\.mp4$`).test(c.video)) break;
+    if (chunks.length && c.start <= chunks[chunks.length - 1].start) break;
+    if (!Array.isArray(c.days) || !c.days.length) break;
+    const days = [];
+    let n = 0, ok = true;
+    for (const d of c.days) {
+      const times = d && typeof d.times === 'string' && /^\d{4}(,\d{4})*$/.test(d.times) ? d.times.split(',') : null;
+      if (!d || !validDate(d.date) || !times || (days.length && d.date <= days[days.length - 1].date)
+          || times.some((x) => !/^([01]\d|2[0-3])[0-5]\d$/.test(x))) { ok = false; break; }
+      days.push({ date: d.date, times, offset: offset + n });
+      n += times.length;
+    }
+    if (!ok || n !== c.frames) break;
+    chunks.push({ start: c.start, video: c.video, frames: n, offset, days });
+    offset += n;
+  }
+  return chunks.length ? { fps: t.fps, total: offset, chunks } : null;
+}
+
+/** Where frame g of the whole timelapse is: { chunk (its number), local (frame in it), date, hhmm }. */
+function frameAt(tl, g) {
+  const total = tl.total;
+  g = Math.max(0, Math.min(total - 1, Math.floor(Number(g) || 0)));
+  let ci = 0;
+  while (ci + 1 < tl.chunks.length && tl.chunks[ci + 1].offset <= g) ci++;
+  const c = tl.chunks[ci];
+  let di = 0;
+  while (di + 1 < c.days.length && c.days[di + 1].offset <= g) di++;
+  const d = c.days[di];
+  return { chunk: ci, local: g - c.offset, date: d.date, hhmm: d.times[g - d.offset] };
+}
+
 /** "Monday, November 9, 2026". */
 function dayTitle(date) {
   const [y, m, d] = date.split('-').map(Number);
@@ -188,10 +274,22 @@ function shortDay(date) {
   return `${WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()].slice(0, 3)}, ${MONTHS[m - 1].slice(0, 3)} ${d}`;
 }
 
-/** "06:35" -> "6:35 AM". */
+/** "Nov 9, 2026". */
+function mediumDay(date) {
+  const [y, m, d] = date.split('-').map(Number);
+  return `${MONTHS[m - 1].slice(0, 3)} ${d}, ${y}`;
+}
+
+/** "06:35" or "0635" -> "6:35 AM". */
 function clock12(hhmm) {
-  const h = Number(hhmm.slice(0, 2));
-  return `${h % 12 === 0 ? 12 : h % 12}:${hhmm.slice(3, 5)} ${h < 12 ? 'AM' : 'PM'}`;
+  const s = String(hhmm).replace(':', '');
+  const h = Number(s.slice(0, 2));
+  return `${h % 12 === 0 ? 12 : h % 12}:${s.slice(2, 4)} ${h < 12 ? 'AM' : 'PM'}`;
+}
+
+/** "Mon, Nov 9, 2026 · 7:05 AM" - where the drag bar is. */
+function whenText(date, hhmm) {
+  return `${shortDay(date)}, ${date.slice(0, 4)} · ${clock12(hhmm)}`;
 }
 
 /** "112 photos, 6:35 AM to 4:15 PM - 11 seconds". */
@@ -207,36 +305,214 @@ function dayNote(d) {
   return s;
 }
 
-/** The day the address asks for (#2026-11-09), if it is in the list; else the newest. */
-function pickDay(days, hash) {
+/** "9 days, 312 frames - 31 seconds". */
+function wholeNote(tl) {
+  const days = tl.chunks.reduce((n, c) => n + c.days.length, 0);
+  const secs = Math.round(tl.total / tl.fps);
+  const len = secs >= 120 ? `${Math.round(secs / 60)} minutes` : `${secs} second${secs === 1 ? '' : 's'}`;
+  return `${days} day${days === 1 ? '' : 's'} so far, a frame for each quarter hour of daylight - ${len} in all`;
+}
+
+/** The day the address asks for (#2026-11-09), if it is in the list; else null. */
+function askedDay(days, hash) {
   const want = String(hash || '').replace(/^#/, '');
-  return days.find((d) => d.date === want) || days[0] || null;
+  return days.find((d) => d.date === want) || null;
+}
+
+/** The day the address asks for, if it is in the list; else the newest. */
+function pickDay(days, hash) {
+  return askedDay(days, hash) || days[0] || null;
 }
 
 // ─── On the page ─────────────────────────────────────────────────────────────
 
 const $ = (id) => document.getElementById(id);
-
-function show(id, on) { const el = $(id); if (el) el.hidden = !on; }
-
-function say(text, problem) {
-  const el = $('message');
+const show = (id, on) => { const el = $(id); if (el) el.hidden = !on; };
+function say(id, text, problem) {
+  const el = $(id);
   el.textContent = text;
   el.className = problem ? 'message problem' : 'message';
   el.hidden = !text;
 }
 
-let current = null;
+// ── The continuous timelapse: two videos, one showing a chunk, the other
+//    ready with the next, so one day runs into the next across chunks. ──
 
-function select(d, days, push) {
-  current = d;
-  const player = $('player');
+const P = { tl: null, vis: null, hid: null, playing: false, dragging: false, wasPlaying: false, rate: 1, raf: 0, loop: 0, pending: null };
+
+function chunkOf(video) { return video && video.getAttribute('data-chunk') !== null ? Number(video.getAttribute('data-chunk')) : -1; }
+
+/** Puts chunk ci into a video, unless it is there already. */
+function load(video, ci) {
+  if (ci < 0 || ci >= P.tl.chunks.length || chunkOf(video) === ci) return;
+  video.setAttribute('data-chunk', String(ci));
+  video.src = TIMELAPSE_BASE + P.tl.chunks[ci].video;
+  video.playbackRate = P.rate;
+}
+
+/** Shows frame `local` of a video's chunk: now, or as soon as it can. */
+function seek(video, local) {
+  const t = (local + 0.5) / P.tl.fps;
+  if (video.readyState >= 1) { video.currentTime = t; return; }
+  const go = () => { video.removeEventListener('loadedmetadata', go); video.currentTime = t; };
+  video.addEventListener('loadedmetadata', go);
+}
+
+function swap() {
+  const was = P.vis;
+  P.vis = P.hid;
+  P.hid = was;
+  P.vis.hidden = false;
+  P.vis.removeAttribute('aria-hidden');
+  P.hid.hidden = true;
+  P.hid.setAttribute('aria-hidden', 'true');
+  try { P.hid.pause(); } catch (e) { /* not playing */ }
+}
+
+/** Frame g of the whole timelapse on screen, the next chunk made ready behind it. */
+function showFrame(g) {
+  const at = frameAt(P.tl, g);
+  if (chunkOf(P.vis) !== at.chunk) {
+    if (chunkOf(P.hid) === at.chunk) swap(); else load(P.vis, at.chunk);
+  }
+  seek(P.vis, at.local);
+  load(P.hid, at.chunk + 1);
+  mark(g);
+}
+
+/** The drag bar and the words under it, at frame g. */
+function mark(g) {
+  const at = frameAt(P.tl, g);
+  const range = $('tl-range');
+  if (!P.dragging) range.value = String(g);
+  const text = whenText(at.date, at.hhmm);
+  $('tl-when').textContent = text;
+  range.setAttribute('aria-valuetext', text);
+}
+
+/** The frame on screen now, by the playing video's clock. */
+function currentFrame() {
+  const ci = chunkOf(P.vis);
+  if (ci < 0) return 0;
+  const c = P.tl.chunks[ci];
+  return c.offset + Math.max(0, Math.min(c.frames - 1, Math.floor((P.vis.currentTime || 0) * P.tl.fps + 1e-6)));
+}
+
+function setPlaying(on) {
+  P.playing = on;
+  const b = $('tl-play');
+  b.setAttribute('data-state', on ? 'playing' : 'paused');
+  b.setAttribute('aria-label', on ? 'Pause' : 'Play');
+  if (!on) return;
+  const tick = () => {
+    if (!P.playing) return;
+    mark(currentFrame());
+    P.raf = requestAnimationFrame(tick);
+  };
+  cancelAnimationFrame(P.raf);
+  P.raf = requestAnimationFrame(tick);
+}
+
+function play() {
+  clearTimeout(P.loop);
+  setPlaying(true);
+  let r;
+  try { r = P.vis.play(); } catch (e) { r = null; }
+  // A browser that will not start a video by itself (data saving, say): the button says Play.
+  if (r && typeof r.catch === 'function') r.catch(() => { setPlaying(false); });
+}
+
+function pause() {
+  clearTimeout(P.loop);
+  setPlaying(false);
+  try { P.vis.pause(); } catch (e) { /* not playing */ }
+}
+
+/** The playing chunk has ended: the next one at once - or, after the last, a moment on today, then the first day again. */
+function onEnded(e) {
+  if (e && e.target !== P.vis) return;
+  const ci = chunkOf(P.vis);
+  if (ci + 1 < P.tl.chunks.length) {
+    if (chunkOf(P.hid) !== ci + 1) load(P.hid, ci + 1);
+    swap();
+    seek(P.vis, 0);
+    if (P.playing) play();
+    load(P.hid, ci + 2);
+    return;
+  }
+  mark(P.tl.total - 1);
+  if (!P.playing) return;
+  P.loop = setTimeout(() => { showFrame(0); play(); }, LOOP_PAUSE_MS);
+}
+
+function initTimeline(tl, autoplay, startAt, poster) {
+  P.tl = tl;
+  P.vis = $('tl-a');
+  P.hid = $('tl-b');
+  if (poster) P.vis.setAttribute('poster', TIMELAPSE_BASE + poster);
+  const range = $('tl-range');
+  range.max = String(tl.total - 1);
+  const first = tl.chunks[0].days[0].date;
+  const lastChunk = tl.chunks[tl.chunks.length - 1];
+  const last = lastChunk.days[lastChunk.days.length - 1].date;
+  $('whole-title').textContent = first === last ? dayTitle(first) : `${dayTitle(first)} to ${dayTitle(last)}`;
+  $('tl-ends').textContent = first === last ? '' : `${mediumDay(first)} → ${mediumDay(last)}`;
+  $('tl-note').textContent = wholeNote(tl);
+  show('stage', true);
+  show('tl-controls', true);
+  for (const v of [P.vis, P.hid]) {
+    v.addEventListener('ended', onEnded);
+    v.addEventListener('error', () => {
+      if (v === P.vis) say('tl-message', 'Part of the timelapse could not be played just now. Please try again in a few minutes.', true);
+    });
+  }
+  $('tl-play').addEventListener('click', () => {
+    if (P.playing) { pause(); return; }
+    if (currentFrame() >= P.tl.total - 1) showFrame(0);
+    play();
+  });
+  // Dragging: the frame under the finger at once; playing again on letting go, if it was.
+  range.addEventListener('input', () => {
+    if (!P.dragging) { P.dragging = true; P.wasPlaying = P.playing; if (P.playing) pause(); }
+    P.pending = Number(range.value);
+    if (!P.drawPending) {
+      P.drawPending = true;
+      requestAnimationFrame(() => { P.drawPending = false; if (P.pending !== null) { showFrame(P.pending); P.pending = null; } });
+    }
+  });
+  range.addEventListener('change', () => {
+    if (P.pending !== null) { showFrame(P.pending); P.pending = null; }
+    P.dragging = false;
+    if (P.wasPlaying) play();
+  });
+  for (const b of document.querySelectorAll('#tl-speeds button')) {
+    b.addEventListener('click', () => {
+      for (const o of document.querySelectorAll('#tl-speeds button')) o.setAttribute('aria-pressed', o === b ? 'true' : 'false');
+      P.rate = Number(b.getAttribute('data-rate')) || 1;
+      P.vis.playbackRate = P.rate;
+      P.hid.playbackRate = P.rate;
+    });
+  }
+  $('tl-full').addEventListener('click', () => {
+    const stage = $('stage');
+    try {
+      const r = stage.requestFullscreen ? stage.requestFullscreen() : P.vis.webkitEnterFullscreen ? P.vis.webkitEnterFullscreen() : null;
+      if (r && typeof r.catch === 'function') r.catch(() => {});
+    } catch (e) { /* not on this browser */ }
+  });
+  showFrame(startAt);
+  if (autoplay) play(); else setPlaying(false);
+}
+
+// ── Each whole day, below. ──
+
+function selectDay(d, push) {
+  const player = $('day-player');
   $('day-title').textContent = dayTitle(d.date);
   $('day-note').textContent = dayNote(d);
   if (d.poster) player.setAttribute('poster', TIMELAPSE_BASE + d.poster); else player.removeAttribute('poster');
   player.src = TIMELAPSE_BASE + d.video;
-  player.playbackRate = Number(document.querySelector('#speeds button[aria-pressed="true"]').getAttribute('data-rate')) || 1;
-  say('', false);
+  say('day-message', '', false);
   for (const b of document.querySelectorAll('#days button')) b.setAttribute('aria-current', b.getAttribute('data-date') === d.date ? 'true' : 'false');
   if (push) { try { history.replaceState(null, '', `#${d.date}`); } catch (e) { /* only the address */ } }
 }
@@ -266,13 +542,12 @@ function renderDays(days) {
       b.appendChild(small);
     }
     b.addEventListener('click', () => {
-      select(d, days, true);
-      try { $('player-card').scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { /* old browser */ }
+      selectDay(d, true);
+      try { $('day-card').scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { /* old browser */ }
     });
     li.appendChild(b);
     list.appendChild(li);
   }
-  show('days-card', days.length > 1);
 }
 
 async function loadIndex() {
@@ -288,40 +563,47 @@ async function loadIndex() {
   }
 }
 
-async function start() {
-  let days;
-  try {
-    days = daysFrom(await loadIndex());
-  } catch (e) {
-    $('day-title').textContent = 'The timelapse could not be loaded';
-    say('It could not be reached just now. Please try again in a few minutes.', true);
-    return;
-  }
-  if (!days.length) {
-    $('day-title').textContent = 'No timelapse yet';
-    say('The first video appears the evening after the camera\'s first full day of photos.', false);
-    return;
-  }
-  show('video-wrap', true);
-  show('speeds', true);
-  renderDays(days);
-  select(pickDay(days, location.hash), days, false);
+function reducedMotion() {
+  try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); } catch (e) { return false; }
 }
 
-function initSpeeds() {
-  for (const b of document.querySelectorAll('#speeds button')) {
-    b.addEventListener('click', () => {
-      for (const o of document.querySelectorAll('#speeds button')) o.setAttribute('aria-pressed', o === b ? 'true' : 'false');
-      $('player').playbackRate = Number(b.getAttribute('data-rate')) || 1;
-    });
+async function start() {
+  let index;
+  try {
+    index = await loadIndex();
+  } catch (e) {
+    $('whole-title').textContent = 'The timelapse could not be loaded';
+    say('tl-message', 'It could not be reached just now. Please try again in a few minutes.', true);
+    return;
   }
-  // A new video starts at the chosen speed too.
-  $('player').addEventListener('loadedmetadata', () => {
-    const on = document.querySelector('#speeds button[aria-pressed="true"]');
-    $('player').playbackRate = on ? Number(on.getAttribute('data-rate')) || 1 : 1;
-  });
-  $('player').addEventListener('error', () => {
-    if (current) say('This day\'s video could not be played. Please try again later, or pick another day.', true);
+  const days = daysFrom(index);
+  const tl = timelineFrom(index);
+  const asked = askedDay(days, location.hash);
+  if (!tl) {
+    $('whole-title').textContent = 'No timelapse yet';
+    say('tl-message', days.length ? 'The timelapse of every day so far starts with the next day that is filmed.'
+      : 'The first video appears the evening after the camera\'s first full day of photos.', false);
+  } else {
+    // A link to a day (the morning email's) shows that day; otherwise everything plays, from the first day.
+    let startAt = 0;
+    if (asked) {
+      const at = tl.chunks.flatMap((c) => c.days).find((d) => d.date === asked.date);
+      if (at) startAt = at.offset;
+    }
+    const firstDay = days.find((d) => d.date === tl.chunks[0].days[0].date);
+    initTimeline(tl, !asked && !reducedMotion(), startAt, firstDay && firstDay.poster);
+  }
+  if (days.length) {
+    show('day-card', true);
+    renderDays(days);
+    selectDay(pickDay(days, location.hash), false);
+    if (asked) { try { $('day-card').scrollIntoView({ block: 'start' }); } catch (e) { /* old browser */ } }
+  }
+}
+
+function initDayPlayer() {
+  $('day-player').addEventListener('error', () => {
+    say('day-message', 'This day\'s video could not be played. Please try again later, or pick another day.', true);
   });
 }
 
@@ -348,20 +630,19 @@ function initThemeToggle() {
 if (typeof window !== 'undefined' && typeof document !== 'undefined' && document.getElementById) {
   window.addEventListener('DOMContentLoaded', () => {
     try { initThemeToggle(); } catch (e) { /* the switch only */ }
-    try { initSpeeds(); } catch (e) { /* the speed buttons only */ }
+    try { initDayPlayer(); } catch (e) { /* the day player's message only */ }
     start();
   });
   window.addEventListener('hashchange', () => {
     // A link to another day (#2026-11-08) while the page is open.
-    const list = document.querySelectorAll('#days button');
-    if (!list.length) return;
     const want = location.hash.replace(/^#/, '');
-    const b = [...list].find((x) => x.getAttribute('data-date') === want);
+    const b = [...document.querySelectorAll('#days button')].find((x) => x.getAttribute('data-date') === want);
     if (b) b.click();
   });
 }
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { TIMELAPSE_BASE, INDEX_URL, validDate, daysFrom, dayTitle, shortDay, clock12, dayNote, pickDay };
+  module.exports = { TIMELAPSE_BASE, INDEX_URL, LOOP_PAUSE_MS, validDate, daysFrom, timelineFrom, frameAt, dayTitle, shortDay, mediumDay,
+    clock12, whenText, dayNote, wholeNote, askedDay, pickDay };
 }
 </script>
 </body>

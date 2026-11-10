@@ -312,10 +312,88 @@ test('the index: kept only well formed, rebuilt from what is known, newest day f
   ]) {
     assert.strictEqual((await put(bad)).status, 400, JSON.stringify(bad).slice(0, 120));
   }
-  assert.strictEqual((await put('x'.repeat(600 * 1024))).status, 413);
+  assert.strictEqual((await put('x'.repeat(1024 * 1024 + 1))).status, 413);
   assert.strictEqual((await put({ days: [] }, pi())).status, 401);
   assert.deepStrictEqual(JSON.parse(e.BUCKET.bytes('timelapse/index.json').toString()).days.map((d) => d.date), [b, a], 'the good one stays');
 });
+
+test('each day\'s piece of the continuous timelapse: the builder\'s alone - kept, read back, deleted; never public, never the Pis\'', async () => {
+  const e = env();
+  const p = `/timelapse/segments/${etDay(-1)}.mp4`;
+  const body = mp4(3000);
+  assert.strictEqual((await call(e, 'PUT', p, { headers: pi({ 'Content-Type': 'video/mp4' }), body })).status, 401);
+  assert.strictEqual((await call(e, 'PUT', p, { headers: builder({ 'Content-Type': 'video/mp4' }), body: Buffer.from('<html>') })).status, 415);
+  assert.strictEqual((await call(e, 'PUT', p, { headers: builder({ 'Content-Type': 'video/mp4' }), body })).status, 200);
+  for (const h of [{}, pi()]) {
+    const r = await call(e, 'GET', p, { headers: h });
+    assert.strictEqual(r.status, 401, 'not public, not the Pis\'');
+  }
+  const r = await call(e, 'GET', p, { headers: builder() });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.headers.get('cache-control'), 'no-store');
+  assert.ok(Buffer.from(await r.arrayBuffer()).equals(body));
+  assert.strictEqual((await call(e, 'GET', `/timelapse/segments/${etDay(-2)}.mp4`, { headers: builder() })).status, 404);
+  assert.strictEqual((await call(e, 'GET', '/timelapse/segments/2026-02-30.mp4', { headers: builder() })).status, 404);
+  assert.strictEqual((await call(e, 'DELETE', p, { headers: builder() })).status, 200);
+  assert.strictEqual(e.BUCKET.stored(p.slice(1)), null);
+});
+
+test('the continuous timelapse\'s chunks: from the 1st, 11th or 21st only; made by the builder; public, in pieces (Range)', async () => {
+  const e = env();
+  const start = `${etDay(-1).slice(0, 8)}11`;
+  const p = `/timelapse/whole/${start}-0123456789ab.mp4`;
+  const body = mp4(8000);
+  assert.strictEqual((await call(e, 'PUT', p, { headers: pi({ 'Content-Type': 'video/mp4' }), body })).status, 401);
+  assert.strictEqual((await call(e, 'PUT', p, { headers: builder({ 'Content-Type': 'video/mp4' }), body })).status, 200);
+  let r = await call(e, 'GET', p, { headers: { Range: 'bytes=0-99' } });
+  assert.strictEqual(r.status, 206);
+  assert.strictEqual(r.headers.get('content-range'), 'bytes 0-99/8000');
+  assert.strictEqual(r.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+  for (const bad of [`/timelapse/whole/${start.slice(0, 8)}05-0123456789ab.mp4`, `/timelapse/whole/${start}-XYZ.mp4`, `/timelapse/whole/${start}.mp4`]) {
+    r = await call(e, 'PUT', bad, { headers: builder({ 'Content-Type': 'video/mp4' }), body });
+    assert.strictEqual(r.status, 404, bad);
+  }
+  assert.strictEqual((await call(e, 'DELETE', p, { headers: pi() })).status, 401);
+  assert.strictEqual((await call(e, 'DELETE', p, { headers: builder() })).status, 200);
+  assert.strictEqual((await call(e, 'GET', p)).status, 404);
+});
+
+test('the index\'s continuous timelapse: kept only when every part fits - its days in their chunk, its frames counted right', async () => {
+  const e = env();
+  const d = etDay(-1);
+  const start = `${d.slice(0, 8)}${Number(d.slice(8)) <= 10 ? '01' : Number(d.slice(8)) <= 20 ? '11' : '21'}`;
+  const chunk = (extra = {}) => Object.assign({ start, video: `whole/${start}-0123456789ab.mp4`, frames: 3, seconds: 0.3, bytes: 9000,
+    days: [{ date: d, set: 'abcdef012345', times: '0700,0715,1200' }] }, extra);
+  const tl = (extra = {}, c = [chunk()]) => Object.assign({ fps: 10, slotMinutes: 15, chunks: c }, extra);
+  const put = (obj) => call(e, 'PUT', '/timelapse/index.json', { headers: builder(), body: JSON.stringify(obj) });
+  const day = indexDay(d, { timeline: '0700,0715,1200' });
+  let r = await put({ days: [day], timeline: tl() });
+  assert.strictEqual(r.status, 200, await r.text());
+  const stored = JSON.parse(e.BUCKET.bytes('timelapse/index.json').toString());
+  assert.deepStrictEqual(stored.timeline, tl());
+  assert.strictEqual(stored.days[0].timeline, '0700,0715,1200');
+  const other = `${start.slice(0, 8)}${start.endsWith('01') ? '11' : '01'}`;
+  for (const [why, obj] of [
+    ['a day\'s times out of order', { days: [indexDay(d, { timeline: '0715,0700' })] }],
+    ['a day\'s time not a time', { days: [indexDay(d, { timeline: '0760' })] }],
+    ['a day\'s times not a list', { days: [indexDay(d, { timeline: ['0700'] })] }],
+    ['fps', { days: [day], timeline: tl({ fps: 0 }) }],
+    ['a chunk not from the 1st, 11th or 21st', { days: [day], timeline: tl({}, [chunk({ start: `${start.slice(0, 8)}05`, video: `whole/${start.slice(0, 8)}05-0123456789ab.mp4` })]) }],
+    ['another chunk\'s video', { days: [day], timeline: tl({}, [chunk({ video: `whole/${other}-0123456789ab.mp4` })]) }],
+    ['a video elsewhere', { days: [day], timeline: tl({}, [chunk({ video: 'videos/../latest.jpg' })]) }],
+    ['a day outside its chunk', { days: [day], timeline: tl({}, [chunk({ days: [{ date: dayOutside(start), set: 'abcdef012345', times: '0700,0715,1200' }] })]) }],
+    ['frames miscounted', { days: [day], timeline: tl({}, [chunk({ frames: 4 })]) }],
+    ['no days', { days: [day], timeline: tl({}, [chunk({ days: [] })]) }],
+    ['a day twice', { days: [day], timeline: tl({}, [chunk({ frames: 6, days: [{ date: d, set: 'abcdef012345', times: '0700,0715,1200' }, { date: d, set: 'abcdef012345', times: '0700,0715,1200' }] })]) }],
+    ['chunks out of order', { days: [day], timeline: tl({}, [chunk(), chunk()]) }],
+    ['not an object', { days: [day], timeline: 'x' }],
+  ]) {
+    assert.strictEqual((await put(obj)).status, 400, why);
+  }
+  assert.deepStrictEqual(JSON.parse(e.BUCKET.bytes('timelapse/index.json').toString()).timeline, tl(), 'the good one stays');
+});
+/** A day in another chunk than the one starting at `start`. */
+const dayOutside = (start) => S.dayBefore(start, 1);
 
 // ═══════════════════════════════════════════════════════════════════════════
 section('3. The Worker: what everyone may read');

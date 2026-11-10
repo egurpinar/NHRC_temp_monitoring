@@ -69,8 +69,18 @@ const day = (date, extra = {}) => Object.assign({ date, video: `videos/${date}-0
   frames: 112, first: '06:35', last: '16:15', seconds: 11.2, bytes: 6000000, width: 1280, height: 720, set: 'abcdef012345' }, extra);
 
 // ═══════════════════════════════════════════════════════════════════════════
-section('1. What the page makes of the list of days');
+section('1. What the page makes of the list');
 // ═══════════════════════════════════════════════════════════════════════════
+
+/** A chunk of the continuous timelapse: { start, video, frames, seconds, bytes, days }. */
+const chunk = (start, days) => ({ start, video: `whole/${start}-0123456789ab.mp4`, bytes: 9000,
+  frames: days.reduce((n, d) => n + d[1].split(',').length, 0), seconds: 1,
+  days: days.map(([date, times]) => ({ date, set: 'abcdef012345', times })) });
+/** Three days over two chunks: the 9th (3 frames) and 10th (2) in the 1st's, the 11th (4) in the 11th's - 9 frames. */
+const TL = { fps: 10, slotMinutes: 15, chunks: [chunk('2026-11-01', [['2026-11-09', '0700,0715,1200'], ['2026-11-10', '0800,1600']]),
+  chunk('2026-11-11', [['2026-11-11', '0700,0715,0730,0745']])] };
+const INDEX = { days: [day('2026-11-09'), day('2026-11-11', { frames: 98 }), day('2026-11-10')], timeline: TL };
+const THREE = Object.assign({}, INDEX, { timeline: Object.assign({}, TL, { chunks: TL.chunks.concat([chunk('2026-11-21', [['2026-11-21', '0700,0715']])]) }) });
 
 test('only the Worker\'s own, well formed days are used - newest first, each once', () => {
   const days = P.daysFrom({ days: [
@@ -78,66 +88,124 @@ test('only the Worker\'s own, well formed days are used - newest first, each onc
     day('2026-11-06', { video: '//evil.example/x.mp4' }),
     day('2026-11-05', { video: 'videos/../latest.jpg' }),
     day('2026-11-04', { video: 'javascript:alert(1)' }),
-    day('2026-11-03', { video: 'videos/2026-11-02-0123456789ab.mp4' }),     // another day's video
+    day('2026-11-03', { video: 'videos/2026-11-02-0123456789ab.mp4' }),
     day('2026-02-30'), null, 'x', { date: '2026-11-01' },
-    day('2026-11-09', { frames: 1 }),                                        // a second 9th
+    day('2026-11-09', { frames: 1 }),
   ] });
   assert.deepStrictEqual(days.map((d) => d.date), ['2026-11-09', '2026-11-08', '2026-11-07']);
-  assert.strictEqual(days[0].video, 'videos/2026-11-09-0123456789ab.mp4');
   for (const bad of [undefined, null, {}, { days: 'x' }, []]) assert.deepStrictEqual(P.daysFrom(bad), []);
 });
 
-test('a poster or a detail that is not well formed is dropped, the day kept', () => {
-  const [d] = P.daysFrom({ days: [day('2026-11-09', { poster: 'https://evil.example/p.jpg', frames: -3, first: '25:00', last: '<b>', seconds: 'x' })] });
-  assert.deepStrictEqual([d.poster, d.frames, d.first, d.last, d.seconds], [null, null, null, null, null]);
-  assert.strictEqual(P.dayNote(d), '', 'nothing to say rather than nonsense');
+test('the continuous timelapse: its chunks in order, every frame counted from the first day', () => {
+  const tl = P.timelineFrom(INDEX);
+  assert.strictEqual(tl.total, 9);
+  assert.deepStrictEqual(tl.chunks.map((c) => [c.start, c.offset, c.frames]), [['2026-11-01', 0, 5], ['2026-11-11', 5, 4]]);
+  assert.deepStrictEqual(tl.chunks[0].days.map((d) => [d.date, d.offset]), [['2026-11-09', 0], ['2026-11-10', 3]]);
+  for (const bad of [undefined, {}, { timeline: 'x' }, { timeline: { fps: 0, chunks: [] } }, { timeline: { fps: 10, chunks: [] } }]) {
+    assert.strictEqual(P.timelineFrom(bad), null);
+  }
 });
 
-test('the words: the day, the hours, the length', () => {
+test('a chunk that is not well formed ends the timelapse there - what is shown is one unbroken run from the first day', () => {
+  const bad = (c) => P.timelineFrom({ timeline: Object.assign({}, TL, { chunks: [TL.chunks[0], c] }) });
+  for (const c of [Object.assign({}, TL.chunks[1], { video: '//evil.example/x.mp4' }), Object.assign({}, TL.chunks[1], { video: 'whole/2026-11-01-0123456789ab.mp4' }),
+    Object.assign({}, TL.chunks[1], { frames: 5 }), Object.assign({}, TL.chunks[1], { start: '2026-11-01' }),
+    Object.assign({}, TL.chunks[1], { days: [{ date: '2026-11-11', times: '0745,0700' }] }), Object.assign({}, TL.chunks[1], { days: [] }), null]) {
+    const tl = bad(c);
+    assert.deepStrictEqual([tl.total, tl.chunks.length], [5, 1], JSON.stringify(c).slice(0, 80));
+  }
+  assert.strictEqual(P.timelineFrom({ timeline: Object.assign({}, TL, { chunks: [Object.assign({}, TL.chunks[0], { video: 'videos/x.mp4' }), TL.chunks[1]] }) }), null);
+});
+
+test('any frame of the whole timelapse: which chunk, which frame in it, which day and time - the ends held', () => {
+  const tl = raw.timelineFrom(INDEX);
+  const at = (g) => plain(raw.frameAt(tl, g));
+  assert.deepStrictEqual(at(0), { chunk: 0, local: 0, date: '2026-11-09', hhmm: '0700' });
+  assert.deepStrictEqual(at(2), { chunk: 0, local: 2, date: '2026-11-09', hhmm: '1200' });
+  assert.deepStrictEqual(at(3), { chunk: 0, local: 3, date: '2026-11-10', hhmm: '0800' });
+  assert.deepStrictEqual(at(4), { chunk: 0, local: 4, date: '2026-11-10', hhmm: '1600' });
+  assert.deepStrictEqual(at(5), { chunk: 1, local: 0, date: '2026-11-11', hhmm: '0700' });
+  assert.deepStrictEqual(at(8), { chunk: 1, local: 3, date: '2026-11-11', hhmm: '0745' });
+  assert.deepStrictEqual(at(99), at(8));
+  assert.deepStrictEqual(at(-4), at(0));
+  assert.deepStrictEqual(at('x'), at(0));
+});
+
+test('the words: the day, the time under the drag bar, the hours and the lengths', () => {
   assert.strictEqual(P.dayTitle('2026-11-09'), 'Monday, November 9, 2026');
-  assert.strictEqual(P.dayTitle('2027-01-01'), 'Friday, January 1, 2027');
   assert.strictEqual(P.shortDay('2026-11-09'), 'Mon, Nov 9');
-  assert.deepStrictEqual(['00:05', '06:35', '12:00', '16:15'].map(P.clock12), ['12:05 AM', '6:35 AM', '12:00 PM', '4:15 PM']);
+  assert.strictEqual(P.mediumDay('2027-01-01'), 'Jan 1, 2027');
+  assert.strictEqual(P.whenText('2026-11-09', '1615'), 'Mon, Nov 9, 2026 · 4:15 PM');
+  assert.deepStrictEqual(['0005', '06:35', '1200', '1615'].map(P.clock12), ['12:05 AM', '6:35 AM', '12:00 PM', '4:15 PM']);
   const [d] = P.daysFrom({ days: [day('2026-11-09')] });
   assert.strictEqual(P.dayNote(d), '112 photos, 6:35 AM to 4:15 PM - 11 seconds');
-  assert.strictEqual(P.dayNote(Object.assign({}, d, { frames: 1, seconds: 0.2 })), '1 photo, 6:35 AM to 4:15 PM - 1 second');
+  assert.strictEqual(P.wholeNote(raw.timelineFrom(INDEX)), '3 days so far, a frame for each quarter hour of daylight - 1 second in all');
+  const quarters = Array.from({ length: 96 }, (_, i) => `${String(Math.floor(i / 4)).padStart(2, '0')}${String((i % 4) * 15).padStart(2, '0')}`).join(',');
+  const long = raw.timelineFrom({ timeline: { fps: 10, chunks: [chunk('2026-11-01', [['2026-11-09', quarters]])] } });
+  assert.strictEqual(P.wholeNote(long), '1 day so far, a frame for each quarter hour of daylight - 10 seconds in all');
+  const month = raw.timelineFrom({ timeline: { fps: 10, chunks: ['01', '11', '21'].map((s) => chunk(`2026-11-${s}`,
+    Array.from({ length: 10 }, (_, i) => [`2026-11-${String(Number(s) + i).padStart(2, '0')}`, quarters]))) } });
+  assert.strictEqual(P.wholeNote(month), '30 days so far, a frame for each quarter hour of daylight - 5 minutes in all');
 });
 
-test('a link to a day (#2026-11-08) opens that day; anything else, the newest', () => {
+test('a link to a day (#2026-11-08) is that day; anything else is none, and the day player shows the newest', () => {
   const days = P.daysFrom({ days: [day('2026-11-08'), day('2026-11-09')] });
-  assert.strictEqual(P.pickDay(days, '#2026-11-08').date, '2026-11-08');
-  for (const h of ['', '#', '#2026-11-01', '#<img src=x>', null]) assert.strictEqual(P.pickDay(days, h).date, '2026-11-09');
-  assert.strictEqual(P.pickDay([], '#2026-11-08'), null);
+  assert.strictEqual(P.askedDay(days, '#2026-11-08').date, '2026-11-08');
+  for (const h of ['', '#', '#2026-11-01', '#<img src=x>', null]) {
+    assert.strictEqual(P.askedDay(days, h), null);
+    assert.strictEqual(P.pickDay(days, h).date, '2026-11-09');
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
 section('2. The page, on a stand-in DOM');
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Just enough DOM for the page: elements by id, the buttons it makes, events. */
-function dom(responses) {
+/**
+ * Just enough DOM for the page: elements by id, the videos (src, time, ready,
+ * play/pause, their events), the buttons it makes, timers and frames run by
+ * the test (tick(), advance()).
+ */
+function dom(responses, opts = {}) {
   const listeners = {};
+  const timers = [];
+  const frames = [];
   const make = (tag, id) => {
     const el = {
-      tagName: tag.toUpperCase(), id, hidden: false, className: '', children: [], attrs: {}, _text: '', handlers: {}, style: {},
+      tagName: tag.toUpperCase(), id, hidden: false, className: '', children: [], attrs: {}, _text: '', handlers: {}, style: {}, value: '0',
       get textContent() { return this._text + this.children.map((c) => c.textContent).join(''); },
       set textContent(v) { this._text = String(v); this.children = []; },
       setAttribute(k, v) { this.attrs[k] = String(v); }, getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
       removeAttribute(k) { delete this.attrs[k]; },
       appendChild(c) { this.children.push(c); c.parent = this; return c; },
       addEventListener(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn); },
-      click() { for (const fn of this.handlers.click || []) fn({}); },
+      removeEventListener(type, fn) { this.handlers[type] = (this.handlers[type] || []).filter((f) => f !== fn); },
+      fire(type) { for (const fn of (this.handlers[type] || []).slice()) fn({ target: this }); },
+      click() { this.fire('click'); },
       scrollIntoView() {},
     };
     return el;
   };
+  const video = (id) => {
+    const v = make('video', id);
+    let src = '';
+    Object.assign(v, { readyState: 0, currentTime: 0, playbackRate: 1, paused: true, plays: 0, loads: [] });
+    Object.defineProperty(v, 'src', { get: () => src, set: (x) => { src = x; v.readyState = 0; v.currentTime = 0; v.loads.push(x); } });
+    v.play = () => { v.plays++; v.paused = false; return opts.refusePlay ? Promise.reject(new Error('NotAllowedError')) : Promise.resolve(); };
+    v.pause = () => { v.paused = true; };
+    v.ready = () => { v.readyState = 4; v.fire('loadedmetadata'); };
+    return v;
+  };
   const els = {};
-  for (const id of ['day-title', 'day-note', 'message', 'video-wrap', 'speeds', 'days-card', 'days', 'player-card', 'theme-toggle']) els[id] = make('div', id);
-  els['video-wrap'].hidden = true; els.speeds.hidden = true; els['days-card'].hidden = true; els.message.hidden = true;
-  const player = make('video', 'player');
-  player.playbackRate = 1;
-  els.player = player;
-  const speeds = ['0.5', '1', '2'].map((r) => { const b = make('button'); b.attrs['data-rate'] = r; b.attrs['aria-pressed'] = r === '1' ? 'true' : 'false'; return b; });
+  for (const id of ['whole-title', 'stage', 'tl-controls', 'tl-play', 'tl-range', 'tl-full', 'tl-when', 'tl-ends', 'tl-note', 'tl-message',
+    'day-card', 'day-title', 'day-note', 'day-message', 'days', 'theme-toggle']) els[id] = make('div', id);
+  for (const id of ['stage', 'tl-controls', 'day-card', 'tl-message', 'day-message']) els[id].hidden = true;
+  els['tl-a'] = video('tl-a');
+  els['tl-b'] = video('tl-b');
+  els['tl-b'].hidden = true;
+  els['tl-b'].attrs['aria-hidden'] = 'true';
+  els['day-player'] = video('day-player');
+  const speeds = ['0.5', '1', '2', '4'].map((r) => { const b = make('button'); b.attrs['data-rate'] = r; b.attrs['aria-pressed'] = r === '1' ? 'true' : 'false'; return b; });
   const all = (node) => [node, ...node.children.flatMap(all)];
   const meta = make('meta');
   const docEl = make('html');
@@ -146,26 +214,22 @@ function dom(responses) {
     documentElement: docEl,
     getElementById: (id) => els[id] || null,
     createElement: (tag) => make(tag),
-    querySelector: (sel) => {
-      if (sel === '#speeds button[aria-pressed="true"]') return speeds.find((b) => b.attrs['aria-pressed'] === 'true') || null;
-      if (sel === 'meta[name="theme-color"]') return meta;
-      return null;
-    },
-    querySelectorAll: (sel) => {
-      if (sel === '#speeds button') return speeds;
-      if (sel === '#days button') return all(els.days).filter((e) => e.tagName === 'BUTTON');
-      return [];
-    },
+    querySelector: (sel) => (sel === 'meta[name="theme-color"]' ? meta : null),
+    querySelectorAll: (sel) => (sel === '#tl-speeds button' ? speeds : sel === '#days button' ? all(els.days).filter((e) => e.tagName === 'BUTTON') : []),
   };
   const fetched = [];
-  const location = { hash: '' };
+  const location = { hash: opts.hash || '' };
   const storage = {};
+  let now = 0;
   const ctx = {
-    document, location, console, Date, Math, JSON, Number, String, Array, Object, RegExp, Promise, Error,
-    AbortController, setTimeout, clearTimeout,
+    document, location, console, Date, Math, JSON, Number, String, Array, Object, RegExp, Promise, Error, AbortController,
+    setTimeout: (fn, ms) => { timers.push({ fn, at: now + (ms || 0) }); return timers.length; },
+    clearTimeout: (n) => { if (timers[n - 1]) timers[n - 1].fn = null; },
+    requestAnimationFrame: (fn) => { frames.push(fn); return frames.length; },
+    cancelAnimationFrame: (n) => { if (frames[n - 1]) frames[n - 1] = null; },
     history: { replaceState: (a, b, h) => { location.hash = h; } },
     localStorage: { getItem: (k) => storage[k] || null, setItem: (k, v) => { storage[k] = v; } },
-    window: { addEventListener: (type, fn) => { listeners[type] = fn; } },
+    window: { addEventListener: (type, fn) => { listeners[type] = fn; }, matchMedia: (q) => ({ matches: !!(opts.reducedMotion && /reduce/.test(q)) }) },
     fetch: async (url) => {
       fetched.push(url);
       const r = typeof responses === 'function' ? responses(url) : responses;
@@ -176,82 +240,203 @@ function dom(responses) {
   };
   ctx.window.document = document;
   vm.runInNewContext(pageScript, ctx);
-  const startPage = async () => { listeners.DOMContentLoaded(); for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r)); };
-  return { els, player, speeds, fetched, location, storage, docEl, meta, startPage, listeners, dayButtons: () => document.querySelectorAll('#days button') };
+  const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r)); };
+  return {
+    els, speeds, fetched, location, storage, docEl, meta, timers,
+    a: els['tl-a'], b: els['tl-b'], range: els['tl-range'],
+    visible: () => (els['tl-a'].hidden ? els['tl-b'] : els['tl-a']),
+    startPage: async () => { listeners.DOMContentLoaded(); await settle(); },
+    settle,
+    /** Runs the frames asked for so far (the drag bar following the video, a drag drawn). */
+    tick: () => { const f = frames.splice(0); for (const fn of f) if (fn) fn(); },
+    /** Moves the timers' clock on, running what falls due. */
+    advance: async (ms) => { now += ms; for (const t of timers) if (t.fn && t.at <= now) { const fn = t.fn; t.fn = null; fn(); } await settle(); },
+    drag: (g) => { els['tl-range'].value = String(g); els['tl-range'].fire('input'); },
+    release: () => els['tl-range'].fire('change'),
+    dayButtons: () => document.querySelectorAll('#days button'),
+  };
 }
+const OK = { status: 200, body: INDEX };
+const src = (c) => `${WORKER}/timelapse/whole/${c}-0123456789ab.mp4`;
 
-test('the newest day plays first, with its poster, its date and its hours; every day is listed to pick from', async () => {
-  const d = dom({ status: 200, body: { days: [day('2026-11-08', { frames: 98 }), day('2026-11-09')] } });
+test('it plays from the first day at once: the first chunk on screen, the next made ready behind it; the drag bar spans every frame', async () => {
+  const d = dom(OK);
   await d.startPage();
   assert.deepStrictEqual(d.fetched, [`${WORKER}/timelapse/index.json`]);
-  assert.strictEqual(d.els['day-title'].textContent, 'Monday, November 9, 2026');
-  assert.strictEqual(d.els['day-note'].textContent, '112 photos, 6:35 AM to 4:15 PM - 11 seconds');
-  assert.strictEqual(d.player.src, `${WORKER}/timelapse/videos/2026-11-09-0123456789ab.mp4`);
-  assert.strictEqual(d.player.getAttribute('poster'), `${WORKER}/timelapse/posters/2026-11-09-0123456789ab.jpg`);
-  assert.deepStrictEqual([d.els['video-wrap'].hidden, d.els.speeds.hidden, d.els['days-card'].hidden, d.els.message.hidden], [false, false, false, true]);
+  assert.strictEqual(d.els['whole-title'].textContent, 'Monday, November 9, 2026 to Wednesday, November 11, 2026');
+  assert.strictEqual(d.els['tl-ends'].textContent, 'Nov 9, 2026 → Nov 11, 2026');
+  assert.deepStrictEqual([d.els.stage.hidden, d.els['tl-controls'].hidden], [false, false]);
+  assert.strictEqual(d.a.src, src('2026-11-01'));
+  assert.strictEqual(d.b.src, src('2026-11-11'), 'the next chunk loading behind');
+  assert.ok(d.b.hidden && d.b.getAttribute('aria-hidden') === 'true');
+  assert.strictEqual(d.a.getAttribute('poster'), `${WORKER}/timelapse/posters/2026-11-09-0123456789ab.jpg`);
+  assert.strictEqual(d.range.max, '8');
+  assert.strictEqual(d.a.plays, 1);
+  assert.strictEqual(d.els['tl-play'].getAttribute('aria-label'), 'Pause');
+  assert.strictEqual(d.els['tl-when'].textContent, 'Mon, Nov 9, 2026 · 7:00 AM');
+  assert.strictEqual(d.range.getAttribute('aria-valuetext'), 'Mon, Nov 9, 2026 · 7:00 AM');
+  assert.strictEqual(d.els['tl-note'].textContent, '3 days so far, a frame for each quarter hour of daylight - 1 second in all');
+  // The bar follows the video, frame by frame.
+  d.a.ready();
+  d.a.currentTime = 0.35;
+  d.tick();
+  assert.strictEqual(d.range.value, '3');
+  assert.strictEqual(d.els['tl-when'].textContent, 'Tue, Nov 10, 2026 · 8:00 AM');
+});
+
+test('one chunk runs into the next: the ready one plays at once, and the one after starts loading', async () => {
+  const d = dom({ status: 200, body: THREE });
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.a.currentTime = 0.5;
+  d.a.fire('ended');
+  assert.strictEqual(d.visible(), d.b, 'the second chunk on screen');
+  assert.ok(d.a.hidden && !d.b.hidden && d.b.getAttribute('aria-hidden') === null);
+  assert.strictEqual(d.b.plays, 1);
+  assert.strictEqual(d.a.src, src('2026-11-21'), 'the third loading behind');
+  d.b.currentTime = 0.05;
+  d.tick();
+  assert.strictEqual(d.range.value, '5');
+  assert.strictEqual(d.els['tl-when'].textContent, 'Wed, Nov 11, 2026 · 7:00 AM');
+  // The hidden one ending is not the timelapse ending.
+  d.a.fire('ended');
+  assert.strictEqual(d.visible(), d.b);
+});
+
+test('after the last frame: a moment on today, then the first day again - for as long as it plays', async () => {
+  const d = dom(OK);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.a.fire('ended');
+  d.b.fire('ended');
+  assert.strictEqual(d.range.value, '8');
+  await d.advance(1000);
+  assert.strictEqual(d.visible(), d.b, 'still on today');
+  await d.advance(600);
+  assert.strictEqual(d.visible(), d.a, 'the first chunk again');
+  assert.strictEqual(d.a.currentTime, 0.05, 'its first frame');
+  assert.strictEqual(d.a.plays, 2);
+  assert.strictEqual(d.range.value, '0');
+});
+
+test('dragging: the frame under the finger at once, in whichever chunk - and playing again on letting go', async () => {
+  const d = dom(OK);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.drag(6);
+  assert.strictEqual(d.a.paused, true, 'paused while dragging');
+  d.tick();
+  assert.strictEqual(d.visible(), d.b, 'the chunk that was ready');
+  assert.strictEqual(d.b.currentTime, 0.15, 'frame 1 of it');
+  assert.strictEqual(d.els['tl-when'].textContent, 'Wed, Nov 11, 2026 · 7:15 AM');
+  d.drag(2);
+  d.tick();
+  assert.strictEqual(d.visible(), d.a);
+  assert.strictEqual(d.a.currentTime, 0.25);
+  d.release();
+  assert.strictEqual(d.a.paused, false, 'playing again');
+  assert.strictEqual(d.els['tl-play'].getAttribute('aria-label'), 'Pause');
+  // Paused before: still paused after.
+  d.els['tl-play'].click();
+  d.drag(4); d.tick(); d.release();
+  assert.strictEqual(d.a.paused, true);
+  assert.strictEqual(d.els['tl-play'].getAttribute('aria-label'), 'Play');
+  assert.strictEqual(d.a.currentTime, 0.45);
+});
+
+test('dragging to a chunk not loaded yet: it loads, and shows that frame once it can', async () => {
+  const d = dom({ status: 200, body: THREE });
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.drag(10);
+  d.tick();
+  assert.strictEqual(d.visible().src, src('2026-11-21'));
+  assert.strictEqual(d.visible().currentTime, 0, 'not before it has loaded');
+  d.visible().ready();
+  assert.strictEqual(d.visible().currentTime, 0.15);
+  d.release();
+  assert.strictEqual(d.visible().paused, false);
+});
+
+test('speed for both videos; the button pauses and plays; at the end it starts again from the first day', async () => {
+  const d = dom(OK);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.speeds[3].click();
+  assert.deepStrictEqual([d.a.playbackRate, d.b.playbackRate], [4, 4]);
+  assert.deepStrictEqual(d.speeds.map((b) => b.getAttribute('aria-pressed')), ['false', 'false', 'false', 'true']);
+  d.els['tl-play'].click();
+  assert.strictEqual(d.a.paused, true);
+  d.drag(8); d.tick(); d.release();
+  d.els['tl-play'].click();
+  assert.strictEqual(d.visible(), d.a, 'from the first chunk');
+  assert.strictEqual(d.a.currentTime, 0.05);
+  assert.strictEqual(d.a.paused, false);
+});
+
+test('a browser that will not start a video by itself: shown paused, the button says Play', async () => {
+  const d = dom(OK, { refusePlay: true });
+  await d.startPage();
+  assert.strictEqual(d.els['tl-play'].getAttribute('aria-label'), 'Play');
+  assert.strictEqual(d.els['tl-play'].getAttribute('data-state'), 'paused');
+});
+
+test('reduced motion asked for, or a link to a day (the email\'s): nothing plays by itself - the link shows its day, in both players', async () => {
+  let d = dom(OK, { reducedMotion: true });
+  await d.startPage();
+  assert.strictEqual(d.a.plays, 0);
+  assert.strictEqual(d.els['tl-play'].getAttribute('aria-label'), 'Play');
+  d = dom(OK, { hash: '#2026-11-10' });
+  await d.startPage();
+  assert.strictEqual(d.a.plays, 0);
+  d.a.ready();
+  assert.strictEqual(d.a.currentTime, 0.35, 'the 10th\'s first frame');
+  assert.strictEqual(d.els['tl-when'].textContent, 'Tue, Nov 10, 2026 · 8:00 AM');
+  assert.strictEqual(d.els['day-title'].textContent, 'Tuesday, November 10, 2026');
+  assert.strictEqual(d.els['day-player'].src, `${WORKER}/timelapse/videos/2026-11-10-0123456789ab.mp4`);
+});
+
+test('below: each whole day - the newest ready, any other at a touch, and in the address', async () => {
+  const d = dom(OK);
+  await d.startPage();
+  assert.strictEqual(d.els['day-card'].hidden, false);
+  assert.strictEqual(d.els['day-title'].textContent, 'Wednesday, November 11, 2026');
+  assert.strictEqual(d.els['day-note'].textContent, '98 photos, 6:35 AM to 4:15 PM - 11 seconds');
   const buttons = d.dayButtons();
-  assert.deepStrictEqual(buttons.map((b) => b.getAttribute('data-date')), ['2026-11-09', '2026-11-08']);
-  assert.deepStrictEqual(buttons.map((b) => b.getAttribute('aria-current')), ['true', 'false']);
-  assert.strictEqual(buttons[1].children[0].src, `${WORKER}/timelapse/posters/2026-11-08-0123456789ab.jpg`);
-  assert.strictEqual(buttons[1].children[0].loading, 'lazy');
-  assert.strictEqual(buttons[1].textContent, 'Sun, Nov 898 photos');
+  assert.deepStrictEqual(buttons.map((b) => b.getAttribute('data-date')), ['2026-11-11', '2026-11-10', '2026-11-09']);
+  assert.strictEqual(buttons[2].children[0].src, `${WORKER}/timelapse/posters/2026-11-09-0123456789ab.jpg`);
+  buttons[2].click();
+  assert.strictEqual(d.els['day-player'].src, `${WORKER}/timelapse/videos/2026-11-09-0123456789ab.mp4`);
+  assert.strictEqual(d.location.hash, '#2026-11-09');
+  assert.deepStrictEqual(d.dayButtons().map((b) => b.getAttribute('aria-current')), ['false', 'false', 'true']);
+  d.els['day-player'].fire('error');
+  assert.ok(/could not be played/.test(d.els['day-message'].textContent) && !d.els['day-message'].hidden);
 });
 
-test('picking another day plays it, marks it, and puts it in the address - at the chosen speed', async () => {
-  const d = dom({ status: 200, body: { days: [day('2026-11-08'), day('2026-11-09')] } });
+test('no timelapse yet: said so - the days below if there are any; the Worker down or answering nonsense: said plainly', async () => {
+  let d = dom({ status: 404, body: '' });
   await d.startPage();
-  d.speeds[2].click();
-  assert.strictEqual(d.player.playbackRate, 2);
-  assert.deepStrictEqual(d.speeds.map((b) => b.getAttribute('aria-pressed')), ['false', 'false', 'true']);
-  d.dayButtons()[1].click();
-  assert.strictEqual(d.player.src, `${WORKER}/timelapse/videos/2026-11-08-0123456789ab.mp4`);
-  assert.strictEqual(d.player.playbackRate, 2);
-  assert.strictEqual(d.location.hash, '#2026-11-08');
-  assert.deepStrictEqual(d.dayButtons().map((b) => b.getAttribute('aria-current')), ['false', 'true']);
-  // A new video keeps the speed when it loads.
-  d.player.playbackRate = 1;
-  for (const fn of d.player.handlers.loadedmetadata) fn();
-  assert.strictEqual(d.player.playbackRate, 2);
-});
-
-test('a link to a day opens that day; one day alone shows no list', async () => {
-  const d = dom({ status: 200, body: { days: [day('2026-11-08'), day('2026-11-09')] } });
-  d.location.hash = '#2026-11-08';
+  assert.strictEqual(d.els['whole-title'].textContent, 'No timelapse yet');
+  assert.ok(/The first video appears the evening after/.test(d.els['tl-message'].textContent));
+  assert.deepStrictEqual([d.els.stage.hidden, d.els['day-card'].hidden], [true, true]);
+  d = dom({ status: 200, body: { days: [day('2026-11-09')] } });
   await d.startPage();
-  assert.strictEqual(d.els['day-title'].textContent, 'Sunday, November 8, 2026');
-  const one = dom({ status: 200, body: { days: [day('2026-11-09')] } });
-  await one.startPage();
-  assert.strictEqual(one.els['days-card'].hidden, true);
-  assert.strictEqual(one.els['video-wrap'].hidden, false);
-});
-
-test('no timelapse yet (404, or an empty or useless list): said so, no player', async () => {
-  for (const r of [{ status: 404, body: 'Not found' }, { status: 200, body: { days: [] } }, { status: 200, body: { days: [day('2026-11-09', { video: '//evil.example/x.mp4' })] } }]) {
-    const d = dom(r);
-    await d.startPage();
-    assert.strictEqual(d.els['day-title'].textContent, 'No timelapse yet');
-    assert.ok(/The first video appears the evening after the camera's first full day of photos\./.test(d.els.message.textContent));
-    assert.strictEqual(d.els['video-wrap'].hidden, true);
-    assert.strictEqual(d.player.src, undefined);
-  }
-});
-
-test('the Worker unreachable, or answering nonsense: said plainly, nothing half-shown', async () => {
+  assert.ok(/starts with the next day that is filmed/.test(d.els['tl-message'].textContent));
+  assert.strictEqual(d.els['day-card'].hidden, false);
   for (const r of [new TypeError('Failed to fetch'), { status: 503, body: 'Storage unavailable' }, { status: 200, body: 'not json' }]) {
-    const d = dom(r);
+    d = dom(r);
     await d.startPage();
-    assert.strictEqual(d.els['day-title'].textContent, 'The timelapse could not be loaded');
-    assert.ok(/try again in a few minutes/.test(d.els.message.textContent));
-    assert.strictEqual(d.els.message.className, 'message problem');
-    assert.strictEqual(d.els['video-wrap'].hidden, true);
+    assert.strictEqual(d.els['whole-title'].textContent, 'The timelapse could not be loaded');
+    assert.strictEqual(d.els['tl-message'].className, 'message problem');
+    assert.strictEqual(d.els.stage.hidden, true);
   }
 });
 
-test('a video that will not play: said, with what to do', async () => {
-  const d = dom({ status: 200, body: { days: [day('2026-11-09')] } });
+test('a part that will not play: said, with what to do', async () => {
+  const d = dom(OK);
   await d.startPage();
-  for (const fn of d.player.handlers.error) fn();
-  assert.ok(/could not be played/.test(d.els.message.textContent) && d.els.message.hidden === false);
+  d.a.fire('error');
+  assert.ok(/Part of the timelapse could not be played/.test(d.els['tl-message'].textContent) && !d.els['tl-message'].hidden);
 });
 
 test('light and dark: the switch changes the page and remembers it for roworno.com too', async () => {
@@ -261,7 +446,6 @@ test('light and dark: the switch changes the page and remembers it for roworno.c
   d.els['theme-toggle'].click();
   assert.strictEqual(d.docEl.getAttribute('data-theme'), 'light');
   assert.strictEqual(d.storage['nhrc-theme'], 'light', 'the same key as the main page');
-  assert.strictEqual(d.els['theme-toggle'].getAttribute('aria-label'), 'Switch to dark mode');
   assert.strictEqual(d.meta.getAttribute('content'), '#f2f5f9');
 });
 

@@ -1079,10 +1079,28 @@ sudo systemctl restart nhrc-camera
 
 ## The timelapse on the website
 
-**roworno.com/newboathouse**: each day at the new boathouse as a short video,
-the date and time in the corner of every frame, newest day first, every day
-so far to pick from. The morning email says when yesterday's is ready, with a
-link; the main page links to it under the camera's photo.
+**roworno.com/newboathouse**: the new boathouse going up, with the date and
+time in the corner of every frame.
+
+- **One timelapse of every day so far**, growing by a day each evening. It
+  plays from the first day, runs from one day into the next, and starts again
+  after today; a drag bar under it goes to any day and time (the date and time
+  shown under it as it moves), with play/pause, speed and full screen. Each
+  quarter hour of daylight gives it one frame - the sharpest one filmed in that
+  quarter hour - so a day lasts about 4 seconds: a month about 2 minutes, a
+  year about 25.
+- **Each whole day** below it: every frame of the day (every 5 minutes), any
+  day to pick. The morning email's line links here, to yesterday.
+
+The main page links to it under the camera's photo.
+
+**Sharp frames only, where there are any.** Ring's live view arrives at
+1920x1080 or 1280x720, and now and then at 848x480 when it had not stepped up
+in time. Everything is shown at 1280x720, so a 480-line frame is a blur among
+the others: a day's video leaves its sub-720 frames out (unless it has fewer
+than two sharper ones), and the continuous timelapse takes, in each quarter
+hour, the frame with the most pixels - a soft one only where its quarter hour
+has nothing better.
 
 How it is made, without adding work to the Pis:
 
@@ -1097,22 +1115,32 @@ How it is made, without adding work to the Pis:
    are caught up for up to 3 days. The standby sends what it filmed, as
    itself; neither Pi's frames replace the other's. The frames stay on the Pis
    for the Mac's evening copy, as before.
-2. **GitHub makes the video** (`.github/workflows/timelapse.yml`, a few times
+2. **GitHub makes the videos** (`.github/workflows/timelapse.yml`, a few times
    each evening and once the next morning): each day a Pi has called complete
    - or any day once it is 6 AM the day after - with no video yet, or whose
    frames have changed since (a late frame). It runs its tests first, then
-   `scripts/build_timelapse.js`: 1280x720, a tenth of a second per frame (a
-   December day in about 11 seconds, a June day in 18), checked before it is
-   sent, listed in `/timelapse/index.json`. The frames are deleted from the
-   Worker 3 days after their video is made; the videos are kept.
+   `scripts/build_timelapse.js`, which makes two videos of the day at
+   1280x720, a tenth of a second per frame, both checked before they are sent:
+   the day's own (a December day in about 11 seconds, a June day in 18), and
+   its piece ("segment") of the continuous timelapse. The continuous timelapse
+   is kept in chunks of up to 11 days - from the 1st, the 11th and the 21st of
+   each month - each the days' pieces joined without re-encoding (all are
+   encoded alike, with no B-frames; if ffmpeg on GitHub's runner ever encodes
+   differently, that chunk is re-encoded instead, so a join can never break
+   the video). A chunk is made again whenever one of its days is, and the
+   page plays the chunks one after another as one. Everything is listed in
+   `/timelapse/index.json`. The frames are deleted from the Worker 3 days after
+   their video is made; the videos, chunks and segments are kept.
 3. **The page and the email read the list** from the Worker.
 
 What it costs:
 
 - **The house's upload**: the frames once, after sunset - 15-75 MB a day, as
   they are on the card.
-- **Cloudflare R2**: the videos, roughly 5-15 MB a day - 2-5 GB a year, inside
-  R2's free 10 GB for the first couple of years - and at most 4 days of frames.
+- **Cloudflare R2**: the day videos, roughly 5-15 MB a day, and the continuous
+  timelapse about as much again (its chunks and their pieces) - about 4-10 GB
+  a year. R2's first 10 GB are free; beyond that Cloudflare charges by the GB
+  stored (see its R2 pricing).
 - **GitHub**: a few minutes of Actions a day, free for this public repository.
 
 ### Setting it up
@@ -1402,8 +1430,11 @@ What it changes, and what it does not (reviewed November 2026):
 - **Ring is not touched.** Sending reads frames already on the card; it makes
   no Ring call, and the Ring token never leaves the Pi.
 - **The frames are never public.** Only the videos made from them are. A
-  frame can be read from the Worker only with the builder's secret, and is
-  deleted 3 days after its video is made.
+  frame - or a day's piece of the continuous timelapse, which its chunks are
+  joined from - can be read from the Worker only with the builder's secret;
+  frames are deleted 3 days after their video is made. The chunks of the
+  continuous timelapse are public like the day videos, checked and served the
+  same way.
 - **Two secrets, each able to do one job.** The Pis' upload secret can send
   frames (and the photo, as before); it cannot make or list videos. The
   builder's `TIMELAPSE_SECRET`, which lives in GitHub, can make videos; it

@@ -46,6 +46,18 @@ const KEEP_FRAMES_DAYS = 3;           // frames stay on the Worker this long aft
 const DROP_FRAMES_DAYS = 30;          // and never longer than this, video or not
 const DOWNLOADS_AT_ONCE = 4;
 const TRIES = 3;
+// Ring's live view comes at 1920x1080, 1280x720 - and now and then at 848x480,
+// when it had not stepped up yet. A frame under SHARP_HEIGHT lines is soft:
+// left out of a day's video when the day has better ones.
+const SHARP_HEIGHT = 720;
+// The continuous timelapse (the whole construction, one drag bar): the
+// sharpest frame of each quarter hour, about 40 a day - 4 seconds a day at
+// 10 frames a second. Kept in pieces ("chunks") of up to 11 days - the 1st to
+// the 10th, the 11th to the 20th, the 21st to the month's end - each a few
+// tens of MB, joined from each day's piece ("segment") without re-encoding.
+const SLOT_MINUTES = 15;
+const CHUNK_MAX_BYTES = 90 * 1024 * 1024;   // the Worker takes 95 MB at most
+const INDEX_WARN_BYTES = 800 * 1024;          // the Worker takes 1 MB of index: about three years of days
 // The font for the date and time: DejaVu Sans Bold on GitHub's runner (apt
 // install fonts-dejavu-core), Arial Bold on a Mac; TIMELAPSE_FONT overrides.
 const FONTS = ['/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
@@ -109,12 +121,68 @@ function frameSet(frames) {
   return crypto.createHash('sha256').update(list).digest('hex').slice(0, 12);
 }
 
-/** The index's days with this day's entry in (replacing any before), newest first. */
+/** The index with this day's entry in (replacing any before), newest first - the rest of it (the timeline) as it was. */
 function mergeIndex(index, entry) {
   const days = (index && Array.isArray(index.days) ? index.days : []).filter((d) => d && d.date !== entry.date);
   days.push(entry);
   days.sort((a, b) => (a.date < b.date ? 1 : -1));
-  return { days };
+  const out = { days };
+  if (index && index.timeline && typeof index.timeline === 'object') out.timeline = index.timeline;
+  return out;
+}
+
+/** A JPEG's size from its header: { width, height }, or null when it cannot be read (as the Pi's jpegSize). */
+function jpegSize(buf) {
+  let i = 2;
+  while (buf && i + 9 < buf.length) {
+    if (buf[i] !== 0xFF) { i++; continue; }
+    const marker = buf[i + 1];
+    if (marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { i += 2; continue; }
+    if ((marker >= 0xC0 && marker <= 0xC3) || (marker >= 0xC5 && marker <= 0xC7) || (marker >= 0xC9 && marker <= 0xCB)
+        || (marker >= 0xCD && marker <= 0xCF)) {
+      return { height: buf.readUInt16BE(i + 5), width: buf.readUInt16BE(i + 7) };
+    }
+    i += 2 + buf.readUInt16BE(i + 2);
+  }
+  return null;
+}
+
+/** Minutes of the day of a frame named HHMM.jpg. */
+const frameMinutes = (name) => Number(name.slice(0, 2)) * 60 + Number(name.slice(2, 4));
+
+/**
+ * A day's video leaves out its soft frames (under SHARP_HEIGHT lines) when it
+ * has at least MIN_FRAMES sharp ones - a 480-line frame upscaled among 720 and
+ * 1080 ones shows as a blur. frames: [{ name, width, height }], in time order.
+ */
+function sharpFrames(frames) {
+  const sharp = frames.filter((f) => f.height >= SHARP_HEIGHT);
+  if (sharp.length < MIN_FRAMES) return { keep: frames.slice(), soft: [] };
+  return { keep: sharp, soft: frames.filter((f) => !(f.height >= SHARP_HEIGHT)) };
+}
+
+/**
+ * The continuous timelapse's frames of a day: in each quarter hour, the
+ * sharpest (most pixels) - of equals, the one nearest the quarter's start, so
+ * the frames stay evenly spaced. A soft frame only where its quarter has
+ * nothing better. In time order.
+ */
+function slotPicks(frames, slotMinutes = SLOT_MINUTES) {
+  const best = new Map();
+  for (const f of frames) {
+    const m = frameMinutes(f.name);
+    const slot = Math.floor(m / slotMinutes);
+    const px = (f.width || 0) * (f.height || 0);
+    const cur = best.get(slot);
+    if (!cur || px > cur.px || (px === cur.px && m - slot * slotMinutes < cur.off)) best.set(slot, { f, px, off: m - slot * slotMinutes });
+  }
+  return [...best.keys()].sort((a, b) => a - b).map((k) => best.get(k).f);
+}
+
+/** The chunk of the continuous timelapse a day belongs to: the day it starts (the 1st, 11th or 21st). */
+function chunkStart(day) {
+  const d = Number(day.slice(8, 10));
+  return `${day.slice(0, 8)}${d <= 10 ? '01' : d <= 20 ? '11' : '21'}`;
 }
 
 /** The frame nearest midday, for the poster (the light is best then). */
@@ -168,13 +236,38 @@ function toolOutput(cmd, args, timeoutMs = 60000) {
 /** A value inside an ffmpeg filter: \ : and ' escaped. */
 const filterValue = (s) => String(s).replace(/[\\:']/g, '\\$&');
 
+/** Frames, linked in order as 00001.jpg, 00002.jpg ... in dir - what ffmpeg's numbered input reads. */
+function sequence(dir, files) {
+  fs.mkdirSync(dir, { recursive: true });
+  files.forEach((file, i) => {
+    const to = path.join(dir, `${String(i + 1).padStart(5, '0')}.jpg`);
+    try { fs.linkSync(file, to); } catch (e) { fs.copyFileSync(file, to); }
+  });
+  return path.join(dir, '%05d.jpg');
+}
+
+/** Encodes numbered stamped frames into an MP4; segments have no B-frames, so they join without re-encoding. */
+async function encode(ffmpeg, input, out, { segment = false } = {}) {
+  const r = await runTool(ffmpeg, ['-v', 'error', '-framerate', String(FPS), '-i', input,
+    '-c:v', 'libx264', '-preset', 'medium', '-crf', String(CRF), '-g', String(GOP), ...(segment ? ['-bf', '0'] : []),
+    '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', '-y', out], 600000);
+  if (r.code !== 0) throw new Error(`ffmpeg could not make the ${segment ? 'timelapse\'s piece' : 'video'}: ${r.stderr.trim().split('\n').slice(-3).join(' / ')}`);
+  return out;
+}
+
 /**
- * Makes the video. frames: [{ name: 'HHMM.jpg', file }], in time order.
- * Each frame is scaled to 1280x720 and stamped on its own (so a damaged one is
- * simply left out), then they are encoded together. Checked before it is
- * returned: H.264, 1280x720, one video frame per photo, ready to play while it
- * loads (the index at the front). Returns { video, poster, frames, first,
- * last, seconds, width, height, bytes, skipped }.
+ * Makes a day's two videos from its frames ([{ name: 'HHMM.jpg', file }], in
+ * time order). Every frame is scaled to 1280x720 and stamped with the date and
+ * time on its own - a damaged one is simply left out. Then:
+ *   - the day's video: every frame, less the soft ones when the day has
+ *     sharper (sharpFrames);
+ *   - the day's segment of the continuous timelapse: the sharpest frame of each
+ *     quarter hour (slotPicks).
+ * Both checked before they are returned: H.264, 1280x720, one video frame per
+ * photo, ready to play while they load. Returns { video, poster, segment,
+ * timeline (the segment's frames, "HHMM"), frames, first, last, seconds,
+ * width, height, bytes, skipped (unreadable), soft (left out of the day's
+ * video) }.
  */
 async function buildVideo({ day, frames, workDir, ffmpeg = process.env.FFMPEG || 'ffmpeg', ffprobe = process.env.FFPROBE || 'ffprobe', font = FONT }) {
   if (!fs.existsSync(font)) throw new Error(`the font ${font} is not there (apt install fonts-dejavu-core, or set TIMELAPSE_FONT)`);
@@ -182,11 +275,13 @@ async function buildVideo({ day, frames, workDir, ffmpeg = process.env.FFMPEG ||
   fs.mkdirSync(stamped, { recursive: true });
   const textFile = path.join(workDir, 'stamp.txt');
   const size = Math.round(HEIGHT * 0.042), border = Math.round(HEIGHT * 0.014), margin = Math.round(HEIGHT * 0.033);
-  const used = [], skipped = [];
+  const readable = [], skipped = [];
   for (const f of frames) {
     const hhmm = f.name.slice(0, 4);
+    let dims = null;
+    try { dims = jpegSize(fs.readFileSync(f.file)); } catch (e) { /* unreadable: ffmpeg says */ }
     fs.writeFileSync(textFile, stampText(day, hhmm));
-    const out = path.join(stamped, `${String(used.length + 1).padStart(5, '0')}.jpg`);
+    const out = path.join(stamped, `${hhmm}.jpg`);
     const vf = `scale=${WIDTH}:${HEIGHT}:flags=lanczos,setsar=1,drawtext=fontfile=${filterValue(font)}:textfile=${filterValue(textFile)}`
       + `:expansion=none:fontsize=${size}:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=${border}:x=w-tw-${margin}:y=h-th-${margin}`;
     const r = await runTool(ffmpeg, ['-v', 'error', '-xerror', '-i', f.file, '-frames:v', '1', '-vf', vf, '-q:v', '2', '-y', out], 60000);
@@ -195,23 +290,62 @@ async function buildVideo({ day, frames, workDir, ffmpeg = process.env.FFMPEG ||
       skipped.push(f.name);
       continue;
     }
-    used.push(hhmm);
+    readable.push({ name: f.name, stamped: out, width: dims ? dims.width : 0, height: dims ? dims.height : 0 });
   }
-  if (used.length < MIN_FRAMES) {
-    throw new Error(`only ${used.length} of the ${frames.length} frames could be read${skipped.length ? ` (${skipped.slice(0, 5).join(', ')} could not)` : ''}`);
+  if (readable.length < MIN_FRAMES) {
+    throw new Error(`only ${readable.length} of the ${frames.length} frames could be read${skipped.length ? ` (${skipped.slice(0, 5).join(', ')} could not)` : ''}`);
   }
-  const video = path.join(workDir, 'timelapse.mp4');
-  const enc = await runTool(ffmpeg, ['-v', 'error', '-framerate', String(FPS), '-i', path.join(stamped, '%05d.jpg'),
-    '-c:v', 'libx264', '-preset', 'medium', '-crf', String(CRF), '-g', String(GOP), '-profile:v', 'high', '-pix_fmt', 'yuv420p',
-    '-movflags', '+faststart', '-an', '-y', video], 600000);
-  if (enc.code !== 0) throw new Error(`ffmpeg could not make the video: ${enc.stderr.trim().split('\n').slice(-3).join(' / ')}`);
+  const { keep, soft } = sharpFrames(readable);
+  const picks = slotPicks(readable);
+  const video = await encode(ffmpeg, sequence(path.join(workDir, 'day'), keep.map((f) => f.stamped)), path.join(workDir, 'timelapse.mp4'));
+  const segment = await encode(ffmpeg, sequence(path.join(workDir, 'quarters'), picks.map((f) => f.stamped)),
+    path.join(workDir, 'segment.mp4'), { segment: true });
+  const used = keep.map((f) => f.name.slice(0, 4));
   const poster = path.join(workDir, 'poster.jpg');
-  const p = await runTool(ffmpeg, ['-v', 'error', '-i', path.join(stamped, `${String(posterIndex(used) + 1).padStart(5, '0')}.jpg`),
-    '-vf', 'scale=640:360', '-q:v', '4', '-y', poster], 60000);
+  const p = await runTool(ffmpeg, ['-v', 'error', '-i', keep[posterIndex(used)].stamped, '-vf', 'scale=640:360', '-q:v', '4', '-y', poster], 60000);
   if (p.code !== 0) throw new Error(`ffmpeg could not make the poster: ${p.stderr.trim().split('\n').slice(-2).join(' / ')}`);
-  const info = await checkVideo(video, used.length, ffprobe);
-  return { video, poster, frames: used.length, first: clock(used[0]), last: clock(used[used.length - 1]),
-    seconds: info.seconds, width: info.width, height: info.height, bytes: fs.statSync(video).size, skipped };
+  const info = await checkVideo(video, keep.length, ffprobe);
+  await checkVideo(segment, picks.length, ffprobe);
+  return { video, poster, segment, timeline: picks.map((f) => f.name.slice(0, 4)), frames: keep.length,
+    first: clock(used[0]), last: clock(used[used.length - 1]), seconds: info.seconds, width: info.width, height: info.height,
+    bytes: fs.statSync(video).size, skipped, soft: soft.map((f) => f.name) };
+}
+
+/**
+ * How a video is encoded, as far as joining goes: codec, profile, level, size,
+ * pixels, B-frames, rate - and its parameter sets' hash, which a different
+ * ffmpeg or x264 on GitHub's runner one day could change.
+ */
+async function encoding(file, ffprobe = process.env.FFPROBE || 'ffprobe') {
+  const r = await toolOutput(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-show_entries',
+    'stream=codec_name,profile,level,width,height,pix_fmt,has_b_frames,r_frame_rate,extradata_hash', '-show_data_hash', 'sha256', '-of', 'json', file]);
+  if (r.code !== 0) throw new Error(`ffprobe could not read a piece of the timelapse: ${r.err.trim().slice(0, 200)}`);
+  const s = (JSON.parse(r.out).streams || [])[0] || {};
+  return JSON.stringify([s.codec_name, s.profile, s.level, s.width, s.height, s.pix_fmt, s.has_b_frames, s.r_frame_rate, s.extradata_hash]);
+}
+
+/**
+ * One chunk of the continuous timelapse: its days' segments joined, in date
+ * order. Without re-encoding when they are all encoded alike, with no
+ * B-frames - always, unless ffmpeg changed between the days; then re-encoded,
+ * every frame kept, rather than joined into a video that breaks where the
+ * encoding changes. Checked like any video. Returns { file, joined: 'copied'
+ * or 're-encoded' }.
+ */
+async function joinSegments({ files, frames, workDir, ffmpeg = process.env.FFMPEG || 'ffmpeg', ffprobe = process.env.FFPROBE || 'ffprobe' }) {
+  const list = path.join(workDir, 'segments.txt');
+  fs.writeFileSync(list, files.map((f) => `file '${f.replace(/'/g, "'\\''")}'\n`).join(''));
+  const out = path.join(workDir, 'chunk.mp4');
+  const kinds = new Set();
+  for (const f of files) kinds.add(await encoding(f, ffprobe));
+  const alike = kinds.size === 1 && JSON.parse([...kinds][0])[6] === 0;
+  const args = alike ? ['-c', 'copy']
+    : ['-vf', `scale=${WIDTH}:${HEIGHT}:flags=lanczos,setsar=1`, '-r', String(FPS), '-c:v', 'libx264', '-preset', 'medium',
+      '-crf', String(CRF), '-g', String(GOP), '-bf', '0', '-profile:v', 'high', '-pix_fmt', 'yuv420p'];
+  const r = await runTool(ffmpeg, ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, ...args, '-an', '-movflags', '+faststart', '-y', out], 600000);
+  if (r.code !== 0) throw new Error(`ffmpeg could not join the timelapse's pieces: ${r.stderr.trim().split('\n').slice(-3).join(' / ')}`);
+  await checkVideo(out, frames, ffprobe);
+  return { file: out, joined: alike ? 'copied' : 're-encoded' };
 }
 
 /** The video as the page needs it - or an error saying how it is not. */
@@ -284,8 +418,16 @@ function workerClient({ base = WORKER, secret, fetchImpl = globalThis.fetch, bac
       const r = await call('GET', `/timelapse/index.json?fresh=${Date.now()}`, { auth: false, okStatuses: [404] });
       return r.status === 404 ? { days: [] } : r.data;
     },
-    putIndex: async (index) => call('PUT', '/timelapse/index.json', { body: JSON.stringify(index), type: 'application/json' }),
+    putIndex: async (index) => {
+      const body = JSON.stringify(index);
+      // Said well before the Worker would refuse it: old days can then be taken off the page.
+      if (body.length > INDEX_WARN_BYTES) indexWarning(body.length);
+      return call('PUT', '/timelapse/index.json', { body, type: 'application/json' });
+    },
     putVideo: async (name, bytes) => call('PUT', `/timelapse/videos/${name}`, { body: bytes, type: 'video/mp4' }),
+    putSegment: async (day, bytes) => call('PUT', `/timelapse/segments/${day}.mp4`, { body: bytes, type: 'video/mp4' }),
+    segment: async (day) => (await call('GET', `/timelapse/segments/${day}.mp4`, { as: 'bytes' })).data,
+    putChunk: async (name, bytes) => call('PUT', `/timelapse/whole/${name}`, { body: bytes, type: 'video/mp4' }),
     putPoster: async (name, bytes) => call('PUT', `/timelapse/posters/${name}`, { body: bytes, type: 'image/jpeg' }),
     remove: async (p) => call('DELETE', `/timelapse/${p}`, { okStatuses: [404] }),
     dropFrames: async (day) => call('DELETE', `/timelapse/frames/${day}/`),
@@ -329,7 +471,7 @@ async function buildFromWorker({ client, now = new Date(), onlyDay = null, say =
       const set = frameSet(frames);
       sets.set(day, set);
       const before = known.get(day);
-      if (before && before.set === set && !onlyDay) continue;            // made from these very frames
+      if (before && before.set === set && before.timeline && !onlyDay) continue;   // made from these very frames
       if (!onlyDay) {
         const ready = dayReady(day, listing.done, now);
         if (!ready.ready) { result.waiting.push(day); say(`${day}: not yet - ${ready.why} (${frames.length} frames so far).`); continue; }
@@ -343,7 +485,10 @@ async function buildFromWorker({ client, now = new Date(), onlyDay = null, say =
         const bytes = fs.readFileSync(v.video);
         const id = crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 12);
         const entry = { date: day, video: `videos/${day}-${id}.mp4`, poster: `posters/${day}-${id}.jpg`, frames: v.frames,
-          first: v.first, last: v.last, seconds: v.seconds, bytes: v.bytes, width: v.width, height: v.height, set };
+          first: v.first, last: v.last, seconds: v.seconds, bytes: v.bytes, width: v.width, height: v.height, set,
+          timeline: v.timeline.join(',') };
+        // Its piece of the continuous timelapse first: the index never lists a day whose piece is missing.
+        await client.putSegment(day, fs.readFileSync(v.segment));
         await client.putVideo(`${day}-${id}.mp4`, bytes);
         await client.putPoster(`${day}-${id}.jpg`, fs.readFileSync(v.poster));
         index = mergeIndex(index, entry);
@@ -354,10 +499,11 @@ async function buildFromWorker({ client, now = new Date(), onlyDay = null, say =
           if (ownFile(before.video, 'videos', day, 'mp4')) await client.remove(before.video).catch(() => {});
           if (ownFile(before.poster, 'posters', day, 'jpg')) await client.remove(before.poster).catch(() => {});
         }
-        result.built.push(Object.assign({ skipped: v.skipped }, entry));
+        result.built.push(Object.assign({ skipped: v.skipped, soft: v.soft }, entry));
         say(`${day}: made - ${v.frames} frames, ${v.first} to ${v.last}, ${v.seconds} s, ${(v.bytes / 1048576).toFixed(1)} MB`
           + `${before ? ' (made again: its frames had changed)' : ''}${v.skipped.length ? `; left out, unreadable: ${v.skipped.join(', ')}` : ''}`
-          + `; took ${Math.round((Date.now() - t0) / 1000)} s.`);
+          + `${v.soft.length ? `; left out, under ${SHARP_HEIGHT} lines: ${v.soft.join(', ')}` : ''}`
+          + `; ${v.timeline.length} frames for the continuous timelapse; took ${Math.round((Date.now() - t0) / 1000)} s.`);
       } finally {
         fs.rmSync(work, { recursive: true, force: true });
       }
@@ -368,6 +514,11 @@ async function buildFromWorker({ client, now = new Date(), onlyDay = null, say =
       say(`${day}: FAILED - ${error}`);
     }
   }
+  // The continuous timelapse: every chunk whose days are not exactly the ones
+  // it was made from - a day added, or made again - is made again from its
+  // days' segments. A chunk that failed is tried again on the next run.
+  index = await rebuildChunks({ client, index, result, say, tools });
+
   // Frames whose video is made, once they are KEEP_FRAMES_DAYS old; any, at DROP_FRAMES_DAYS.
   if (!onlyDay) {
     for (const day of days) {
@@ -386,6 +537,63 @@ async function buildFromWorker({ client, now = new Date(), onlyDay = null, say =
   return result;
 }
 
+/** The days of the index that belong in the continuous timelapse, by chunk: Map(start -> [day entries], ascending). */
+function chunkDays(index) {
+  const out = new Map();
+  for (const d of (index && Array.isArray(index.days) ? index.days : [])) {
+    if (!d || typeof d.date !== 'string' || !DAY_RE.test(d.date) || typeof d.timeline !== 'string' || !d.timeline) continue;
+    const start = chunkStart(d.date);
+    if (!out.has(start)) out.set(start, []);
+    out.get(start).push(d);
+  }
+  for (const list of out.values()) list.sort((a, b) => (a.date < b.date ? -1 : 1));
+  return new Map([...out].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
+}
+
+/** Makes again each chunk that does not match its days; returns the index as it now is. */
+async function rebuildChunks({ client, index, result, say, tools = {} }) {
+  const wanted = chunkDays(index);
+  const had = new Map(((index.timeline && Array.isArray(index.timeline.chunks)) ? index.timeline.chunks : [])
+    .filter((c) => c && typeof c.start === 'string').map((c) => [c.start, c]));
+  const sig = (days) => days.map((d) => `${d.date}:${d.set}:${d.timeline || d.times}`).join('|');
+  for (const [start, days] of wanted) {
+    const before = had.get(start);
+    if (before && Array.isArray(before.days) && sig(before.days) === sig(days)) continue;
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), `nhrc-timelapse-chunk-${start}-`));
+    try {
+      const files = [];
+      for (const d of days) {
+        const f = path.join(work, `${d.date}.mp4`);
+        fs.writeFileSync(f, await client.segment(d.date));
+        files.push(f);
+      }
+      const frames = days.reduce((n, d) => n + d.timeline.split(',').length, 0);
+      const { file, joined } = await joinSegments(Object.assign({ files, frames, workDir: work }, tools));
+      const bytes = fs.readFileSync(file);
+      if (bytes.length > CHUNK_MAX_BYTES) throw new Error(`the timelapse from ${start} would be ${(bytes.length / 1048576).toFixed(0)} MB - over ${CHUNK_MAX_BYTES / 1048576} MB`);
+      const id = crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 12);
+      const entry = { start, video: `whole/${start}-${id}.mp4`, frames, seconds: Math.round(frames / FPS * 100) / 100, bytes: bytes.length,
+        days: days.map((d) => ({ date: d.date, set: d.set, times: d.timeline })) };
+      await client.putChunk(`${start}-${id}.mp4`, bytes);
+      had.set(start, entry);
+      index = Object.assign({}, index, { timeline: { fps: FPS, slotMinutes: SLOT_MINUTES,
+        chunks: [...had.values()].filter((c) => wanted.has(c.start)).sort((a, b) => (a.start < b.start ? -1 : 1)) } });
+      await client.putIndex(index);
+      if (before && before.video !== entry.video && ownFile(before.video, 'whole', start, 'mp4')) await client.remove(before.video).catch(() => {});
+      say(`The continuous timelapse from ${start}: made - ${days.length} day${days.length === 1 ? '' : 's'}, ${frames} frames, `
+        + `${entry.seconds} s, ${(bytes.length / 1048576).toFixed(1)} MB${joined === 'copied' ? '' : ' (re-encoded: its pieces were not all encoded alike)'}.`);
+      result.chunks = (result.chunks || []).concat(start);
+    } catch (e) {
+      const error = String((e && e.message) || e).replace(/[^\x20-\x7e]+/g, ' ').trim().slice(0, 500);
+      result.failed.push({ day: `timelapse from ${start}`, error });
+      say(`The continuous timelapse from ${start}: FAILED - ${error}`);
+    } finally {
+      fs.rmSync(work, { recursive: true, force: true });
+    }
+  }
+  return index;
+}
+
 /** A day's frames from a folder on this computer: files named YYYY-MM-DD_HHMM.jpg. */
 function framesFromFolder(dir) {
   const found = fs.readdirSync(dir).map((n) => /^(\d{4}-\d\d-\d\d)_(\d{4})\.jpg$/.exec(n)).filter(Boolean)
@@ -394,6 +602,13 @@ function framesFromFolder(dir) {
   const days = [...new Set(found.map((m) => m[1]))];
   if (days.length > 1) throw new Error(`frames of ${days.length} days in ${dir} (${days.join(', ')}): one day's folder at a time`);
   return { day: days[0], frames: found.map((m) => ({ name: `${m[2]}.jpg`, file: path.join(dir, m[0]) })) };
+}
+
+/** The index is getting near the Worker's 1 MB: said in the log, and on GitHub's run page. */
+function indexWarning(bytes) {
+  const msg = `The timelapse's index is ${Math.round(bytes / 1024)} KB, near the Worker's 1 MB limit: time to take the oldest days off the page.`;
+  console.log(msg);
+  annotate('warning', msg);
 }
 
 function annotate(level, msg) {
@@ -453,5 +668,7 @@ if (require.main === module) {
 module.exports = {
   WORKER, WIDTH, HEIGHT, FPS, GOP, MIN_FRAMES, READY_HOUR, KEEP_FRAMES_DAYS, DROP_FRAMES_DAYS, FONT, FONTS,
   stampText, clock, dayBefore, localParts, dayReady, frameSet, mergeIndex, posterIndex, filterValue, toolEnv, ownFile,
+  SHARP_HEIGHT, SLOT_MINUTES, CHUNK_MAX_BYTES, jpegSize, frameMinutes, sharpFrames, slotPicks, chunkStart, chunkDays,
+  rebuildChunks, joinSegments, encoding, sequence, encode,
   buildVideo, checkVideo, workerClient, downloadFrames, buildFromWorker, framesFromFolder, main,
 };
