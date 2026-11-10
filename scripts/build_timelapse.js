@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * The new boathouse timelapse: each day's frames into a video, with the date
- * and time in the corner of every frame, for roworno.com/newboathouse and the
- * morning email.
+ * and time in the bottom right corner of every frame and the club's logo in the
+ * top right, for roworno.com/newboathouse and the morning email.
  *
  * Each evening the Pi that filmed the day (camera/snapshot_service.js, with
  * TIMELAPSE_PUBLISH=1) sends that day's frames - one every 5 minutes, sunrise
@@ -63,6 +63,11 @@ const INDEX_WARN_BYTES = 800 * 1024;          // the Worker takes 1 MB of index:
 const FONTS = ['/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
   '/Library/Fonts/Arial Bold.ttf'];
 const FONT = process.env.TIMELAPSE_FONT || FONTS.find((f) => fs.existsSync(f)) || FONTS[0];
+// The club's logo, top right on every frame: the map's (its white edge reads on
+// dark frames, its black letters on light ones), 96 lines high, as far from the
+// corner as the date and time are from theirs.
+const LOGO = path.join(__dirname, '..', 'map', 'nhrc-map.png');
+const LOGO_HEIGHT = 96;
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -115,10 +120,14 @@ const DAY_RE = /^\d{4}-\d\d-\d\d$/;
 /** A video or poster of that day's, by the name the Worker gives such files. */
 const ownFile = (p, kind, day, ext) => typeof p === 'string' && new RegExp(`^${kind}/${day}-[0-9a-f]{8,16}\\.${ext}$`).test(p);
 
-/** What a video was made from: the frames' names and sizes, as a short hash. */
-function frameSet(frames) {
+/**
+ * What a video was made from: the frames' names and sizes, and what is drawn
+ * on them (look), as a short hash. A day whose set no longer matches is made
+ * again while its frames are on the Worker: a late frame, a new stamp or logo.
+ */
+function frameSet(frames, style = '') {
   const list = frames.map((f) => `${f.name}:${f.size}`).sort().join('\n');
-  return crypto.createHash('sha256').update(list).digest('hex').slice(0, 12);
+  return crypto.createHash('sha256').update(`${style}\n${list}`).digest('hex').slice(0, 12);
 }
 
 /** The index with this day's entry in (replacing any before), newest first - the rest of it (the timeline) as it was. */
@@ -236,6 +245,25 @@ function toolOutput(cmd, args, timeoutMs = 60000) {
 /** A value inside an ffmpeg filter: \ : and ' escaped. */
 const filterValue = (s) => String(s).replace(/[\\:']/g, '\\$&');
 
+/**
+ * What is drawn on each frame, as an ffmpeg filter (input 0 the photo, input 1
+ * the logo): the photo at 1280x720, the date and time bottom right, the logo
+ * top right. In RGB, so the logo's white and black stay white and black.
+ */
+function stampFilter(font, textFile) {
+  const size = Math.round(HEIGHT * 0.042), border = Math.round(HEIGHT * 0.014), margin = Math.round(HEIGHT * 0.033);
+  return `[0:v]scale=${WIDTH}:${HEIGHT}:flags=lanczos,setsar=1,format=rgb24,drawtext=fontfile=${filterValue(font)}:textfile=${filterValue(textFile)}`
+    + `:expansion=none:fontsize=${size}:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=${border}:x=w-tw-${margin}:y=h-th-${margin}[photo];`
+    + `[1:v]format=rgba,scale=-1:${LOGO_HEIGHT}:flags=lanczos[logo];[photo][logo]overlay=x=W-w-${margin}:y=${margin}:format=rgb[out]`;
+}
+
+/** What is drawn on the frames - the filter and the logo itself - as a short hash, for frameSet. */
+function look(logo = LOGO) {
+  let bytes;
+  try { bytes = fs.readFileSync(logo); } catch (e) { throw new Error(`the logo ${logo} is not there`); }
+  return crypto.createHash('sha256').update(stampFilter('font', 'text')).update(bytes).digest('hex').slice(0, 12);
+}
+
 /** Frames, linked in order as 00001.jpg, 00002.jpg ... in dir - what ffmpeg's numbered input reads. */
 function sequence(dir, files) {
   fs.mkdirSync(dir, { recursive: true });
@@ -246,11 +274,17 @@ function sequence(dir, files) {
   return path.join(dir, '%05d.jpg');
 }
 
+// The frames are JPEGs: full range (black 0, white 255). Video for the web is
+// limited range (black 16, white 235: yuv420p). Converted here and marked so -
+// left to itself, a newer ffmpeg (GitHub's runner's, in November 2026) keeps
+// the frames' full range and makes yuvj420p, which not every player shows right.
+const LIMITED_RANGE = ['-color_range', 'tv'];
+
 /** Encodes numbered stamped frames into an MP4; segments have no B-frames, so they join without re-encoding. */
 async function encode(ffmpeg, input, out, { segment = false } = {}) {
-  const r = await runTool(ffmpeg, ['-v', 'error', '-framerate', String(FPS), '-i', input,
+  const r = await runTool(ffmpeg, ['-v', 'error', '-framerate', String(FPS), '-i', input, '-vf', 'scale=out_range=tv',
     '-c:v', 'libx264', '-preset', 'medium', '-crf', String(CRF), '-g', String(GOP), ...(segment ? ['-bf', '0'] : []),
-    '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-an', '-y', out], 600000);
+    '-profile:v', 'high', '-pix_fmt', 'yuv420p', ...LIMITED_RANGE, '-movflags', '+faststart', '-an', '-y', out], 600000);
   if (r.code !== 0) throw new Error(`ffmpeg could not make the ${segment ? 'timelapse\'s piece' : 'video'}: ${r.stderr.trim().split('\n').slice(-3).join(' / ')}`);
   return out;
 }
@@ -258,7 +292,7 @@ async function encode(ffmpeg, input, out, { segment = false } = {}) {
 /**
  * Makes a day's two videos from its frames ([{ name: 'HHMM.jpg', file }], in
  * time order). Every frame is scaled to 1280x720 and stamped with the date and
- * time on its own - a damaged one is simply left out. Then:
+ * time and the logo on its own - a damaged one is simply left out. Then:
  *   - the day's video: every frame, less the soft ones when the day has
  *     sharper (sharpFrames);
  *   - the day's segment of the continuous timelapse: the sharpest frame of each
@@ -269,31 +303,35 @@ async function encode(ffmpeg, input, out, { segment = false } = {}) {
  * width, height, bytes, skipped (unreadable), soft (left out of the day's
  * video) }.
  */
-async function buildVideo({ day, frames, workDir, ffmpeg = process.env.FFMPEG || 'ffmpeg', ffprobe = process.env.FFPROBE || 'ffprobe', font = FONT }) {
+async function buildVideo({ day, frames, workDir, ffmpeg = process.env.FFMPEG || 'ffmpeg', ffprobe = process.env.FFPROBE || 'ffprobe', font = FONT, logo = LOGO }) {
   if (!fs.existsSync(font)) throw new Error(`the font ${font} is not there (apt install fonts-dejavu-core, or set TIMELAPSE_FONT)`);
+  if (!fs.existsSync(logo)) throw new Error(`the logo ${logo} is not there`);
   const stamped = path.join(workDir, 'stamped');
   fs.mkdirSync(stamped, { recursive: true });
   const textFile = path.join(workDir, 'stamp.txt');
-  const size = Math.round(HEIGHT * 0.042), border = Math.round(HEIGHT * 0.014), margin = Math.round(HEIGHT * 0.033);
+  const filter = stampFilter(font, textFile);
   const readable = [], skipped = [];
+  let said = '';
   for (const f of frames) {
     const hhmm = f.name.slice(0, 4);
     let dims = null;
     try { dims = jpegSize(fs.readFileSync(f.file)); } catch (e) { /* unreadable: ffmpeg says */ }
     fs.writeFileSync(textFile, stampText(day, hhmm));
     const out = path.join(stamped, `${hhmm}.jpg`);
-    const vf = `scale=${WIDTH}:${HEIGHT}:flags=lanczos,setsar=1,drawtext=fontfile=${filterValue(font)}:textfile=${filterValue(textFile)}`
-      + `:expansion=none:fontsize=${size}:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=${border}:x=w-tw-${margin}:y=h-th-${margin}`;
-    const r = await runTool(ffmpeg, ['-v', 'error', '-xerror', '-i', f.file, '-frames:v', '1', '-vf', vf, '-q:v', '2', '-y', out], 60000);
+    const r = await runTool(ffmpeg, ['-v', 'error', '-xerror', '-i', f.file, '-i', logo, '-filter_complex', filter, '-map', '[out]',
+      '-frames:v', '1', '-q:v', '2', '-y', out], 60000);
     if (r.code !== 0 || !fs.existsSync(out) || fs.statSync(out).size === 0) {
       try { fs.unlinkSync(out); } catch (e) { /* not made */ }
       skipped.push(f.name);
+      said = r.stderr.trim().split('\n').pop() || said;
       continue;
     }
     readable.push({ name: f.name, stamped: out, width: dims ? dims.width : 0, height: dims ? dims.height : 0 });
   }
   if (readable.length < MIN_FRAMES) {
-    throw new Error(`only ${readable.length} of the ${frames.length} frames could be read${skipped.length ? ` (${skipped.slice(0, 5).join(', ')} could not)` : ''}`);
+    // ffmpeg's last words too: when no frame at all could be stamped, the fault is rarely the frames'.
+    throw new Error(`only ${readable.length} of the ${frames.length} frames could be read${skipped.length ? ` (${skipped.slice(0, 5).join(', ')} could not)` : ''}`
+      + `${said ? `; ffmpeg: ${said.slice(0, 200)}` : ''}`);
   }
   const { keep, soft } = sharpFrames(readable);
   const picks = slotPicks(readable);
@@ -340,8 +378,8 @@ async function joinSegments({ files, frames, workDir, ffmpeg = process.env.FFMPE
   for (const f of files) kinds.add(await encoding(f, ffprobe));
   const alike = kinds.size === 1 && JSON.parse([...kinds][0])[6] === 0;
   const args = alike ? ['-c', 'copy']
-    : ['-vf', `scale=${WIDTH}:${HEIGHT}:flags=lanczos,setsar=1`, '-r', String(FPS), '-c:v', 'libx264', '-preset', 'medium',
-      '-crf', String(CRF), '-g', String(GOP), '-bf', '0', '-profile:v', 'high', '-pix_fmt', 'yuv420p'];
+    : ['-vf', `scale=${WIDTH}:${HEIGHT}:flags=lanczos:out_range=tv,setsar=1`, '-r', String(FPS), '-c:v', 'libx264', '-preset', 'medium',
+      '-crf', String(CRF), '-g', String(GOP), '-bf', '0', '-profile:v', 'high', '-pix_fmt', 'yuv420p', ...LIMITED_RANGE];
   const r = await runTool(ffmpeg, ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, ...args, '-an', '-movflags', '+faststart', '-y', out], 600000);
   if (r.code !== 0) throw new Error(`ffmpeg could not join the timelapse's pieces: ${r.stderr.trim().split('\n').slice(-3).join(' / ')}`);
   await checkVideo(out, frames, ffprobe);
@@ -351,7 +389,7 @@ async function joinSegments({ files, frames, workDir, ffmpeg = process.env.FFMPE
 /** The video as the page needs it - or an error saying how it is not. */
 async function checkVideo(file, frames, ffprobe = process.env.FFPROBE || 'ffprobe') {
   const r = await toolOutput(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-count_frames', '-show_entries',
-    'stream=codec_name,width,height,nb_read_frames:format=duration', '-of', 'json', file]);
+    'stream=codec_name,width,height,pix_fmt,color_range,nb_read_frames:format=duration', '-of', 'json', file]);
   if (r.code !== 0) throw new Error(`ffprobe could not read the video: ${r.err.trim().slice(0, 200)}`);
   const j = JSON.parse(r.out);
   const s = (j.streams || [])[0] || {};
@@ -359,6 +397,8 @@ async function checkVideo(file, frames, ffprobe = process.env.FFPROBE || 'ffprob
   const problems = [];
   if (s.codec_name !== 'h264') problems.push(`codec ${s.codec_name}`);
   if (s.width !== WIDTH || s.height !== HEIGHT) problems.push(`${s.width}x${s.height}`);
+  // Limited range, as video for the web is (encode): ffprobe calls a full range one yuvj420p, or pc.
+  if (s.pix_fmt !== 'yuv420p' || s.color_range === 'pc') problems.push(`${s.pix_fmt}${s.color_range ? ` (${s.color_range})` : ''}, not yuv420p limited range`);
   if (Number(s.nb_read_frames) !== frames) problems.push(`${s.nb_read_frames} frames for ${frames} photos`);
   if (!(Math.abs(seconds - frames / FPS) < 0.2)) problems.push(`${seconds} s for ${frames} photos`);
   // Plays while it loads: the index (moov) before the pictures (mdat).
@@ -463,12 +503,13 @@ async function buildFromWorker({ client, now = new Date(), onlyDay = null, say =
   const known = new Map((index.days || []).map((d) => [d.date, d]));
   const sets = new Map();
   const { day: today } = localParts(now);
+  const style = look(tools.logo);
   for (const day of days) {
     try {
       const listing = await client.day(day);
       const frames = (listing.frames || []).filter((f) => f && /^\d{4}\.jpg$/.test(f.name));
       if (!frames.length) { if (onlyDay) say(`${day}: no frames on the Worker.`); continue; }
-      const set = frameSet(frames);
+      const set = frameSet(frames, style);
       sets.set(day, set);
       const before = known.get(day);
       if (before && before.set === set && before.timeline && !onlyDay) continue;   // made from these very frames
@@ -500,8 +541,10 @@ async function buildFromWorker({ client, now = new Date(), onlyDay = null, say =
           if (ownFile(before.poster, 'posters', day, 'jpg')) await client.remove(before.poster).catch(() => {});
         }
         result.built.push(Object.assign({ skipped: v.skipped, soft: v.soft }, entry));
+        const again = !before ? '' : onlyDay ? ' (made again, as asked)'
+          : before.set !== set ? ' (made again: its frames, or what is drawn on them, had changed)' : ' (made again, for the continuous timelapse)';
         say(`${day}: made - ${v.frames} frames, ${v.first} to ${v.last}, ${v.seconds} s, ${(v.bytes / 1048576).toFixed(1)} MB`
-          + `${before ? ' (made again: its frames had changed)' : ''}${v.skipped.length ? `; left out, unreadable: ${v.skipped.join(', ')}` : ''}`
+          + `${again}${v.skipped.length ? `; left out, unreadable: ${v.skipped.join(', ')}` : ''}`
           + `${v.soft.length ? `; left out, under ${SHARP_HEIGHT} lines: ${v.soft.join(', ')}` : ''}`
           + `; ${v.timeline.length} frames for the continuous timelapse; took ${Math.round((Date.now() - t0) / 1000)} s.`);
       } finally {
@@ -666,8 +709,8 @@ if (require.main === module) {
 }
 
 module.exports = {
-  WORKER, WIDTH, HEIGHT, FPS, GOP, MIN_FRAMES, READY_HOUR, KEEP_FRAMES_DAYS, DROP_FRAMES_DAYS, FONT, FONTS,
-  stampText, clock, dayBefore, localParts, dayReady, frameSet, mergeIndex, posterIndex, filterValue, toolEnv, ownFile,
+  WORKER, WIDTH, HEIGHT, FPS, GOP, MIN_FRAMES, READY_HOUR, KEEP_FRAMES_DAYS, DROP_FRAMES_DAYS, FONT, FONTS, LOGO, LOGO_HEIGHT,
+  stampFilter, look, LIMITED_RANGE, stampText, clock, dayBefore, localParts, dayReady, frameSet, mergeIndex, posterIndex, filterValue, toolEnv, ownFile,
   SHARP_HEIGHT, SLOT_MINUTES, CHUNK_MAX_BYTES, jpegSize, frameMinutes, sharpFrames, slotPicks, chunkStart, chunkDays,
   rebuildChunks, joinSegments, encoding, sequence, encode,
   buildVideo, checkVideo, workerClient, downloadFrames, buildFromWorker, framesFromFolder, main,

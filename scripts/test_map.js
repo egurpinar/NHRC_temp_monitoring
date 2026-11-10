@@ -1258,9 +1258,13 @@ test('the credits the data asks for: Open-Meteo by name with a link; map tiles c
   assert.ok(/CT State GIS Office/.test(W.TILES.aerial.options.attribution) && /maps\.cteco\.uconn\.edu\/data\/flight2023\//.test(W.TILES.aerial.options.attribution),
     'the state asks to be acknowledged: by name, with the link it gives');
   assert.ok(/USGS The National Map/.test(W.TILES.aerialBackup.options.attribution));
-  assert.ok(/Safety Committee's map, copied/.test(HTML));
-  assert.ok(/Now is the wind measured at Waterbury-Oxford Airport, on a hilltop 7\.6 mi north\s+of the dock/.test(HTML), 'where now comes from');
-  assert.ok(/State of\s+Connecticut's, taken in spring 2023/.test(HTML), 'the page says whose photos, and when');
+  assert.ok(/Safety Committee's map, copied <span id="map-copied">/.test(HTML));
+  assert.ok(/Wind now: measured at Waterbury-Oxford Airport, 7\.6 mi north, usually windier than the river\./.test(HTML), 'where now comes from');
+  assert.ok(/Wind ahead: forecast for the dock\./.test(HTML), 'and the hours ahead');
+  assert.ok(/Aerial photos: State of Connecticut, spring 2023\./.test(HTML), 'the page says whose photos, and when');
+  // Short, as members read it on a phone at the dock.
+  const note = HTML.match(/<div class="note-text">\s*(Lanes and hazards:[\s\S]*?)<\/div>/)[1].replace(/<[^>]+>/g, ' ').trim().split(/\s+/);
+  assert.ok(note.length <= 70, `the map's note: ${note.length} words`);
 });
 
 test('Leaflet is pinned to the exact files, by hash; no keys anywhere', () => {

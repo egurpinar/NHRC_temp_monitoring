@@ -1080,7 +1080,8 @@ sudo systemctl restart nhrc-camera
 ## The timelapse on the website
 
 **roworno.com/newboathouse**: the new boathouse going up, with the date and
-time in the corner of every frame.
+time in the bottom right corner of every frame and the club's logo (the map's,
+`map/nhrc-map.png`) in the top right.
 
 - **One timelapse of every day so far**, growing by a day each evening. It
   plays from the first day, runs from one day into the next, and starts again
@@ -1118,9 +1119,12 @@ How it is made, without adding work to the Pis:
 2. **GitHub makes the videos** (`.github/workflows/timelapse.yml`, a few times
    each evening and once the next morning): each day a Pi has called complete
    - or any day once it is 6 AM the day after - with no video yet, or whose
-   frames have changed since (a late frame). It runs its tests first, then
-   `scripts/build_timelapse.js`, which makes two videos of the day at
-   1280x720, a tenth of a second per frame, both checked before they are sent:
+   frames have changed since (a late frame), or whose frames are still on the
+   Worker when the stamp or the logo changes. It runs its tests first, with
+   the runner's own ffmpeg, then `scripts/build_timelapse.js`, which makes two
+   videos of the day at 1280x720 (standard limited-range yuv420p, whatever
+   ffmpeg the runner has), a tenth of a second per frame, both checked before
+   they are sent:
    the day's own (a December day in about 11 seconds, a June day in 18), and
    its piece ("segment") of the continuous timelapse. The continuous timelapse
    is kept in chunks of up to 11 days - from the 1st, the 11th and the 21st of

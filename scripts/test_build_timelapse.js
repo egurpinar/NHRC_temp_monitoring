@@ -190,6 +190,29 @@ function region(file, w, h, x, y) {
   for (const v of px) { sum += v; if (v < min) min = v; if (v > max) max = v; }
   return { mean: sum / px.length, spread: max - min, bytes: px };
 }
+/**
+ * What is drawn on a grey picture in a region of its first frame: where (the
+ * box around every pixel off the grey, in the whole picture's coordinates), and
+ * how many of its pixels are yellow, near black and near white.
+ */
+function marks(file, w, h, x0, y0, grey = 128) {
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', `crop=${w}:${h}:${x0}:${y0},format=rgb24`, '-f', 'rawvideo', '-']);
+  assert.strictEqual(r.status, 0, String(r.stderr));
+  const px = r.stdout;
+  const m = { x: Infinity, y: Infinity, x2: -1, y2: -1, yellow: 0, black: 0, white: 0, bytes: px };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 3, red = px[i], green = px[i + 1], blue = px[i + 2];
+      if (Math.max(Math.abs(red - grey), Math.abs(green - grey), Math.abs(blue - grey)) > 40) {
+        m.x = Math.min(m.x, x0 + x); m.x2 = Math.max(m.x2, x0 + x); m.y = Math.min(m.y, y0 + y); m.y2 = Math.max(m.y2, y0 + y);
+      }
+      if (red > 170 && green > 140 && blue < 90) m.yellow++;
+      if (red + green + blue < 120) m.black++;
+      if (red > 225 && green > 225 && blue > 225) m.white++;
+    }
+  }
+  return m;
+}
 function dayOfFrames(sizes, { damaged = [] } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-frames-'));
   const frames = sizes.map(([hhmm, size]) => {
@@ -214,13 +237,57 @@ test('frames of every size Ring sends, into one 1280x720 H.264 video: a tenth of
   assert.strictEqual((await B.checkVideo(v.segment, 4)).width, 1280);
   assert.strictEqual(v.bytes, fs.statSync(v.video).size);
   // By name: ffprobe lists the fields in its own order, which can change between versions.
-  const probe = JSON.parse(spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,profile,pix_fmt,width,height',
+  const probe = JSON.parse(spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,profile,pix_fmt,color_range,width,height',
     '-of', 'json', v.video], { encoding: 'utf8' }).stdout).streams[0];
   assert.deepStrictEqual([probe.codec_name, probe.profile, probe.pix_fmt, probe.width, probe.height], ['h264', 'High', 'yuv420p', 1280, 720]);
+  assert.notStrictEqual(probe.color_range, 'pc', 'limited range, as video for the web is');
   const posterSize = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', v.poster], { encoding: 'utf8' });
   assert.strictEqual(posterSize.stdout.trim(), '640,360');
   const head = fs.readFileSync(v.video).subarray(0, 4096).toString('latin1');
   assert.ok(head.indexOf('moov') > 0 && (head.indexOf('mdat') < 0 || head.indexOf('moov') < head.indexOf('mdat')), 'the index first');
+});
+
+/** A frame of four grey bands - 0, 64, 200 and 255 - as Ring's JPEGs are: full range. */
+const BANDS = [0, 64, 200, 255];
+function bandFrame(file) {
+  const inputs = BANDS.flatMap((g) => ['-f', 'lavfi', '-i', `color=c=0x${g.toString(16).padStart(2, '0').repeat(3)}:s=320x720`]);
+  const r = spawnSync('ffmpeg', ['-v', 'error', ...inputs, '-filter_complex', 'hstack=inputs=4', '-frames:v', '1', '-q:v', '2', '-y', file]);
+  assert.strictEqual(r.status, 0, String(r.stderr));
+  return file;
+}
+/** Each band's level in a picture's first frame, decoded to RGB as a player shows it (the middle of each band, clear of the stamp and logo). */
+function bandLevels(file, width = 1280) {
+  const k = width / 1280;
+  return BANDS.map((_, i) => {
+    const crop = `crop=${Math.round(200 * k)}:${Math.round(120 * k)}:${Math.round((320 * i + 60) * k)}:${Math.round(300 * k)}`;
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', `${crop},format=rgb24`, '-f', 'rawvideo', '-']);
+    assert.strictEqual(r.status, 0, String(r.stderr));
+    let sum = 0;
+    for (const v of r.stdout) sum += v;
+    return Math.round(sum / r.stdout.length);
+  });
+}
+
+test('the levels members see: black stays black, white white, greys where they were - in every picture made, whatever ffmpeg made it', async () => {
+  if (needVideo()) return 'skip';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-levels-'));
+  const frames = ['0700', '0715'].map((t) => ({ name: `${t}.jpg`, file: bandFrame(path.join(dir, `${t}.jpg`)) }));
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-'));
+  const v = await B.buildVideo({ day: '2026-11-09', frames, workDir: work });
+  // A chunk joined as is, and one re-encoded (a piece made otherwise forces it).
+  const odd = path.join(dir, 'odd.mp4');
+  assert.strictEqual(spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=10', '-frames:v', '4', '-c:v', 'libx264',
+    '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', odd]).status, 0);
+  const copied = await B.joinSegments({ files: [v.segment, v.segment], frames: 4, workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-join-')) });
+  const again = await B.joinSegments({ files: [v.segment, odd], frames: 6, workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-join-')) });
+  assert.deepStrictEqual([copied.joined, again.joined], ['copied', 're-encoded']);
+  // Wrong range handling moves black to 16, white to 235, 64 to 71 or 56, 200 to 188 or 214: never within these.
+  const near = (got) => got[0] <= 6 && Math.abs(got[1] - 64) <= 6 && Math.abs(got[2] - 200) <= 6 && got[3] >= 249;
+  for (const [name, file, width] of [['stamped frame', path.join(work, 'stamped', '0700.jpg'), 1280], ['poster', v.poster, 640],
+    ['day video', v.video, 1280], ['piece', v.segment, 1280], ['chunk, joined', copied.file, 1280], ['chunk, re-encoded', again.file, 1280]]) {
+    const got = bandLevels(file, width);
+    assert.ok(near(got), `${name}: ${got.join(', ')} for ${BANDS.join(', ')}`);
+  }
 });
 
 test('the date and time are on every frame, bottom right - each frame its own; the rest of the picture untouched', async () => {
@@ -236,6 +303,61 @@ test('the date and time are on every frame, bottom right - each frame its own; t
   const plain = region(a, 400, 300, 0, 0);
   assert.ok(plain.spread < 12 && Math.abs(plain.mean - 128) < 6, `untouched: mean ${plain.mean.toFixed(0)}, spread ${plain.spread}`);
   assert.ok(!region(b, 420, 70, 1280 - 440, 720 - 80).bytes.equals(corner.bytes), 'the 7:10 frame says something else than the 7:05');
+});
+
+test('the club\'s logo, top right on every frame: 96 lines high, 24 from the edges, in its colours - the same on frames of every size', async () => {
+  if (needVideo()) return 'skip';
+  const { frames } = dayOfFrames([['0705', '1280x720'], ['0710', '1920x1080'], ['0715', '848x480']]);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-'));
+  const v = await B.buildVideo({ day: '2026-11-09', frames, workDir: work });
+  const [a, b, c] = ['0705', '0710', '0715'].map((t) => marks(path.join(work, 'stamped', `${t}.jpg`), 400, 200, 880, 0));
+  // Its box: 113 x 96 at (1143, 24). The drawing inside, the logo's clear edge aside, about 104 x 88.
+  assert.ok(a.x >= 1143 && a.x2 <= 1280 - 24 && a.y >= 24 && a.y2 <= 24 + 96, `in its box: x ${a.x}-${a.x2}, y ${a.y}-${a.y2}`);
+  assert.ok(a.x2 - a.x > 95 && a.y2 - a.y > 80, `all of it, not a corner: ${a.x2 - a.x + 1} x ${a.y2 - a.y + 1}`);
+  assert.ok(a.yellow > 150 && a.black > 100 && a.white > 1000, `its yellow banner, black letters, white edge: ${a.yellow}, ${a.black}, ${a.white}`);
+  assert.ok(b.bytes.equals(a.bytes) && c.bytes.equals(a.bytes), 'the same logo on the 1080, the 720 and the 480 frame');
+  // Nowhere else: the top left and the middle are the plain grey picture.
+  for (const [w, h, x, y] of [[600, 300, 0, 0], [400, 200, 440, 260]]) {
+    const plain = region(path.join(work, 'stamped', '0705.jpg'), w, h, x, y);
+    assert.ok(plain.spread < 12 && Math.abs(plain.mean - 128) < 6, `untouched at ${x},${y}: mean ${plain.mean.toFixed(0)}, spread ${plain.spread}`);
+  }
+  // In what members see: the day's video, its piece of the continuous timelapse, the poster.
+  for (const file of [v.video, v.segment]) {
+    const m = marks(file, 400, 200, 880, 0);
+    assert.ok(m.x >= 1141 && m.x2 <= 1258 && m.y >= 22 && m.y2 <= 122 && m.yellow > 100, `${path.basename(file)}: x ${m.x}-${m.x2}, y ${m.y}-${m.y2}, yellow ${m.yellow}`);
+  }
+  const p = marks(v.poster, 200, 100, 440, 0);
+  assert.ok(p.x >= 570 && p.x2 <= 628 && p.yellow > 30, `poster: x ${p.x}-${p.x2}, yellow ${p.yellow}`);
+});
+
+test('no logo, no video - said plainly; a logo ffmpeg cannot read fails every frame, and ffmpeg\'s words say why', async () => {
+  await assert.rejects(B.buildVideo({ day: '2026-11-09', frames: [], workDir: os.tmpdir(), font: __filename, logo: '/nowhere/logo.png' }),
+    /the logo \/nowhere\/logo\.png is not there/);
+  assert.throws(() => B.look('/nowhere/logo.png'), /the logo \/nowhere\/logo\.png is not there/);
+  if (needVideo()) return 'skip';
+  const bad = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-logo-')), 'logo.png');
+  fs.writeFileSync(bad, 'not a picture');
+  const { frames } = dayOfFrames([['0705', '1280x720'], ['0710', '1280x720']]);
+  await assert.rejects(B.buildVideo({ day: '2026-11-09', frames, workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-')), logo: bad }),
+    /only 0 of the 2 frames could be read \(0705\.jpg, 0710\.jpg could not\); ffmpeg: \S/);
+});
+
+test('what is drawn on the frames is part of each day\'s set: another logo or stamp, and the days still on the Worker are made again', () => {
+  const frames = [{ name: '0705.jpg', size: 20 }, { name: '0710.jpg', size: 30 }];
+  assert.ok(B.LOGO.endsWith(path.join('map', 'nhrc-map.png')) && fs.existsSync(B.LOGO), 'the map\'s logo');
+  const look = B.look();
+  assert.ok(/^[0-9a-f]{12}$/.test(look) && B.look() === look, 'the same look on every run');
+  // The filter (the stamp, the logo's size and place) and the logo's own bytes.
+  const crypto = require('crypto');
+  assert.strictEqual(look, crypto.createHash('sha256').update(B.stampFilter('font', 'text')).update(fs.readFileSync(B.LOGO)).digest('hex').slice(0, 12));
+  assert.ok(/scale=-1:96:/.test(B.stampFilter('f', 't')) && /overlay=x=W-w-24:y=24:/.test(B.stampFilter('f', 't')));
+  const other = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-look-')), 'logo.png');
+  fs.writeFileSync(other, Buffer.concat([fs.readFileSync(B.LOGO), Buffer.from([0])]));
+  assert.notStrictEqual(B.look(other), look, 'another logo, another look');
+  assert.notStrictEqual(B.frameSet(frames, B.look(other)), B.frameSet(frames, look));
+  // A day made before the logo (its set then: the frames alone) is made again too.
+  const before = crypto.createHash('sha256').update('0705.jpg:20\n0710.jpg:30').digest('hex').slice(0, 12);
+  assert.notStrictEqual(B.frameSet(frames, look), before);
 });
 
 test('a damaged frame is left out and named; too few readable frames is an error, not a video', async () => {
@@ -286,6 +408,13 @@ test('the check refuses a video that would not play while it loads, or has the w
   const small = path.join(dir, 'small.mp4');
   spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=gray:s=640x360:r=10', '-frames:v', '20', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', small]);
   await assert.rejects(B.checkVideo(small, 20), /640x360/);
+  // Full range (what a newer ffmpeg makes from JPEGs, left to itself), however ffprobe says it: refused.
+  for (const [pix, range] of [['yuvj420p', 'pc'], ['yuv420p', 'pc'], ['yuvj420p', 'unknown']]) {
+    const probe = path.join(dir, `ffprobe-${pix}-${range}`);
+    fs.writeFileSync(probe, `#!/bin/sh\necho '${JSON.stringify({ streams: [{ codec_name: 'h264', width: 1280, height: 720, pix_fmt: pix,
+      color_range: range, nb_read_frames: '20' }], format: { duration: '2.000000' } })}'\n`, { mode: 0o755 });
+    await assert.rejects(B.checkVideo(good, 20, probe), new RegExp(`${pix} \\(${range}\\), not yuv420p limited range`));
+  }
 });
 
 test('days\' pieces join into one video without re-encoding: every frame there, in order, playing as it loads; a piece made otherwise is refused', async () => {
@@ -408,9 +537,46 @@ test('a late frame: the day is made again, and the video it replaces is deleted'
     const keys = w.env.BUCKET.keys();
     assert.ok(!keys.includes(`timelapse/${first.video}`) && !keys.includes(`timelapse/${first.poster}`), 'the old one is gone');
     assert.ok(keys.includes(`timelapse/${second.video}`) && keys.includes(`timelapse/${second.poster}`));
-    assert.ok(w.lines.some((l) => /made again: its frames had changed/.test(l)), w.lines.join('\n'));
+    assert.ok(w.lines.some((l) => /\(made again: its frames, or what is drawn on them, had changed\)/.test(l)), w.lines.join('\n'));
   } finally { await w.close(); }
 }, 120000);
+
+test('a day made with another logo is made again while its frames are on the Worker - its chunk too, once - and members see the club\'s', async () => {
+  if (needVideo()) return 'skip';
+  const w = await setUp();
+  try {
+    const day = etDay(-1);
+    await w.send(day, ['0705', '0710']);
+    const old = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-oldlogo-')), 'old.png');
+    const made = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=40x40', '-frames:v', '1', '-y', old]);
+    assert.strictEqual(made.status, 0, String(made.stderr));
+    let r = await w.build({ now: at6pm(etDay(0)), tools: { logo: old } });
+    assert.strictEqual(r.built.length, 1, w.lines.join('\n'));
+    const first = w.index().days[0];
+    const firstChunk = w.index().timeline.chunks[0].video;
+    w.lines.length = 0;
+    r = await w.build({ now: at6pm(etDay(0)) });
+    assert.deepStrictEqual([r.built.map((x) => x.date), r.chunks, r.failed], [[day], [B.chunkStart(day)], []], w.lines.join('\n'));
+    assert.ok(w.lines.some((l) => /\(made again: its frames, or what is drawn on them, had changed\)/.test(l)), w.lines.join('\n'));
+    const idx = w.index();
+    assert.ok(idx.days[0].set !== first.set && idx.days[0].video !== first.video && idx.timeline.chunks[0].video !== firstChunk);
+    const keys = w.env.BUCKET.keys();
+    assert.ok(!keys.includes(`timelapse/${first.video}`) && !keys.includes(`timelapse/${firstChunk}`), 'the old videos are gone');
+    // What members are served now carries the club's logo - its yellow banner, where the old one had none.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-dl-'));
+    for (const p of [idx.days[0].video, idx.timeline.chunks[0].video]) {
+      const res = await fetch(`${w.host.url}/timelapse/${p}`);
+      assert.strictEqual(res.status, 200);
+      const file = path.join(dir, path.basename(p));
+      fs.writeFileSync(file, Buffer.from(await res.arrayBuffer()));
+      const m = marks(file, 400, 200, 880, 0);
+      assert.ok(m.yellow > 100 && m.x >= 1141, `${p}: yellow ${m.yellow}, x ${m.x}`);
+    }
+    // Once.
+    r = await w.build({ now: at6pm(etDay(0)) });
+    assert.deepStrictEqual([r.built.length, r.chunks, r.failed], [0, undefined, []], w.lines.join('\n'));
+  } finally { await w.close(); }
+}, 150000);
 
 test('not yet: today\'s frames with no Pi done; yesterday\'s before 6 AM - and one frame alone makes no video', async () => {
   if (needVideo()) return 'skip';
@@ -538,6 +704,7 @@ test('--day makes that day now, whatever the Pis have said, even if made before'
     r = await w.build({ now: at6pm(day), onlyDay: day });
     assert.strictEqual(r.built.length, 1, 'again');
     assert.strictEqual(w.index().days.length, 1);
+    assert.ok(w.lines.some((l) => new RegExp(`^${day}: made - .* \\(made again, as asked\\);`).test(l)), w.lines.join('\n'));
   } finally { await w.close(); }
 }, 120000);
 
