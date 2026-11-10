@@ -49,6 +49,10 @@ const SUITES = [
   { name: 'hazard_map',       cmd: ['node', 'scripts/test_hazard_map.js'] },
   { name: 'pi_check',         cmd: ['node', 'camera/test_pi_check.js'] },
   { name: 'fetch_temp',       cmd: ['bash', 'scripts/test_fetch_temp.sh'], shell: true, few: true },
+  // The new boathouse timelapse: the Worker's side and the Pi's, then the videos (real ffmpeg).
+  { name: 'timelapse_web',    cmd: ['node', 'camera/test_timelapse_web.js'], few: true },
+  { name: 'build_timelapse',  cmd: ['node', 'scripts/test_build_timelapse.js'], few: true },
+  { name: 'newboathouse',     cmd: ['node', 'scripts/test_newboathouse.js'] },
   // heavy: real 1080p video through UDP - run with nothing else beside it, as
   // a busy machine drops packets the "clean" tests count.
   { name: 'snapshot_service', cmd: ['node', 'camera/test_snapshot_service.js'], few: true, heavy: true },

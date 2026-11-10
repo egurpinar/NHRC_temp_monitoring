@@ -73,6 +73,8 @@ token to disk atomically.
 2. **Workers & Pages → Create Worker** → paste `cloudflare_worker.js`
 3. **Settings → Variables and Secrets**
    - `UPLOAD_SECRET` (type: Secret) — generate with `openssl rand -hex 32`
+   - `TIMELAPSE_SECRET` (type: Secret) — only for the timelapse on the website;
+     a different value, generated the same way (see "The timelapse on the website")
 4. **Settings → Bindings → R2 bucket**
    - Variable name `BUCKET`, bucket `nhrc-camera`
 
@@ -723,7 +725,8 @@ night - then keeps the sharpest clean keyframe. Ring decides the resolution
 frame's journal line says how the resolution went and whether 1080 was
 reached, and after sunset one line sums up the day by size.
 
-Nothing here is uploaded or shown on the website, and the frames must never be
+Nothing here is uploaded or shown on the website unless `TIMELAPSE_PUBLISH=1`
+(see "The timelapse on the website" below), and the frames must never be
 committed to this repository. Unlike the website's single photo, they **are
 kept**: copy them off, and delete them from the Pi once the timelapse is made.
 
@@ -1071,7 +1074,118 @@ sudo systemctl restart nhrc-camera
 | `TIMELAPSE_MIN_MEMORY_MB` | 40 | Memory always kept for Pi-hole; at least 20 |
 | `TIMELAPSE_MIN_DISK_MB` | 500 | Disk always kept free; at least 100 |
 | `TIMELAPSE_SNAPSHOT_PAUSE_SECONDS` | 20 | Set times: after a failed live video, the wait before the fallback snapshot (tried twice, 30 s apart): a battery camera cannot take one while it is still streaming |
+| `TIMELAPSE_PUBLISH` | (off) | `1`: each evening, the day's frames go to the Worker for the website's daily video (next section). Every 5 minutes only. A wrong value stops only the sending, and fails `--check` |
 | `FFMPEG_PATH` | `/usr/bin/ffmpeg` | `ffprobe` must be next to it |
+
+## The timelapse on the website
+
+**roworno.com/newboathouse**: each day at the new boathouse as a short video,
+the date and time in the corner of every frame, newest day first, every day
+so far to pick from. The morning email says when yesterday's is ready, with a
+link; the main page links to it under the camera's photo.
+
+How it is made, without adding work to the Pis:
+
+1. **The Pi sends the day's frames** (`TIMELAPSE_PUBLISH=1`). After the day's
+   last frame (sunset), outside the filming hours only, one frame at a time:
+   it asks the Worker which frames it already has, sends the rest as they are
+   on the card (nothing decoded or converted on the Pi), then says the day is
+   complete. It waits while a dock photo is being taken, sends nothing with
+   less than `TIMELAPSE_MIN_MEMORY_MB` + 20 MB of memory available, always
+   stops 15 seconds before the next slot, and carries on where it left off.
+   If the Worker cannot be reached it tries again 30 minutes later. Days missed
+   are caught up for up to 3 days. The standby sends what it filmed, as
+   itself; neither Pi's frames replace the other's. The frames stay on the Pis
+   for the Mac's evening copy, as before.
+2. **GitHub makes the video** (`.github/workflows/timelapse.yml`, a few times
+   each evening and once the next morning): each day a Pi has called complete
+   - or any day once it is 6 AM the day after - with no video yet, or whose
+   frames have changed since (a late frame). It runs its tests first, then
+   `scripts/build_timelapse.js`: 1280x720, a tenth of a second per frame (a
+   December day in about 11 seconds, a June day in 18), checked before it is
+   sent, listed in `/timelapse/index.json`. The frames are deleted from the
+   Worker 3 days after their video is made; the videos are kept.
+3. **The page and the email read the list** from the Worker.
+
+What it costs:
+
+- **The house's upload**: the frames once, after sunset - 15-75 MB a day, as
+  they are on the card.
+- **Cloudflare R2**: the videos, roughly 5-15 MB a day - 2-5 GB a year, inside
+  R2's free 10 GB for the first couple of years - and at most 4 days of frames.
+- **GitHub**: a few minutes of Actions a day, free for this public repository.
+
+### Setting it up
+
+Once, in this order (nothing goes public before step 4):
+
+1. **A secret for the builder.** On your Mac, generate one and copy it:
+
+   ```bash
+   openssl rand -hex 32 | pbcopy
+   ```
+
+   Paste it in two places, and nowhere else (never in chat, never in a file):
+   Cloudflare - the Worker, **Settings → Variables and Secrets → Add →
+   Secret**, name `TIMELAPSE_SECRET`; and GitHub - this repository,
+   **Settings → Secrets and variables → Actions → New repository secret**,
+   name `TIMELAPSE_SECRET`. It must not be the Pis' `UPLOAD_SECRET` (the
+   Worker refuses one that is, or that is shorter than 32 characters). Then
+   empty the clipboard:
+
+   ```bash
+   pbcopy < /dev/null
+   ```
+2. **The Worker.** Replace its code with `camera/cloudflare_worker.js`
+   (**Edit code**, paste, **Deploy**). Check: `curl https://nhrc-camera.<account>.workers.dev/status`
+   ends with `"timelapse": { "latest": null, "days": 0 }`.
+3. **Push** this repository: the page, the workflow and the email's line go
+   live. Until a Pi sends frames, the page says there is no timelapse yet,
+   and the email has no line.
+4. **The Pis.** On each, update `snapshot_service.js` as in "Updating the
+   service on the Pi", then:
+
+   ```bash
+   echo 'TIMELAPSE_PUBLISH=1' | sudo tee -a /opt/nhrc-camera/env
+   sudo -u nhrccam bash -c 'set -a; . /opt/nhrc-camera/env; /usr/local/bin/node /opt/nhrc-camera/snapshot_service.js --check'
+   sudo systemctl restart nhrc-camera
+   ```
+
+   `--check` must say `to website   : each evening after the last frame,
+   the day's frames -> https://.../timelapse/ (TIMELAPSE_PUBLISH=1)`. Outside
+   the filming hours the service sends yesterday's frames within a few
+   minutes of the restart.
+
+To make a day's video at once rather than wait for the evening run: GitHub →
+**Actions → Timelapse → Run workflow**, with the day (e.g. `2026-11-09`) or
+empty for every finished day.
+
+What the journal says:
+
+| Journal | Meaning |
+|---|---|
+| `Timelapse 2026-11-09: sent to the website - 112 frames, 31.4 MB, in 95 s.` | The day is on the Worker; GitHub makes its video on its next run |
+| `Timelapse 2026-11-09: already on the website (112 frames).` | Nothing was missing (e.g. after a restart) |
+| `...; 1 damaged, not sent (0705.jpg)` | A frame the Worker will not take: the rest went |
+| `could not send the frames to the website (... could not be reached ...); trying again in 30 min.` | Said once, then hourly while it lasts |
+| `... this Worker does not take timelapse frames yet: update it` | Step 2 above |
+| `... the upload secret was refused` | `CAMERA_UPLOAD_SECRET` differs from the Worker's `UPLOAD_SECRET` |
+| `Timelapse 2026-11-05: not sent to the website - more than 3 days old now` | The Pi was away too long; the frames stay on the Pi and in iCloud |
+
+A video from a day's frames on your Mac (with `brew install ffmpeg`), the
+same way, without sending anything:
+
+```bash
+node scripts/build_timelapse.js --frames ~/Library/Mobile\ Documents/com~apple~CloudDocs/NHRC\ Timelapse/2026-11-09 --out ~/Desktop/2026-11-09.mp4
+```
+
+To stop it: delete the `TIMELAPSE_PUBLISH` line on each Pi and restart. The
+videos already made stay on the page; to take the page down too, delete
+`newboathouse/` from the repository and the link in `index.html`.
+
+**Permission.** The page shows the Downstream Lot camera's view all day, every
+day, to anyone. The camera's owner agreed to it being on the website; tell him
+the timelapse is going public in this form before turning it on.
 
 ## Battery
 
@@ -1272,6 +1386,55 @@ Hardening applied:
 
 Rotating it is cheap: change the Worker secret and the Pi's `env`, restart.
 
+### The timelapse on the website
+
+What it changes, and what it does not (reviewed November 2026):
+
+- **The Pis stay outbound-only.** Sending frames is more of what they already
+  do - HTTPS requests to the Worker, with the upload secret they already
+  hold. No port is opened, nothing listens, no new secret or package goes on
+  a Pi. Every request has a deadline, and no answer from the Worker is ever
+  held beyond 256 KB, so even a Worker gone wrong cannot fill a Pi's memory.
+  The Pi only reads files it named itself (`YYYY-MM-DD_HHMM.jpg` in its day
+  folders); nothing in an answer becomes a file name, a path or a command.
+  It sends nothing during the filming hours, nothing while a dock photo is
+  taken, nothing when memory is short: Pi-hole keeps priority.
+- **Ring is not touched.** Sending reads frames already on the card; it makes
+  no Ring call, and the Ring token never leaves the Pi.
+- **The frames are never public.** Only the videos made from them are. A
+  frame can be read from the Worker only with the builder's secret, and is
+  deleted 3 days after its video is made.
+- **Two secrets, each able to do one job.** The Pis' upload secret can send
+  frames (and the photo, as before); it cannot make or list videos. The
+  builder's `TIMELAPSE_SECRET`, which lives in GitHub, can make videos; it
+  cannot touch the website's photo or the Pis' check-ins. A secret leaked from
+  GitHub could change the timelapse page's videos, nothing else - and
+  everything it can send is checked: an MP4 must start as one, a poster must
+  be a JPEG, both are served as video/image with `nosniff`, and the list is
+  rebuilt by the Worker from its known fields only. Rotating it: a new value
+  in both places (Cloudflare, GitHub).
+- **GitHub's job is closed down.** It never runs for pull requests (their
+  code would otherwise be able to see the secret), may only read the
+  repository, leaves no GitHub token on disk (`persist-credentials: false`),
+  and passes the day typed in "Run workflow" as a value, checked by the
+  builder, never as part of a command. ffmpeg, which reads pictures that
+  came from outside, runs with an environment of `PATH` alone: the secret is
+  not in it. Its tests run on that runner, with its ffmpeg, before anything
+  is made.
+- **The page runs only its own code.** No outside scripts or styles; a
+  Content-Security-Policy allows only its two scripts (by their hashes,
+  checked by `scripts/test_newboathouse.js`), and pictures, videos and data
+  from the club's Worker alone. The list of days is checked again in the
+  browser and shown as text only - nothing from it becomes HTML.
+- **The email** adds one line only from a well formed entry for yesterday,
+  escaped, linking to roworno.com; anything else means no line, never an
+  error.
+- **The repository holds no secret.** The tests use made-up ones.
+
+Worst case, honestly stated: a leaked upload secret could put frames of its
+choosing into a day's video - as it could already replace the website's
+photo. Keep both secrets out of chat, email and files.
+
 ### Supply chain
 
 `ring-client-api` brings a large dependency tree onto a machine serving your
@@ -1331,9 +1494,14 @@ only, replaced at each capture (every 15 minutes), never stored historically.*
 The one exception is the timelapse, when it is on: a frame every 5 minutes in
 daylight (about 110-180 a day) from the Downstream Lot camera, kept on the
 Pis' SD cards (the standby's only for the times it filmed) and, with the Mac's
-evening copy, in that Mac owner's iCloud Drive - never on the website, never
-in git - until the timelapse is made. Its retention answer: *kept by the club
-only for making the construction timelapse, deleted once it is made.*
+evening copy, in that Mac owner's iCloud Drive - never in git - until the
+timelapse is made. Its retention answer: *kept by the club only for making the
+construction timelapse, deleted once it is made.*
+
+With `TIMELAPSE_PUBLISH=1` the frames also go to the Worker, where they are not
+public and are deleted 3 days after the day's video is made. The videos - one
+a day, at 1280x720 - are public on roworno.com/newboathouse and are kept until
+the club removes them.
 
 ---
 
@@ -1341,6 +1509,7 @@ only for making the construction timelapse, deleted once it is made.*
 
 ```bash
 node camera/test_snapshot_service.js
+node camera/test_timelapse_web.js      # the timelapse on the website: the Worker's side and the Pi's
 ```
 
 About 6 minutes. To run it in parts (each takes the quick tests and a third

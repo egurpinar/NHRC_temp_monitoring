@@ -248,6 +248,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .river-unavailable{font-size:.82rem;color:var(--muted);padding:20px 0;text-align:center;}
 .bs-no{background:rgba(224,62,62,.15);color:var(--bad);}
 .note-text{font-family:var(--fsans);font-size:.72rem;color:var(--muted);margin-top:12px;line-height:1.6;padding-top:10px;border-top:1px solid rgba(var(--ink),.06);}
+.camera-timelapse{margin-top:8px;font-family:var(--fsans);font-size:.78rem;line-height:1.6;}
+.camera-timelapse a{color:var(--gold);font-weight:600;text-decoration:none;}
+.camera-timelapse a:hover{text-decoration:underline;}
+.camera-timelapse a:focus-visible{outline:3px solid var(--focus);outline-offset:2px;border-radius:3px;}
 
 /* MINI CARDS */
 .cards-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
@@ -543,6 +547,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         <div id="camera-badge" class="camera-badge" style="display:none;"></div>
       </div>
       <div class="note-text" id="camera-note">Updates automatically, around the clock.</div>
+      <!-- The new boathouse's daily timelapse (newboathouse/index.html). -->
+      <div class="camera-timelapse"><a href="newboathouse/">New boathouse: watch each day's timelapse &rarr;</a></div>
     </div>
 
     <!-- WEATHER CARD -->

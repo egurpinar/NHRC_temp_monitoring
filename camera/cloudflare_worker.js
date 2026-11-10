@@ -57,6 +57,18 @@
  *   Settings -> Variables:      GOVEE_API_KEY (secret) - the club's Govee key
  *                               GOVEE_DEVICE, GOVEE_SKU (optional; default: the current sensor)
  *   Settings -> Triggers:       Cron Trigger  0,15,30,45 * * * *  (every 15 minutes)
+ *
+ * ─── The new boathouse timelapse ────────────────────────────────────────────
+ * Each evening the Pi that filmed the day sends its timelapse frames here
+ * (TIMELAPSE_PUBLISH=1 on the Pi); GitHub's builder (scripts/build_timelapse.js)
+ * turns them into the day's video, the date and time on every frame, and sends
+ * the video back. roworno.com/newboathouse and the morning email read
+ * /timelapse/index.json. The frames themselves are never public. The builder
+ * has a secret of its own, so a secret leaked from GitHub could never put a
+ * photo on the website as the dock camera's.
+ *
+ *   Settings -> Variables:      TIMELAPSE_SECRET (secret) - the same value as the
+ *                               repository's TIMELAPSE_SECRET (GitHub Actions secret)
  */
 
 const OBJECT_KEY = 'latest.jpg';
@@ -110,6 +122,9 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    // Before the photo's PUT below, which answers a PUT to any other address:
+    // a timelapse frame must never become the website's photo.
+    if (url.pathname.startsWith('/timelapse/')) return handleTimelapse(request, env, url);
     if (request.method === 'PUT') return handleUpload(request, env);
     if (request.method === 'POST' && url.pathname === '/heartbeat') return handleHeartbeat(request, env);
     if (request.method === 'OPTIONS' && url.pathname.startsWith('/water/')) return waterPreflight();
@@ -513,8 +528,9 @@ async function handleStatus(env) {
     standby: piSummary('standby', standbyRec, object, now, false),
   };
   const water = await waterStatus(env, now);
+  const timelapse = await timelapseStatus(env);
   if (!object) {
-    return json({ ok: false, reason: 'no snapshot has ever been uploaded', pis, water }, 404);
+    return json({ ok: false, reason: 'no snapshot has ever been uploaded', pis, water, timelapse }, 404);
   }
   const meta = object.customMetadata || {};
   const capturedAt = meta.capturedAt || object.uploaded;
@@ -530,7 +546,368 @@ async function handleStatus(env) {
     sizeBytes: object.size,
     pis,
     water,
+    timelapse,
   });
+}
+
+// ─── The new boathouse timelapse ─────────────────────────────────────────────
+//
+//   the Pi (UPLOAD_SECRET)          PUT    /timelapse/frames/YYYY-MM-DD/HHMM.jpg
+//                                   PUT    /timelapse/frames/YYYY-MM-DD/done-main.json (or done-standby):
+//                                          {"frames": n} - all of that Pi's frames of the day are here
+//                                   GET    /timelapse/frames/YYYY-MM-DD/        what is here already
+//   the builder (TIMELAPSE_SECRET)  GET    /timelapse/frames/                   the days that have frames
+//                                   GET    /timelapse/frames/YYYY-MM-DD/  and  .../HHMM.jpg
+//                                   DELETE /timelapse/frames/YYYY-MM-DD/
+//                                   PUT, DELETE /timelapse/videos/YYYY-MM-DD-<id>.mp4
+//                                   PUT, DELETE /timelapse/posters/YYYY-MM-DD-<id>.jpg
+//                                   PUT    /timelapse/index.json
+//   everyone                        GET    /timelapse/index.json, /timelapse/videos/..., /timelapse/posters/...
+//
+// A video's name changes whenever it is made again (<id> comes from its
+// bytes), so videos and posters can be kept by browsers for good.
+
+const TL_FRAMES = 'timelapse/frames/';
+const TL_INDEX = 'timelapse/index.json';
+const TL_FRAME_MAX = 8 * 1024 * 1024;     // as the photo's
+const TL_POSTER_MAX = 2 * 1024 * 1024;
+const TL_VIDEO_MAX = 95 * 1024 * 1024;    // a Worker accepts 100 MB at most; a day is about 5-15 MB
+const TL_INDEX_MAX = 512 * 1024;
+const TL_DAYS_MAX = 2000;
+const TL_RECENT_DAYS = 40;                // a Pi may send the frames of a day this far back, or tomorrow's (clocks)
+const TL_CORS = { 'Access-Control-Allow-Origin': '*', 'X-Content-Type-Options': 'nosniff' };
+
+const tlText = (status, text, extra = {}) => new Response(text, {
+  status, headers: Object.assign({ 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' }, TL_CORS, extra),
+});
+
+/** A real calendar day, YYYY-MM-DD. */
+function validDay(s) {
+  const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(typeof s === 'string' ? s : '');
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const t = new Date(Date.UTC(y, mo - 1, d));
+  return y >= 2020 && y <= 2100 && t.getUTCMonth() === mo - 1 && t.getUTCDate() === d;
+}
+
+/** A day a Pi may send frames for: from TL_RECENT_DAYS ago to tomorrow. */
+function recentDay(s, now = Date.now()) {
+  if (!validDay(s)) return false;
+  const t = Date.parse(`${s}T12:00:00Z`);
+  return t >= now - TL_RECENT_DAYS * 86400000 && t <= now + 2 * 86400000;
+}
+
+/**
+ * What is wrong with the builder's secret on this Worker, or null. Short, or
+ * the same as the Pis' (which would let either do both jobs), is as good as none.
+ */
+function builderSecretProblem(env) {
+  if (!env.TIMELAPSE_SECRET) return 'TIMELAPSE_SECRET is not set';
+  if (String(env.TIMELAPSE_SECRET).length < 32) return 'TIMELAPSE_SECRET is too short (openssl rand -hex 32 gives 64 characters)';
+  if (env.TIMELAPSE_SECRET === env.UPLOAD_SECRET) return 'TIMELAPSE_SECRET must not be the same as UPLOAD_SECRET';
+  return null;
+}
+
+/** The builder's own secret. Without a usable one on the Worker, nothing of the builder's is allowed. */
+function builderAuthorized(request, env) {
+  const auth = request.headers.get('Authorization') || '';
+  return !builderSecretProblem(env) && timingSafeEqual(auth, `Bearer ${env.TIMELAPSE_SECRET}`);
+}
+
+/** Every key under a prefix, page by page. */
+async function listAll(env, prefix) {
+  const out = [];
+  let cursor;
+  for (let page = 0; page < 50; page++) {
+    const r = await env.BUCKET.list({ prefix, cursor, limit: 1000 });
+    out.push(...(r.objects || []));
+    if (!r.truncated) break;
+    cursor = r.cursor;
+  }
+  return out;
+}
+
+/** One day's frames (name, size) and which Pis have said they sent all of theirs. */
+async function timelapseDay(env, day) {
+  const prefix = `${TL_FRAMES}${day}/`;
+  const frames = [];
+  const done = { main: null, standby: null };
+  for (const o of await listAll(env, prefix)) {
+    const name = o.key.slice(prefix.length);
+    if (/^\d{4}\.jpg$/.test(name)) { frames.push({ name, size: o.size }); continue; }
+    const d = /^done-(main|standby)\.json$/.exec(name);
+    if (!d) continue;
+    try {
+      const rec = await (await env.BUCKET.get(o.key)).json();
+      done[d[1]] = { frames: Number.isInteger(rec.frames) ? rec.frames : null, at: typeof rec.at === 'string' ? rec.at : null };
+    } catch (e) {
+      done[d[1]] = { frames: null, at: null };
+    }
+  }
+  frames.sort((a, b) => (a.name < b.name ? -1 : 1));
+  return { day, frames, done };
+}
+
+/** The days that have frames here. */
+async function timelapseDays(env) {
+  const days = [];
+  let cursor;
+  for (let page = 0; page < 50; page++) {
+    const r = await env.BUCKET.list({ prefix: TL_FRAMES, delimiter: '/', cursor, limit: 1000 });
+    for (const p of r.delimitedPrefixes || []) {
+      const day = p.slice(TL_FRAMES.length).replace(/\/$/, '');
+      if (validDay(day)) days.push(day);
+    }
+    if (!r.truncated) break;
+    cursor = r.cursor;
+  }
+  return days.sort();
+}
+
+/**
+ * A single "bytes=a-b", "bytes=a-" or "bytes=-n" range of a file of `size`
+ * bytes: { start, end }, 'unsatisfiable', or null for none - or for one this
+ * does not do (several ranges, nonsense), which the whole file then answers.
+ */
+function parseRange(header, size) {
+  if (!header) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim());
+  if (!m || (m[1] === '' && m[2] === '')) return null;
+  if (m[1] === '') {
+    const n = Number(m[2]);
+    if (!(n > 0)) return 'unsatisfiable';
+    return { start: Math.max(0, size - n), end: size - 1 };
+  }
+  const start = Number(m[1]);
+  if (m[2] !== '' && Number(m[2]) < start) return null;    // "bytes=5-2": nonsense
+  if (start >= size) return 'unsatisfiable';
+  return { start, end: m[2] === '' ? size - 1 : Math.min(Number(m[2]), size - 1) };
+}
+
+/**
+ * A public file: the index, a video or a poster. Videos are fetched in pieces
+ * (Range) - Safari plays nothing from a server that cannot send them.
+ */
+async function serveTimelapseFile(request, env, key, type, cacheControl) {
+  const head = await env.BUCKET.head(key);
+  if (!head) return tlText(404, 'Not found');
+  const headers = new Headers(TL_CORS);
+  headers.set('Content-Type', type);
+  headers.set('Cache-Control', cacheControl);
+  headers.set('Accept-Ranges', 'bytes');
+  headers.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, ETag');
+  if (head.httpEtag) headers.set('ETag', head.httpEtag);
+  if (head.uploaded) headers.set('Last-Modified', new Date(head.uploaded).toUTCString());
+  const inm = request.headers.get('If-None-Match');
+  if (inm && head.httpEtag && inm === head.httpEtag) return new Response(null, { status: 304, headers });
+  const range = request.method === 'GET' ? parseRange(request.headers.get('Range'), head.size) : null;
+  if (range === 'unsatisfiable') {
+    headers.set('Content-Range', `bytes */${head.size}`);
+    return new Response(null, { status: 416, headers });
+  }
+  if (request.method === 'HEAD') {
+    headers.set('Content-Length', String(head.size));
+    return new Response(null, { status: 200, headers });
+  }
+  if (range) {
+    const part = await env.BUCKET.get(key, { range: { offset: range.start, length: range.end - range.start + 1 } });
+    if (!part) return tlText(404, 'Not found');
+    headers.set('Content-Range', `bytes ${range.start}-${range.end}/${head.size}`);
+    return new Response(part.body, { status: 206, headers });
+  }
+  const whole = await env.BUCKET.get(key);
+  if (!whole) return tlText(404, 'Not found');
+  return new Response(whole.body, { status: 200, headers });
+}
+
+/**
+ * The index the builder sends, kept only if every day in it is well formed -
+ * the website and the email read it - and stored as rebuilt from those days.
+ */
+function sanitizeTimelapseIndex(obj) {
+  if (!obj || typeof obj !== 'object' || !Array.isArray(obj.days) || obj.days.length > TL_DAYS_MAX) return null;
+  const int = (x, lo, hi) => Number.isInteger(x) && x >= lo && x <= hi;
+  const hhmm = (x) => typeof x === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(x);
+  const seen = new Set();
+  const days = [];
+  for (const d of obj.days) {
+    if (!d || typeof d !== 'object' || !validDay(d.date) || seen.has(d.date)) return null;
+    const v = /^videos\/(\d{4}-\d\d-\d\d)-[0-9a-f]{8,16}\.mp4$/.exec(typeof d.video === 'string' ? d.video : '');
+    if (!v || v[1] !== d.date) return null;
+    let poster = null;
+    if (d.poster !== null && d.poster !== undefined) {
+      const p = /^posters\/(\d{4}-\d\d-\d\d)-[0-9a-f]{8,16}\.jpg$/.exec(typeof d.poster === 'string' ? d.poster : '');
+      if (!p || p[1] !== d.date) return null;
+      poster = d.poster;
+    }
+    if (!int(d.frames, 1, 2000) || !int(d.bytes, 1, TL_VIDEO_MAX) || !int(d.width, 16, 4096) || !int(d.height, 16, 4096)) return null;
+    if (!(typeof d.seconds === 'number' && Number.isFinite(d.seconds) && d.seconds > 0 && d.seconds <= 3600)) return null;
+    if (!hhmm(d.first) || !hhmm(d.last) || d.first > d.last) return null;
+    if (typeof d.set !== 'string' || !/^[0-9a-f]{8,64}$/.test(d.set)) return null;
+    seen.add(d.date);
+    days.push({ date: d.date, video: d.video, poster, frames: d.frames, first: d.first, last: d.last,
+      seconds: Math.round(d.seconds * 100) / 100, bytes: d.bytes, width: d.width, height: d.height, set: d.set });
+  }
+  days.sort((a, b) => (a.date < b.date ? 1 : -1));
+  return { updated: new Date().toISOString(), days };
+}
+
+async function handleTimelapse(request, env, url) {
+  const p = url.pathname.slice('/timelapse/'.length);
+  const method = request.method;
+  const read = method === 'GET' || method === 'HEAD';
+  // The builder's routes, when the Worker has no usable secret for it: said
+  // plainly, so the GitHub job's log says what to set.
+  const problem = builderSecretProblem(env);
+  const builder = () => (problem ? null : builderAuthorized(request, env));
+  const notSetUp = () => tlText(503, `The timelapse is not set up on this Worker: ${problem} (camera/README.md)`);
+  try {
+    if (method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: Object.assign({ 'Access-Control-Allow-Methods': 'GET, HEAD',
+        'Access-Control-Allow-Headers': 'Range', 'Access-Control-Max-Age': '86400' }, TL_CORS) });
+    }
+
+    if (p === 'index.json') {
+      if (read) return await serveTimelapseFile(request, env, TL_INDEX, 'application/json', 'public, max-age=300');
+      if (method !== 'PUT') return tlText(405, 'Method not allowed');
+      const ok = builder();
+      if (ok === null) return notSetUp();
+      if (!ok) return tlText(401, 'Unauthorized');
+      const text = await request.text();
+      if (text.length > TL_INDEX_MAX) return tlText(413, 'Too large');
+      let parsed;
+      try { parsed = JSON.parse(text); } catch (e) { return tlText(400, 'Expected JSON'); }
+      const index = sanitizeTimelapseIndex(parsed);
+      if (!index) return tlText(400, 'Not a timelapse index');
+      await env.BUCKET.put(TL_INDEX, JSON.stringify(index), { httpMetadata: { contentType: 'application/json' } });
+      return json({ ok: true, days: index.days.length });
+    }
+
+    let m = /^(videos|posters)\/(\d{4}-\d\d-\d\d)-[0-9a-f]{8,16}\.(mp4|jpg)$/.exec(p);
+    if (m && validDay(m[2]) && (m[1] === 'videos') === (m[3] === 'mp4')) {
+      const key = `timelapse/${p}`;
+      const video = m[1] === 'videos';
+      if (read) {
+        return await serveTimelapseFile(request, env, key, video ? 'video/mp4' : 'image/jpeg', 'public, max-age=31536000, immutable');
+      }
+      if (method !== 'PUT' && method !== 'DELETE') return tlText(405, 'Method not allowed');
+      const ok = builder();
+      if (ok === null) return notSetUp();
+      if (!ok) return tlText(401, 'Unauthorized');
+      if (method === 'DELETE') {
+        await env.BUCKET.delete(key);
+        return json({ ok: true });
+      }
+      if (!video) {
+        const body = await request.arrayBuffer();
+        if (!body.byteLength) return tlText(400, 'Empty body');
+        if (body.byteLength > TL_POSTER_MAX) return tlText(413, 'Too large');
+        if (!looksLikeJpeg(body)) return tlText(415, 'Body is not a JPEG');
+        await env.BUCKET.put(key, body, { httpMetadata: { contentType: 'image/jpeg' } });
+        return json({ ok: true });
+      }
+      // The video goes straight through to storage - a day's video need never
+      // be held in this Worker's memory - and is checked for an MP4's start
+      // ('ftyp') once stored, before anything lists it.
+      const length = Number(request.headers.get('Content-Length'));
+      if (!(length > 0)) return tlText(411, 'Content-Length required');
+      if (length > TL_VIDEO_MAX) return tlText(413, 'Too large');
+      if (!/^video\/mp4\b/.test(request.headers.get('Content-Type') || '')) return tlText(415, 'Expected video/mp4');
+      await env.BUCKET.put(key, request.body, { httpMetadata: { contentType: 'video/mp4' } });
+      const start = await env.BUCKET.get(key, { range: { offset: 0, length: 12 } });
+      const b = start ? new Uint8Array(await start.arrayBuffer()) : new Uint8Array(0);
+      if (!(b.length >= 8 && b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70)) {
+        await env.BUCKET.delete(key);
+        return tlText(415, 'Body is not an MP4 video');
+      }
+      return json({ ok: true });
+    }
+
+    if (p === 'frames/') {
+      if (method !== 'GET') return tlText(405, 'Method not allowed');
+      const ok = builder();
+      if (ok === null) return notSetUp();
+      if (!ok) return tlText(401, 'Unauthorized');
+      return json({ ok: true, days: await timelapseDays(env) });
+    }
+
+    m = /^frames\/(\d{4}-\d\d-\d\d)\/(?:(\d{4})\.jpg|done-(main|standby)\.json)?$/.exec(p);
+    if (m && validDay(m[1])) {
+      const [, day, hhmm, pi] = m;
+      const fromPi = authorized(request, env);
+      if (!hhmm && !pi) {
+        // The day: what is here (the Pi, before sending; the builder), or delete it (the builder).
+        if (method === 'GET') {
+          if (!fromPi && !builderAuthorized(request, env)) return tlText(401, 'Unauthorized');
+          return json(Object.assign({ ok: true }, await timelapseDay(env, day)));
+        }
+        if (method !== 'DELETE') return tlText(405, 'Method not allowed');
+        const ok = builder();
+        if (ok === null) return notSetUp();
+        if (!ok) return tlText(401, 'Unauthorized');
+        const keys = (await listAll(env, `${TL_FRAMES}${day}/`)).map((o) => o.key);
+        for (let i = 0; i < keys.length; i += 1000) await env.BUCKET.delete(keys.slice(i, i + 1000));
+        return json({ ok: true, deleted: keys.length });
+      }
+      if (hhmm) {
+        if (!/^([01]\d|2[0-3])[0-5]\d$/.test(hhmm)) return tlText(404, 'Not found');
+        const key = `${TL_FRAMES}${day}/${hhmm}.jpg`;
+        if (method === 'GET') {
+          if (!builderAuthorized(request, env)) return tlText(401, 'Unauthorized');
+          const o = await env.BUCKET.get(key);
+          if (!o) return tlText(404, 'Not found');
+          return new Response(o.body, { headers: Object.assign({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store' }, TL_CORS) });
+        }
+        if (method !== 'PUT') return tlText(405, 'Method not allowed');
+        if (!fromPi) return tlText(401, 'Unauthorized');
+        if (!recentDay(day)) return tlText(400, 'Not a day the Pi can be sending frames for');
+        if (!(request.headers.get('Content-Type') || '').startsWith('image/')) return tlText(415, 'Expected an image');
+        const body = await request.arrayBuffer();
+        if (!body.byteLength) return tlText(400, 'Empty body');
+        if (body.byteLength > TL_FRAME_MAX) return tlText(413, 'Too large');
+        if (!looksLikeJpeg(body)) return tlText(415, 'Body is not a JPEG');
+        // A frame already here is never replaced: the main Pi and the standby
+        // each send what they filmed, and neither overwrites the other's.
+        if (await env.BUCKET.head(key)) return json({ ok: true, kept: true });
+        await env.BUCKET.put(key, body, { httpMetadata: { contentType: 'image/jpeg' }, customMetadata: { pi: cameraMeta(request).pi } });
+        return json({ ok: true });
+      }
+      // done-<pi>.json: that Pi has sent every frame it has of the day.
+      if (method !== 'PUT') return tlText(405, 'Method not allowed');
+      if (!fromPi) return tlText(401, 'Unauthorized');
+      if (!recentDay(day)) return tlText(400, 'Not a day the Pi can be sending frames for');
+      let body;
+      try {
+        const text = await request.text();
+        if (text.length > 1024) return tlText(413, 'Too large');
+        body = JSON.parse(text);
+      } catch (e) {
+        return tlText(400, 'Expected JSON');
+      }
+      const frames = body && typeof body === 'object' ? body.frames : undefined;
+      if (!(Number.isInteger(frames) && frames >= 0 && frames <= 2000)) return tlText(400, '"frames" must be a whole number');
+      await env.BUCKET.put(`${TL_FRAMES}${day}/done-${pi}.json`, JSON.stringify({ pi, frames, at: new Date().toISOString() }),
+        { httpMetadata: { contentType: 'application/json' } });
+      return json({ ok: true });
+    }
+
+    return tlText(404, 'Not found');
+  } catch (e) {
+    return tlText(503, 'Storage unavailable');
+  }
+}
+
+/** For /status: the newest day with a video, and how many days have one. */
+async function timelapseStatus(env) {
+  try {
+    const o = await env.BUCKET.get(TL_INDEX);
+    if (!o) return { latest: null, days: 0 };
+    const index = await o.json();
+    const days = index && Array.isArray(index.days) ? index.days : [];
+    return { latest: days.length && typeof days[0].date === 'string' ? days[0].date : null, days: days.length };
+  } catch (e) {
+    return 'unavailable';
+  }
 }
 
 function json(obj, status = 200) {

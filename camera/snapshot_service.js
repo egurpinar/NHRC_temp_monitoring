@@ -134,7 +134,8 @@ const CONFIG = {
 
   // TIMELAPSE - off unless TIMELAPSE_EVERY_MINUTES or TIMELAPSE_TIMES is set.
   // Frames from the camera's live video - sharper than its 640x360 snapshots
-  // - saved ON THIS PI, never uploaded. See "Timelapse" below and
+  // - saved ON THIS PI, and uploaded only with TIMELAPSE_PUBLISH=1 (each
+  // evening, for the website's daily video). See "Timelapse" below and
   // camera/README.md.
   timelapse: {
     // At these local times (e.g. "8:00,12:00,15:00"), right after that slot's
@@ -182,6 +183,11 @@ const CONFIG = {
     // after this pause: a battery camera cannot take one while it streams,
     // nor straight after (the snapshot is tried twice, 30 s apart).
     snapshotPauseSeconds: Number(process.env.TIMELAPSE_SNAPSHOT_PAUSE_SECONDS || 20),
+    // 1: each evening, after the day's last frame, send the day's frames to the
+    // Worker, where GitHub makes them into the day's video for the website
+    // (roworno.com/newboathouse). Every-few-minutes timetable only. Off (the
+    // default): nothing leaves the Pi, as before. See createPublisher.
+    publish: String(process.env.TIMELAPSE_PUBLISH || '').trim().toLowerCase(),
   },
 
   // Ring battery cameras cannot take a snapshot while recording, so a capture
@@ -346,6 +352,29 @@ function timelapseProblems(cfg = CONFIG) {
     }
   }
   return problems;
+}
+
+const PUBLISH_ON = ['1', 'yes', 'true', 'on'];
+const PUBLISH_OFF = ['', '0', 'no', 'false', 'off'];
+
+/** TIMELAPSE_PUBLISH is on: the day's frames go to the Worker each evening. */
+function publishOn(cfg = CONFIG) {
+  return !!(cfg.timelapse && PUBLISH_ON.includes(String(cfg.timelapse.publish || '').trim().toLowerCase()));
+}
+
+/**
+ * Problems with TIMELAPSE_PUBLISH. They stop only the sending: the frames are
+ * still taken and kept on the Pi. --check reports them and fails.
+ */
+function publishProblems(cfg = CONFIG) {
+  const v = String((cfg.timelapse && cfg.timelapse.publish) || '').trim().toLowerCase();
+  if (!PUBLISH_ON.includes(v) && !PUBLISH_OFF.includes(v)) {
+    return [`TIMELAPSE_PUBLISH must be 1 (send the frames each evening) or 0 (keep them on the Pi only); it is "${v.slice(0, 20)}"`];
+  }
+  if (PUBLISH_ON.includes(v) && timelapseOn(cfg) && !intervalOn(cfg)) {
+    return ['TIMELAPSE_PUBLISH works with TIMELAPSE_EVERY_MINUTES only (the frames of TIMELAPSE_TIMES are not sent)'];
+  }
+  return [];
 }
 
 /**
@@ -2793,6 +2822,11 @@ function createTimelapse(cfg, deps) {
     } catch (e) {
       logError(`Timelapse: ${e.message}`);
     }
+    // TIMELAPSE_PUBLISH: the finished days' frames to the website - outside
+    // the filming hours only, so never in a capture's way (createPublisher).
+    if (deps.publisher) {
+      try { await deps.publisher.tick(intervalSlot(deps.now(), cfg)); } catch (e) { logError(`Timelapse: ${e.message}`); }
+    }
     try { healthCheck(); } catch (e) { logError(`Timelapse: ${e.message}`); }
     let ms = 60 * 1000;
     try {
@@ -2814,6 +2848,230 @@ function createTimelapse(cfg, deps) {
   }
 
   return { maybeCapture, captureNow, busy: () => busy, intervalTick, noteStopping, state: () => iv };
+}
+
+// ── Sending each day's frames to the Worker (TIMELAPSE_PUBLISH) ──
+//
+// For the website's daily video of the new boathouse: GitHub's builder
+// (scripts/build_timelapse.js) makes it from the frames and puts it on
+// roworno.com/newboathouse. Only outside the filming hours - after sunset, or
+// before sunrise to catch up - so never in a capture's way; never while a dock
+// photo is being taken; never when memory is short; one frame at a time, each
+// read from the card and sent, nothing decoded or converted on the Pi. The
+// frames stay on the Pi as before (the Mac still copies them to iCloud).
+
+const PUBLISH_DAYS = 3;                        // today and the two days before; older days stay on the Pi only
+const PUBLISH_FRAME_TIMEOUT_MS = 60 * 1000;    // each request
+const PUBLISH_BUDGET_MS = 4 * 60 * 1000;       // the most it sends for in one slot...
+const PUBLISH_SLOT_MARGIN_MS = 15 * 1000;      // ...always stopping this long before the next slot
+const PUBLISH_RETRY_MS = 30 * 60 * 1000;       // after a failure, the next try
+const PUBLISH_MEMORY_EXTRA_MB = 20;            // sends only with this much more than TIMELAPSE_MIN_MEMORY_MB available
+const PUBLISH_KEEP_DAYS = 10;                  // days noted as sent are remembered this long
+const PUBLISH_ANSWER_MAX = 256 * 1024;         // the most of any answer from the Worker this Pi will hold
+
+/** JPEG magic bytes, as the Worker checks them: a damaged file is not sent. */
+function looksLikeJpegFile(buf) {
+  return !!buf && buf.length >= 4 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF
+    && buf[buf.length - 2] === 0xFF && buf[buf.length - 1] === 0xD9;
+}
+
+/** The calendar day n days before a YYYY-MM-DD day. */
+function dayBefore(day, n = 1) {
+  return new Date(Date.parse(`${day}T12:00:00Z`) - n * 86400000).toISOString().slice(0, 10);
+}
+
+/**
+ * deps: now(), fetch, dockBusy() (a dock photo under way), availableMb()
+ * (null where it cannot be read), log/logError (the service's own). tick(slot)
+ * is called once a slot by the timelapse (intervalTick), with that slot.
+ */
+function createPublisher(cfg, deps = {}) {
+  const tl = cfg.timelapse;
+  const fetchImpl = deps.fetch || globalThis.fetch;
+  const now = deps.now || (() => new Date());
+  const memory = deps.availableMb || availableMb;
+  const say = deps.log || log;
+  const sayError = deps.logError || logError;
+  const record = path.join(tl.dir, '.published');
+  const pi = cfg.pi === 'standby' ? 'standby' : 'main';
+  const st = { running: false, retryAt: 0, failing: null, failingSince: 0, lastErrorLog: 0, gaveUp: new Set(), refused: new Map() };
+
+  const published = () => {
+    try {
+      return new Set(fs.readFileSync(record, 'utf8').split('\n').map((s) => s.trim()).filter((s) => /^\d{4}-\d\d-\d\d$/.test(s)));
+    } catch (e) { return new Set(); }
+  };
+  const notePublished = (day, today) => {
+    const keep = dayBefore(today, PUBLISH_KEEP_DAYS);
+    const days = [...published(), day].filter((d) => d >= keep);
+    makeDir(tl.dir);
+    saveAtomically(Buffer.from([...new Set(days)].sort().map((d) => `${d}\n`).join('')), record);
+  };
+
+  /** A day's frames on this Pi, oldest first: [{ name: 'HHMM.jpg', file }]. Not tests/ or snapshots. */
+  const localFrames = (day) => {
+    let names = [];
+    try { names = fs.readdirSync(path.join(tl.dir, day)); } catch (e) { return []; }
+    const re = new RegExp(`^${day}_(\\d{4})\\.jpg$`);
+    return names.map((n) => { const m = re.exec(n); return m ? { name: `${m[1]}.jpg`, file: path.join(tl.dir, day, n) } : null; })
+      .filter(Boolean).sort((a, b) => (a.name < b.name ? -1 : 1));
+  };
+
+  /** The day folders on this Pi. */
+  const localDays = () => {
+    try { return fs.readdirSync(tl.dir).filter((d) => /^\d{4}-\d\d-\d\d$/.test(d)).sort(); } catch (e) { return []; }
+  };
+
+  /**
+   * At most `max` bytes of an answer: whatever the Worker sends, this Pi never
+   * holds more than that of it in memory (the answers here are a few KB).
+   */
+  async function readBounded(res, max = PUBLISH_ANSWER_MAX) {
+    if (res.body && typeof res.body.getReader === 'function') {
+      const reader = res.body.getReader();
+      const chunks = [];
+      let size = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.length;
+          if (size > max) throw new Error(`the Worker's answer is over ${max / 1024} KB`);
+          chunks.push(Buffer.from(value));
+        }
+      } finally {
+        try { reader.cancel().catch(() => {}); } catch (e) { /* done */ }
+      }
+      return Buffer.concat(chunks).toString('utf8');
+    }
+    const text = await res.text();
+    if (text.length > max) throw new Error(`the Worker's answer is over ${max / 1024} KB`);
+    return text;
+  }
+
+  /** One request to the Worker, bounded: { status, ok, text }. A transport failure is thrown, said plainly. */
+  async function call(method, pathname, body, headers = {}) {
+    const url = new URL(pathname, cfg.uploadUrl).href;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), deps.timeoutMs || PUBLISH_FRAME_TIMEOUT_MS);
+    try {
+      let res;
+      try {
+        res = await fetchImpl(url, { method, body, signal: ctrl.signal,
+          headers: Object.assign({ Authorization: `Bearer ${cfg.uploadSecret}`, 'X-Camera-Pi': pi }, headers) });
+      } catch (e) {
+        throw new Error(`${hostOf(url)} could not be reached (${ctrl.signal.aborted
+          ? `no answer within ${Math.round((deps.timeoutMs || PUBLISH_FRAME_TIMEOUT_MS) / 1000)} s` : describeCause(e)})`);
+      }
+      let text;
+      try {
+        text = await readBounded(res);
+      } catch (e) {
+        throw new Error(ctrl.signal.aborted ? `${hostOf(url)}: no whole answer within ${Math.round((deps.timeoutMs || PUBLISH_FRAME_TIMEOUT_MS) / 1000)} s`
+          : `${hostOf(url)}: ${e.message}`);
+      }
+      return { status: res.status, ok: res.ok, text };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * A refusal that will not change by trying again: an error that stops this
+   * round. The Worker's words go into the journal as plain printable text only.
+   */
+  const refusal = (r, what) => new Error(`${what}: the Worker answered HTTP ${r.status}`
+    + `${r.text ? ` (${r.text.replace(/[^\x20-\x7e]+/g, ' ').trim().slice(0, 100)})` : ''}`
+    + (r.status === 404 || r.status === 405 ? ' - this Worker does not take timelapse frames yet: update it (camera/README.md)'
+      : r.status === 401 ? ' - the upload secret was refused' : ''));
+
+  /**
+   * Sends what the Worker does not have yet of one day, then says the day is
+   * complete. 'done', or 'later' when it had to stop (time, a dock photo,
+   * memory) - it carries on at the next slot.
+   */
+  async function publishDay(day, today, deadline) {
+    const frames = localFrames(day);
+    if (!frames.length) { notePublished(day, today); return 'done'; }
+    const listing = await call('GET', `/timelapse/frames/${day}/`);
+    if (!listing.ok) throw refusal(listing, 'asking which frames the Worker has');
+    let there;
+    try { there = new Set((JSON.parse(listing.text).frames || []).map((f) => f && f.name)); } catch (e) {
+      throw new Error('asking which frames the Worker has: its answer is not the expected list');
+    }
+    const t0 = now().getTime();
+    let sent = 0, bytes = 0;
+    for (const f of frames) {
+      if (there.has(f.name)) continue;
+      if (now().getTime() > deadline) return 'later';
+      if (deps.dockBusy && deps.dockBusy()) return 'later';
+      const mb = memory();
+      if (mb !== null && mb < tl.minMemoryMb + PUBLISH_MEMORY_EXTRA_MB) return 'later';
+      let buf;
+      try { buf = fs.readFileSync(f.file); } catch (e) { continue; }   // deleted meanwhile
+      const refused = st.refused.get(day) || new Set();
+      if (!looksLikeJpegFile(buf)) { refused.add(f.name); st.refused.set(day, refused); continue; }
+      const r = await call('PUT', `/timelapse/frames/${day}/${f.name}`, buf, { 'Content-Type': 'image/jpeg' });
+      // A frame the Worker will never take (damaged, too large): left out, the rest still sent.
+      if (r.status === 400 || r.status === 413 || r.status === 415) { refused.add(f.name); st.refused.set(day, refused); continue; }
+      if (!r.ok) throw refusal(r, `sending ${day} ${f.name}`);
+      sent++;
+      bytes += buf.length;
+    }
+    const done = await call('PUT', `/timelapse/frames/${day}/done-${pi}.json`, JSON.stringify({ frames: frames.length }),
+      { 'Content-Type': 'application/json' });
+    if (!done.ok) throw refusal(done, `saying ${day} is complete`);
+    notePublished(day, today);
+    const refused = st.refused.get(day);
+    const left = refused && refused.size ? `; ${refused.size} damaged, not sent (${[...refused].slice(0, 5).join(', ')})` : '';
+    say(sent
+      ? `Timelapse ${day}: sent to the website - ${sent} frame${sent === 1 ? '' : 's'}, ${(bytes / 1048576).toFixed(1)} MB, `
+        + `in ${Math.max(1, Math.round((now().getTime() - t0) / 1000))} s${left}.`
+      : `Timelapse ${day}: already on the website (${frames.length} frame${frames.length === 1 ? '' : 's'})${left}.`);
+    st.refused.delete(day);
+    return 'done';
+  }
+
+  /** Once a slot. Never throws; a failure is said (hourly while it lasts) and tried again later. */
+  async function tick(slot) {
+    if (st.running || !slot || slot.inWindow) return;
+    const t = now().getTime();
+    if (t < st.retryAt) return;
+    st.running = true;
+    try {
+      const today = slot.date;
+      // Today's frames only once its filming is over; days before, at any slot outside the filming hours.
+      const todayOver = !!slot.window && slot.minutes > slot.window.until;
+      const first = dayBefore(today, PUBLISH_DAYS - 1);
+      const done = published();
+      const days = localDays().filter((d) => !done.has(d) && d <= today && (d < today || todayOver));
+      for (const d of days.filter((x) => x < first)) {
+        if (st.gaveUp.has(d)) continue;
+        st.gaveUp.add(d);
+        say(`Timelapse ${d}: not sent to the website - more than ${PUBLISH_DAYS} days old now (its frames stay on this Pi).`);
+      }
+      const deadline = Math.min(t + PUBLISH_BUDGET_MS, slot.end - PUBLISH_SLOT_MARGIN_MS);
+      for (const day of days.filter((x) => x >= first)) {
+        if ((await publishDay(day, today, deadline)) === 'later') break;
+      }
+      if (st.failing) say(`Timelapse: sending to the website works again (it failed from ${hhmm(localDateParts(new Date(st.failingSince), cfg).minutes)}).`);
+      st.failing = null;
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (!st.failing) st.failingSince = t;
+      // Said at once, then hourly while it lasts - not every slot.
+      if (st.failing !== msg || t - st.lastErrorLog >= LOG_REPEAT_MS) {
+        sayError(`Timelapse: could not send the frames to the website (${msg}); trying again in ${PUBLISH_RETRY_MS / 60000} min.`);
+        st.lastErrorLog = t;
+      }
+      st.failing = msg;
+      st.retryAt = t + PUBLISH_RETRY_MS;
+    } finally {
+      st.running = false;
+    }
+  }
+
+  return { tick, state: () => st, published, localFrames };
 }
 
 /** The timelapse in one line, for --check and the startup log. */
@@ -2862,7 +3120,13 @@ function setUpTimelapse(hooks) {
   if (work.note) logError(`Timelapse: ${work.note}; recording in ${work.dir} instead.`);
   const swept = sweepWorkRoot(work.dir);
   if (swept) log(`Timelapse: removed ${swept} recording${swept === 1 ? '' : 's'} left behind by an earlier run.`);
+  // TIMELAPSE_PUBLISH: each evening, the day's frames to the Worker for the
+  // website's video - paused while a dock photo is being taken.
+  const publisher = publishOn(CONFIG) && intervalOn(CONFIG) ? createPublisher(CONFIG, {
+    dockBusy: () => { const t = hooks.scheduler(); return !!(t && t.busy()); },
+  }) : null;
   const timelapse = createTimelapse(CONFIG, {
+    publisher,
     camera: hooks.camera,
     now: () => new Date(),
     workRoot: work,
@@ -2882,6 +3146,7 @@ function setUpTimelapse(hooks) {
   log(`Timelapse: ${describeTimelapse(CONFIG)}; recorded in ${work.dir}`
     + `${work.inMemory === true ? ' (in memory)' : work.inMemory === false ? ' (on the SD card)' : ''}`
     + `${hooks.standingBy ? '; on this standby Pi only while it has taken over' : ''}. `
+    + `${publisher ? `Each evening after the last frame, the day's frames go to the website (${hostOf(CONFIG.uploadUrl)}) for its video. ` : ''}`
     + `Test it now with: sudo kill -USR2 ${process.pid}`);
   if (intervalOn(CONFIG)) {
     // Stopped (systemctl stop/restart) during a capture: noted, so the
@@ -2937,6 +3202,13 @@ async function main() {
     logError('Timelapse settings problems - the timelapse is OFF until they are fixed (the dock photos are not affected):');
     tlProblems.forEach(p => console.error('  - ' + p));
   }
+  // A mistake in TIMELAPSE_PUBLISH stops only the sending: the frames are still taken.
+  const pubProblems = publishProblems();
+  if (pubProblems.length) {
+    logError('Timelapse publishing settings problems - the frames are NOT sent to the website until they are fixed '
+      + '(the timelapse itself carries on):');
+    pubProblems.forEach(p => console.error('  - ' + p));
+  }
   const backupCfg = backupConfig(CONFIG);
   const isStandby = CONFIG.pi === 'standby';
   if (args.includes('--check')) {
@@ -2958,7 +3230,12 @@ async function main() {
         + `ffmpeg ${fs.existsSync(CONFIG.timelapse.ffmpegPath) ? 'found' : 'MISSING'}`
       : 'off'}`);
     if (!tlProblems.length && timelapseOn(CONFIG)) log(`  recordings   : ${describeWorkRoot(CONFIG.timelapse)}`);
-    if (tlProblems.length) process.exitCode = 1;
+    if (!tlProblems.length && timelapseOn(CONFIG)) {
+      log(`  to website   : ${pubProblems.length ? 'NOT SENT - TIMELAPSE_PUBLISH has problems (above)' : publishOn(CONFIG)
+        ? `each evening after the last frame, the day's frames -> ${new URL('/timelapse/', CONFIG.uploadUrl).href} (TIMELAPSE_PUBLISH=1)`
+        : 'off - the frames stay on this Pi (TIMELAPSE_PUBLISH=1 sends them for the website\'s daily video)'}`);
+    }
+    if (tlProblems.length || pubProblems.length) process.exitCode = 1;
     return;
   }
   if (tlProblems.length) {
@@ -2966,6 +3243,7 @@ async function main() {
     CONFIG.timelapse.times = [];
     CONFIG.timelapse.everyMinutes = 0;
   }
+  if (pubProblems.length) CONFIG.timelapse.publish = '';
 
   const identity = { ringId: ringIdentity(readToken()), instance: machineIdentity() };
   if (args.includes('--status')) {
@@ -3163,6 +3441,10 @@ module.exports = {
   CHECK_IN_SECONDS, STANDBY_WAKE_OFFSET_MS, RING_RETRY_MS, RING_CHECK_MS, RING_WAIT_MS, LOG_REPEAT_MS,
   ringIdentity, machineIdentity, fmtAgo, checkIn, standbyDecision, sameRingDevice,
   createMainCheckIn, createStandby, ringReadiness, printStatus, runStandby, setUpTimelapse,
+  // Sending the frames to the website
+  publishOn, publishProblems, createPublisher, looksLikeJpegFile, dayBefore,
+  PUBLISH_DAYS, PUBLISH_FRAME_TIMEOUT_MS, PUBLISH_BUDGET_MS, PUBLISH_SLOT_MARGIN_MS, PUBLISH_RETRY_MS,
+  PUBLISH_MEMORY_EXTRA_MB, PUBLISH_KEEP_DAYS, PUBLISH_ANSWER_MAX,
 };
 
 if (require.main === module) {

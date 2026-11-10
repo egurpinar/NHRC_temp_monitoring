@@ -1,0 +1,557 @@
+#!/usr/bin/env node
+/**
+ * Tests for scripts/build_timelapse.js - each day's frames into the video on
+ * roworno.com/newboathouse - with real ffmpeg and the real Worker code
+ * (in-memory R2, served on 127.0.0.1: scripts/worker_harness.js). No network.
+ *
+ * Run: node scripts/test_build_timelapse.js        (TEST_ONLY=<regex> runs some)
+ */
+'use strict';
+const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const B = require('./build_timelapse.js');
+const { memoryR2, serveWorker } = require('./worker_harness.js');
+
+const ONLY = process.env.TEST_ONLY ? new RegExp(process.env.TEST_ONLY) : null;
+let passed = 0, failed = 0, skipped = 0;
+const queue = [];
+function test(name, fn, ms = 60000) { if (!ONLY || ONLY.test(name)) queue.push([name, fn, ms]); }
+function section(title) { queue.push([title, null]); }
+async function run() {
+  for (const [name, fn, ms] of queue) {
+    if (!fn) { console.log(`\n${name}\n${'-'.repeat(name.length)}`); continue; }
+    try {
+      const r = await Promise.race([fn(), new Promise((_, rej) => setTimeout(() => rej(new Error(`timed out after ${ms / 1000} s`)), ms).unref())]);
+      if (r === 'skip') { skipped++; console.log(`  SKIP  ${name}`); continue; }
+      passed++; console.log(`  PASS  ${name}`);
+    } catch (e) {
+      failed++;
+      console.log(`  FAIL  ${name}\n        ${String((e && e.message) || e).split('\n').slice(0, 12).join('\n        ')}`);
+    }
+  }
+  console.log('\n' + '='.repeat(60));
+  console.log(`${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ''}${ONLY ? ` (only ${ONLY})` : ''}`);
+  console.log('='.repeat(60));
+  process.exitCode = failed ? 1 : 0;
+}
+
+const HAVE_FFMPEG = spawnSync('ffmpeg', ['-version']).status === 0 && spawnSync('ffprobe', ['-version']).status === 0;
+const HAVE_FONT = fs.existsSync(B.FONT);
+// Without them (a laptop without ffmpeg), the video tests are skipped - and
+// said so; on GitHub, where the workflow installs both, they always run.
+const needVideo = () => (HAVE_FFMPEG && HAVE_FONT ? null : 'skip');
+if (process.env.GITHUB_ACTIONS === 'true' && !(HAVE_FFMPEG && HAVE_FONT)) {
+  test('ffmpeg and the font are installed on GitHub\'s runner', () => { assert.fail(`ffmpeg ${HAVE_FFMPEG}, font ${HAVE_FONT}`); });
+}
+
+const ET = (iso) => new Date(iso);   // instants are written with their offset
+const today = () => B.localParts(new Date()).day;
+const etDay = (n = 0) => B.dayBefore(today(), -n);
+const PI_SECRET = 'a'.repeat(64), BUILDER_SECRET = 'b'.repeat(64);
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('1. The words in the corner, and when a day is ready');
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('the stamp: weekday, date and the boathouse\'s own time, 12-hour', () => {
+  assert.strictEqual(B.stampText('2026-11-09', '0705'), 'Mon, Nov 9, 2026 · 7:05 AM');
+  assert.strictEqual(B.stampText('2026-11-09', '1200'), 'Mon, Nov 9, 2026 · 12:00 PM');
+  assert.strictEqual(B.stampText('2026-11-09', '0000'), 'Mon, Nov 9, 2026 · 12:00 AM');
+  assert.strictEqual(B.stampText('2026-11-09', '1615'), 'Mon, Nov 9, 2026 · 4:15 PM');
+  assert.strictEqual(B.stampText('2026-11-09', '2359'), 'Mon, Nov 9, 2026 · 11:59 PM');
+  assert.strictEqual(B.stampText('2027-01-01', '0720'), 'Fri, Jan 1, 2027 · 7:20 AM');
+  assert.strictEqual(B.stampText('2028-02-29', '1300'), 'Tue, Feb 29, 2028 · 1:00 PM');
+  // The day daylight saving starts: the Pi names frames by the clock on the wall.
+  assert.strictEqual(B.stampText('2027-03-14', '0715'), 'Sun, Mar 14, 2027 · 7:15 AM');
+});
+
+test('days and the boathouse\'s clock - across month ends, years and daylight saving', () => {
+  assert.strictEqual(B.dayBefore('2026-03-01'), '2026-02-28');
+  assert.strictEqual(B.dayBefore('2027-01-01', 3), '2026-12-29');
+  assert.strictEqual(B.dayBefore('2026-11-10', -1), '2026-11-11');
+  assert.deepStrictEqual(B.localParts(ET('2026-11-01T05:30:00Z')), { day: '2026-11-01', minutes: 90 });   // 1:30 AM EDT
+  assert.deepStrictEqual(B.localParts(ET('2026-11-01T06:30:00Z')), { day: '2026-11-01', minutes: 90 });   // 1:30 AM EST, again
+  assert.deepStrictEqual(B.localParts(ET('2026-11-10T04:59:00Z')), { day: '2026-11-09', minutes: 23 * 60 + 59 });
+  assert.deepStrictEqual(B.localParts(ET('2027-03-14T07:00:00Z')), { day: '2027-03-14', minutes: 180 });   // 3:00 AM EDT
+});
+
+test('a day is ready when a Pi says it has sent all its frames; else from 6 AM the next day; never while still filmed', () => {
+  const at = (iso) => ET(iso);
+  const day = '2026-11-09';
+  assert.deepStrictEqual(B.dayReady(day, { main: { frames: 112 } }, at('2026-11-09T22:00:00Z')).ready, true, 'the evening it was filmed');
+  assert.ok(/the main Pi/.test(B.dayReady(day, { main: { frames: 1 } }, at('2026-11-09T22:00:00Z')).why));
+  assert.ok(/the standby Pi/.test(B.dayReady(day, { main: null, standby: { frames: 1 } }, at('2026-11-09T22:00:00Z')).why));
+  assert.strictEqual(B.dayReady(day, { main: null, standby: null }, at('2026-11-09T22:00:00Z')).ready, false);
+  assert.ok(/still being filmed/.test(B.dayReady(day, null, at('2026-11-09T22:00:00Z')).why));
+  assert.strictEqual(B.dayReady(day, null, at('2026-11-10T10:59:00Z')).ready, false, '5:59 AM the next day');
+  assert.ok(/waiting until 6 AM/.test(B.dayReady(day, null, at('2026-11-10T10:59:00Z')).why));
+  assert.strictEqual(B.dayReady(day, null, at('2026-11-10T11:00:00Z')).ready, true, '6:00 AM the next day');
+  assert.strictEqual(B.dayReady('2026-11-07', null, at('2026-11-10T03:00:00Z')).ready, true, 'older days');
+  assert.strictEqual(B.dayReady('2026-11-11', { main: { frames: 1 } }, at('2026-11-10T03:00:00Z')).ready, false, 'a day to come');
+  // 6 AM by the wall clock, the morning after daylight saving ends (EST) and starts (EDT).
+  assert.strictEqual(B.dayReady('2026-10-31', null, at('2026-11-01T10:59:00Z')).ready, false);
+  assert.strictEqual(B.dayReady('2026-10-31', null, at('2026-11-01T11:00:00Z')).ready, true);
+  assert.strictEqual(B.dayReady('2027-03-13', null, at('2027-03-14T09:59:00Z')).ready, false);
+  assert.strictEqual(B.dayReady('2027-03-13', null, at('2027-03-14T10:00:00Z')).ready, true);
+});
+
+test('what a video is made from: names and sizes, in any order; any change is a new set', () => {
+  const a = [{ name: '0700.jpg', size: 10 }, { name: '0705.jpg', size: 20 }];
+  assert.strictEqual(B.frameSet(a), B.frameSet([a[1], a[0]]));
+  assert.ok(/^[0-9a-f]{12}$/.test(B.frameSet(a)));
+  assert.notStrictEqual(B.frameSet(a), B.frameSet([a[0], { name: '0705.jpg', size: 21 }]));
+  assert.notStrictEqual(B.frameSet(a), B.frameSet([...a, { name: '0710.jpg', size: 5 }]));
+});
+
+test('the index: the day\'s entry replaces any before it; newest first', () => {
+  const idx = { days: [{ date: '2026-11-07', video: 'a' }, { date: '2026-11-08', video: 'b' }, null] };
+  const out = B.mergeIndex(idx, { date: '2026-11-08', video: 'c' });
+  assert.deepStrictEqual(out.days.map((d) => [d.date, d.video]), [['2026-11-08', 'c'], ['2026-11-07', 'a']]);
+  assert.deepStrictEqual(B.mergeIndex(null, { date: '2026-11-09' }).days.map((d) => d.date), ['2026-11-09']);
+  assert.deepStrictEqual(B.mergeIndex({ days: 'junk' }, { date: '2026-11-09' }).days.map((d) => d.date), ['2026-11-09']);
+});
+
+test('the poster is the frame nearest noon; a value in an ffmpeg filter is escaped', () => {
+  assert.strictEqual(B.posterIndex(['0700', '1150', '1215', '1600']), 1);
+  assert.strictEqual(B.posterIndex(['0700', '1155', '1205']), 1, 'a tie: the earlier');
+  assert.strictEqual(B.posterIndex(['1300']), 0);
+  assert.strictEqual(B.filterValue("/a:b\\c'd"), "/a\\:b\\\\c\\'d");
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('2. The video, made with real ffmpeg');
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** A frame like Ring's: a flat grey picture of the given size, as JPEG. */
+function frame(file, size = '1280x720', grey = 128) {
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `color=c=0x${grey.toString(16).padStart(2, '0').repeat(3)}:s=${size}`,
+    '-frames:v', '1', '-q:v', '3', '-y', file]);
+  assert.strictEqual(r.status, 0, String(r.stderr));
+  return file;
+}
+/** Grey pixel values of a region of an image: { mean, spread } (spread = max - min). */
+function region(file, w, h, x, y) {
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-i', file, '-vf', `crop=${w}:${h}:${x}:${y},format=gray`, '-f', 'rawvideo', '-']);
+  assert.strictEqual(r.status, 0, String(r.stderr));
+  const px = r.stdout;
+  let sum = 0, min = 255, max = 0;
+  for (const v of px) { sum += v; if (v < min) min = v; if (v > max) max = v; }
+  return { mean: sum / px.length, spread: max - min, bytes: px };
+}
+function dayOfFrames(sizes, { damaged = [] } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-frames-'));
+  const frames = sizes.map(([hhmm, size]) => {
+    const file = path.join(dir, `${hhmm}.jpg`);
+    if (damaged.includes(hhmm)) fs.writeFileSync(file, Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9]));
+    else frame(file, size);
+    return { name: `${hhmm}.jpg`, file };
+  });
+  return { dir, frames };
+}
+
+test('frames of every size Ring sends, into one 1280x720 H.264 video: a tenth of a second each, ready to play as it loads', async () => {
+  if (needVideo()) return 'skip';
+  const { frames } = dayOfFrames([['0705', '1920x1080'], ['0710', '1280x720'], ['0715', '848x480'], ['1200', '640x360'], ['1610', '1280x720']]);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-'));
+  const v = await B.buildVideo({ day: '2026-11-09', frames, workDir: work });
+  assert.deepStrictEqual([v.frames, v.first, v.last, v.width, v.height, v.skipped], [5, '07:05', '16:10', 1280, 720, []]);
+  assert.ok(Math.abs(v.seconds - 0.5) < 0.05, String(v.seconds));
+  assert.strictEqual(v.bytes, fs.statSync(v.video).size);
+  // By name: ffprobe lists the fields in its own order, which can change between versions.
+  const probe = JSON.parse(spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_name,profile,pix_fmt,width,height',
+    '-of', 'json', v.video], { encoding: 'utf8' }).stdout).streams[0];
+  assert.deepStrictEqual([probe.codec_name, probe.profile, probe.pix_fmt, probe.width, probe.height], ['h264', 'High', 'yuv420p', 1280, 720]);
+  const posterSize = spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', v.poster], { encoding: 'utf8' });
+  assert.strictEqual(posterSize.stdout.trim(), '640,360');
+  const head = fs.readFileSync(v.video).subarray(0, 4096).toString('latin1');
+  assert.ok(head.indexOf('moov') > 0 && (head.indexOf('mdat') < 0 || head.indexOf('moov') < head.indexOf('mdat')), 'the index first');
+});
+
+test('the date and time are on every frame, bottom right - each frame its own; the rest of the picture untouched', async () => {
+  if (needVideo()) return 'skip';
+  const { frames } = dayOfFrames([['0705', '1280x720'], ['0710', '1280x720']]);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-'));
+  await B.buildVideo({ day: '2026-11-09', frames, workDir: work });
+  const [a, b] = ['00001.jpg', '00002.jpg'].map((f) => path.join(work, 'stamped', f));
+  // Bottom right: the dark box and white letters. Top left: the plain grey picture.
+  const corner = region(a, 420, 70, 1280 - 440, 720 - 80);
+  assert.ok(corner.spread > 150, `letters on a dark box: spread ${corner.spread}`);
+  assert.ok(corner.mean < 110, `a dark box: mean ${corner.mean.toFixed(0)} (the picture is 128)`);
+  const plain = region(a, 400, 300, 0, 0);
+  assert.ok(plain.spread < 12 && Math.abs(plain.mean - 128) < 6, `untouched: mean ${plain.mean.toFixed(0)}, spread ${plain.spread}`);
+  assert.ok(!region(b, 420, 70, 1280 - 440, 720 - 80).bytes.equals(corner.bytes), 'the 7:10 frame says something else than the 7:05');
+});
+
+test('a damaged frame is left out and named; too few readable frames is an error, not a video', async () => {
+  if (needVideo()) return 'skip';
+  let { frames } = dayOfFrames([['0705', '1280x720'], ['0710', '1280x720'], ['0715', '1280x720']], { damaged: ['0710'] });
+  const v = await B.buildVideo({ day: '2026-11-09', frames, workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-')) });
+  assert.deepStrictEqual([v.frames, v.skipped, v.first, v.last], [2, ['0710.jpg'], '07:05', '07:15']);
+  ({ frames } = dayOfFrames([['0705', '1280x720'], ['0710', '1280x720']], { damaged: ['0710'] }));
+  await assert.rejects(B.buildVideo({ day: '2026-11-09', frames, workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-')) }),
+    /only 1 of the 2 frames could be read \(0710\.jpg could not\)/);
+});
+
+test('ffmpeg and ffprobe run with the PATH only: the Worker\'s secret never reaches the programs that read the pictures', async () => {
+  if (needVideo()) return 'skip';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-env-'));
+  const seen = path.join(dir, 'env.txt');
+  const real = spawnSync('sh', ['-c', 'command -v ffmpeg'], { encoding: 'utf8' }).stdout.trim();
+  const wrapper = path.join(dir, 'ffmpeg');
+  fs.writeFileSync(wrapper, `#!/bin/sh\nenv >> '${seen}'\nexec '${real}' "$@"\n`, { mode: 0o755 });
+  const { frames } = dayOfFrames([['0705', '1280x720'], ['0710', '1280x720']]);
+  const before = process.env.TIMELAPSE_SECRET;
+  process.env.TIMELAPSE_SECRET = 'the-builder-secret-must-not-leak-0123456789';
+  try {
+    await B.buildVideo({ day: '2026-11-09', frames, workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-')), ffmpeg: wrapper });
+  } finally {
+    if (before === undefined) delete process.env.TIMELAPSE_SECRET; else process.env.TIMELAPSE_SECRET = before;
+  }
+  const env = fs.readFileSync(seen, 'utf8');
+  assert.ok(env.length > 0 && /^PATH=/m.test(env), 'the wrapper ran');
+  assert.ok(!/TIMELAPSE_SECRET|must-not-leak|GITHUB_TOKEN/.test(env), env);
+  assert.deepStrictEqual(Object.keys(B.toolEnv()), ['PATH']);
+});
+
+test('no font, no video - said plainly', async () => {
+  await assert.rejects(B.buildVideo({ day: '2026-11-09', frames: [], workDir: os.tmpdir(), font: '/nowhere/font.ttf' }),
+    /the font \/nowhere\/font\.ttf is not there \(apt install fonts-dejavu-core/);
+});
+
+test('the check refuses a video that would not play while it loads, or has the wrong size or count', async () => {
+  if (needVideo()) return 'skip';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-check-'));
+  const make = (name, args) => { const f = path.join(dir, name); const r = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=gray:s=1280x720:r=10', '-frames:v', '20', ...args, '-y', f]); assert.strictEqual(r.status, 0, String(r.stderr)); return f; };
+  const good = make('good.mp4', ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']);
+  assert.strictEqual((await B.checkVideo(good, 20)).width, 1280);
+  await assert.rejects(B.checkVideo(good, 21), /20 frames for 21 photos/);
+  const slow = make('slow.mp4', ['-c:v', 'libx264', '-pix_fmt', 'yuv420p']);
+  await assert.rejects(B.checkVideo(slow, 20), /the index is not at the front/);
+  const small = path.join(dir, 'small.mp4');
+  spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=gray:s=640x360:r=10', '-frames:v', '20', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', '-y', small]);
+  await assert.rejects(B.checkVideo(small, 20), /640x360/);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('3. With the real Worker: made, sent, listed - once');
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** The real Worker on 127.0.0.1, its R2 in memory; the builder's client for it. */
+async function setUp(extra = {}) {
+  const env = Object.assign({ UPLOAD_SECRET: PI_SECRET, TIMELAPSE_SECRET: BUILDER_SECRET, BUCKET: memoryR2() }, extra.env || {});
+  const host = await serveWorker({ env, intercept: extra.intercept });
+  const client = B.workerClient({ base: host.url, secret: extra.secret || BUILDER_SECRET, backoffMs: 0, timeoutMs: 20000 });
+  const lines = [];
+  const build = (opts = {}) => B.buildFromWorker(Object.assign({ client, say: (l) => lines.push(l) }, opts));
+  /** Frames sent as a Pi sends them (its secret), and its "done". */
+  const send = async (day, times, { done = 'main', size = '1280x720' } = {}) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-send-'));
+    for (const t of times) {
+      const body = fs.readFileSync(frame(path.join(dir, `${t}.jpg`), size));
+      const r = await fetch(`${host.url}/timelapse/frames/${day}/${t}.jpg`, { method: 'PUT', body,
+        headers: { Authorization: `Bearer ${PI_SECRET}`, 'Content-Type': 'image/jpeg', 'X-Camera-Pi': done || 'main' } });
+      assert.strictEqual(r.status, 200, await r.text());
+    }
+    if (done) {
+      const r = await fetch(`${host.url}/timelapse/frames/${day}/done-${done}.json`, { method: 'PUT', body: JSON.stringify({ frames: times.length }),
+        headers: { Authorization: `Bearer ${PI_SECRET}`, 'Content-Type': 'application/json' } });
+      assert.strictEqual(r.status, 200);
+    }
+  };
+  const index = () => { const b = env.BUCKET.bytes('timelapse/index.json'); return b ? JSON.parse(b.toString()) : null; };
+  return { env, host, client, lines, build, send, index, close: () => host.close() };
+}
+const at6pm = (day) => new Date(`${day}T23:00:00Z`);   // 6 or 7 PM at the boathouse
+
+test('a day a Pi has finished: made, sent, listed - the public video plays in pieces, and the poster is there', async () => {
+  if (needVideo()) return 'skip';
+  const w = await setUp();
+  try {
+    const day = etDay(0);
+    await w.send(day, ['0705', '0710', '1200', '1610']);
+    const r = await w.build({ now: at6pm(day) });
+    assert.deepStrictEqual([r.built.length, r.failed, r.waiting], [1, [], []], w.lines.join('\n'));
+    const idx = w.index();
+    const e = idx.days[0];
+    assert.strictEqual(e.date, day);
+    assert.deepStrictEqual([e.frames, e.first, e.last, e.width, e.height], [4, '07:05', '16:10', 1280, 720]);
+    assert.ok(new RegExp(`^videos/${day}-[0-9a-f]{12}\\.mp4$`).test(e.video) && e.poster === e.video.replace('videos/', 'posters/').replace('.mp4', '.jpg'));
+    assert.ok(w.lines.some((l) => new RegExp(`^${day}: made - 4 frames, 07:05 to 16:10, 0\\.4 s, [\\d.]+ MB; took \\d+ s\\.$`).test(l)), w.lines.join('\n'));
+    // As the page asks for it.
+    const res = await fetch(`${w.host.url}/timelapse/${e.video}`, { headers: { Range: 'bytes=0-1' } });
+    assert.strictEqual(res.status, 206);
+    const whole = await fetch(`${w.host.url}/timelapse/${e.video}`);
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-dl-')), 'v.mp4');
+    fs.writeFileSync(file, Buffer.from(await whole.arrayBuffer()));
+    assert.strictEqual((await B.checkVideo(file, 4)).height, 720, 'what is served is the video');
+    assert.strictEqual((await fetch(`${w.host.url}/timelapse/${e.poster}`)).status, 200);
+    // Made once: the next run makes nothing.
+    w.lines.length = 0;
+    const again = await w.build({ now: at6pm(day) });
+    assert.deepStrictEqual([again.built.length, again.failed.length], [0, 0], w.lines.join('\n'));
+  } finally { await w.close(); }
+}, 120000);
+
+test('a late frame: the day is made again, and the video it replaces is deleted', async () => {
+  if (needVideo()) return 'skip';
+  const w = await setUp();
+  try {
+    const day = etDay(-1);
+    await w.send(day, ['0705', '0710']);
+    await w.build({ now: at6pm(etDay(0)) });
+    const first = w.index().days[0];
+    await w.send(day, ['1200'], { done: 'standby' });
+    const r = await w.build({ now: at6pm(etDay(0)) });
+    assert.strictEqual(r.built.length, 1, w.lines.join('\n'));
+    const second = w.index().days[0];
+    assert.strictEqual(second.frames, 3);
+    assert.notStrictEqual(second.video, first.video);
+    const keys = w.env.BUCKET.keys();
+    assert.ok(!keys.includes(`timelapse/${first.video}`) && !keys.includes(`timelapse/${first.poster}`), 'the old one is gone');
+    assert.ok(keys.includes(`timelapse/${second.video}`) && keys.includes(`timelapse/${second.poster}`));
+    assert.ok(w.lines.some((l) => /made again: its frames had changed/.test(l)), w.lines.join('\n'));
+  } finally { await w.close(); }
+}, 120000);
+
+test('not yet: today\'s frames with no Pi done; yesterday\'s before 6 AM - and one frame alone makes no video', async () => {
+  if (needVideo()) return 'skip';
+  const w = await setUp();
+  try {
+    const [d0, d1, d2] = [etDay(0), etDay(-1), etDay(-2)];
+    await w.send(d0, ['0705', '0710'], { done: null });
+    await w.send(d1, ['0705', '0710'], { done: null });
+    await w.send(d2, ['0705'], { done: 'main' });
+    // A time at the boathouse today, whatever its offset from UTC (EST or EDT).
+    const offsetH = (12 * 60 - B.localParts(new Date(`${d0}T12:00:00Z`)).minutes) / 60;
+    const local = (hm) => new Date(Date.parse(`${d0}T${hm}:00Z`) + offsetH * 3600000);
+    let r = await w.build({ now: local('05:00') });
+    assert.deepStrictEqual(r.waiting.sort(), [d0, d1].sort(), w.lines.join('\n'));
+    assert.deepStrictEqual(r.skipped, [d2]);
+    assert.ok(w.lines.some((l) => l === `${d0}: not yet - still being filmed - no Pi has said it has sent all of its frames (2 frames so far).`), w.lines.join('\n'));
+    assert.ok(w.lines.some((l) => new RegExp(`^${d1}: not yet - waiting until 6 AM`).test(l)));
+    assert.strictEqual(w.index(), null, 'nothing made');
+    r = await w.build({ now: local('06:00') });
+    assert.deepStrictEqual(r.built.map((b) => b.date), [d1]);
+  } finally { await w.close(); }
+}, 120000);
+
+test('frames are deleted from the Worker 3 days after their video - kept until then, and never kept past 30 days', async () => {
+  if (needVideo()) return 'skip';
+  const w = await setUp();
+  try {
+    const [d1, d3, d31] = [etDay(-1), etDay(-3), etDay(-31)];
+    await w.send(d1, ['0705', '0710']);
+    await w.send(d3, ['0705', '0710']);
+    await w.env.BUCKET.put(`timelapse/frames/${d31}/0705.jpg`, 'old');     // older than a Pi may send: straight into storage
+    const r = await w.build({ now: at6pm(etDay(0)) });
+    assert.deepStrictEqual(r.built.map((b) => b.date).sort(), [d3, d1].sort(), w.lines.join('\n'));
+    assert.deepStrictEqual(r.pruned.sort(), [d31, d3].sort());
+    const keys = w.env.BUCKET.keys();
+    assert.ok(keys.some((k) => k.startsWith(`timelapse/frames/${d1}/`)), 'yesterday\'s kept, for a late frame');
+    assert.ok(!keys.some((k) => k.startsWith(`timelapse/frames/${d3}/`) || k.startsWith(`timelapse/frames/${d31}/`)));
+    assert.deepStrictEqual(w.index().days.map((d) => d.date), [d1, d3], 'the videos stay');
+  } finally { await w.close(); }
+}, 120000);
+
+test('nothing from the Worker reaches outside its day: odd days, file names and old addresses are left alone', async () => {
+  if (needVideo()) return 'skip';
+  const day = etDay(-1);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-odd-'));
+  const good = fs.readFileSync(frame(path.join(dir, 'good.jpg')));
+  const asked = [], removed = [];
+  const client = {
+    days: async () => ['../../etc', `${day}/../..`, 'not-a-day', day, 42],
+    day: async (d) => { asked.push(`day ${d}`); return { frames: [{ name: '../../escape.jpg', size: 9 }, { name: '0705.jpg', size: good.length },
+      { name: '0710.jpg', size: good.length }, { name: '0715.jpg/../../x', size: 1 }, null], done: { main: { frames: 2 } } }; },
+    frame: async (d, n) => { asked.push(`frame ${d} ${n}`); return good; },
+    index: async () => ({ days: [{ date: day, video: '../latest.jpg', poster: `posters/${etDay(-2)}-0123456789ab.jpg`, set: 'old' }] }),
+    putVideo: async () => {}, putPoster: async () => {}, putIndex: async () => {},
+    remove: async (p) => { removed.push(p); },
+    dropFrames: async () => {},
+  };
+  const r = await B.buildFromWorker({ client, now: at6pm(etDay(0)), say: () => {} });
+  assert.deepStrictEqual(r.built.map((b) => b.date), [day], JSON.stringify(r));
+  assert.deepStrictEqual(asked, [`day ${day}`, `frame ${day} 0705.jpg`, `frame ${day} 0710.jpg`], 'only the real day, only its real frames');
+  assert.deepStrictEqual(removed, [], 'an old entry that is not that day\'s own video is never deleted');
+}, 60000);
+
+test('--day makes that day now, whatever the Pis have said, even if made before', async () => {
+  if (needVideo()) return 'skip';
+  const w = await setUp();
+  try {
+    const day = etDay(0);
+    await w.send(day, ['0705', '0710'], { done: null });
+    let r = await w.build({ now: at6pm(day), onlyDay: day });
+    assert.strictEqual(r.built.length, 1, w.lines.join('\n'));
+    r = await w.build({ now: at6pm(day), onlyDay: day });
+    assert.strictEqual(r.built.length, 1, 'again');
+    assert.strictEqual(w.index().days.length, 1);
+  } finally { await w.close(); }
+}, 120000);
+
+test('the Worker refusing the secret, or without TIMELAPSE_SECRET, or down: said, nothing half-done, a failure', async () => {
+  let w = await setUp({ secret: 'c'.repeat(64) });
+  try {
+    await assert.rejects(w.build({ now: new Date() }), /GET \/timelapse\/frames\/: the Worker answered HTTP 401 \(Unauthorized\)/);
+  } finally { await w.close(); }
+  w = await setUp({ env: { TIMELAPSE_SECRET: undefined } });
+  try {
+    await assert.rejects(w.build({ now: new Date() }), /HTTP 503 \(The timelapse is not set up on this Worker: TIMELAPSE_SECRET is not set/);
+  } finally { await w.close(); }
+  w = await setUp();
+  const url = w.host.url;
+  await w.close();
+  const client = B.workerClient({ base: url, secret: BUILDER_SECRET, backoffMs: 0, timeoutMs: 5000 });
+  await assert.rejects(B.buildFromWorker({ client, say: () => {} }), /the Worker could not be reached \(ECONNREFUSED\)/);
+}, 60000);
+
+test('the index cannot be updated: that day fails (and is tried again next time) - the others go on', async () => {
+  if (needVideo()) return 'skip';
+  let failIndex = true;
+  const w = await setUp({ intercept: (e) => (failIndex && e.method === 'PUT' && e.path === '/timelapse/index.json'
+    ? { status: 500, body: 'R2 busy' } : null) });
+  try {
+    const day = etDay(-1);
+    await w.send(day, ['0705', '0710']);
+    let r = await w.build({ now: at6pm(etDay(0)) });
+    assert.deepStrictEqual(r.failed.map((f) => f.day), [day]);
+    assert.ok(/PUT \/timelapse\/index\.json: the Worker answered HTTP 500 \(R2 busy\)/.test(r.failed[0].error), r.failed[0].error);
+    assert.strictEqual(w.index(), null);
+    assert.ok(!r.pruned.includes(day), 'its frames are kept for the next try');
+    failIndex = false;
+    r = await w.build({ now: at6pm(etDay(0)) });
+    assert.deepStrictEqual(r.built.map((b) => b.date), [day]);
+  } finally { await w.close(); }
+}, 120000);
+
+test('what a server says reaches GitHub\'s log as one line of plain text - never a "::" command of its own', async () => {
+  const w = await setUp({ intercept: (e) => (e.method === 'GET' && /\/timelapse\/frames\/\S+\/$/.test(e.path)
+    ? { status: 400, body: 'bad\n::error title=Injected::not from us\r\n::add-mask::x' } : null) });
+  try {
+    await w.env.BUCKET.put(`timelapse/frames/${etDay(-1)}/0705.jpg`, 'x');
+    const r = await w.build({ now: at6pm(etDay(0)) });
+    const err = r.failed[0].error;
+    assert.ok(/HTTP 400 \(bad ::error title=Injected::not from us ::add-mask::x\)/.test(err), err);
+    assert.ok(!/[\n\r]/.test(err) && w.lines.every((l) => !/\n::/.test(l)), JSON.stringify(err));
+  } finally { await w.close(); }
+}, 60000);
+
+test('a frame the Worker cannot give is tried 3 times, then that day fails - said with the reason', async () => {
+  if (needVideo()) return 'skip';
+  let asked = 0;
+  const w = await setUp({ intercept: (e) => (/\/0710\.jpg$/.test(e.path) && e.method === 'GET' ? (asked++, { status: 503, body: 'Storage unavailable' }) : null) });
+  try {
+    const day = etDay(-1);
+    await w.send(day, ['0705', '0710']);
+    const r = await w.build({ now: at6pm(etDay(0)) });
+    assert.strictEqual(asked, 3);
+    assert.ok(/GET \/timelapse\/frames\/\S+\/0710\.jpg: the Worker answered HTTP 503 \(Storage unavailable\)/.test(r.failed[0].error), r.failed[0].error);
+  } finally { await w.close(); }
+}, 60000);
+
+// ═══════════════════════════════════════════════════════════════════════════
+section('4. Run as GitHub runs it, and by hand');
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SCRIPT = path.join(__dirname, 'build_timelapse.js');
+const runScript = (args, env = {}) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8',
+  env: Object.assign({}, process.env, { GITHUB_ACTIONS: '', GITHUB_STEP_SUMMARY: '' }, env) });
+/** The same, without blocking this process - which may be serving the Worker it talks to. */
+const runScriptAsync = (args, env = {}) => new Promise((resolve) => {
+  const child = require('child_process').spawn(process.execPath, [SCRIPT, ...args],
+    { env: Object.assign({}, process.env, { GITHUB_ACTIONS: '', GITHUB_STEP_SUMMARY: '' }, env) });
+  let stdout = '', stderr = '';
+  child.stdout.on('data', (d) => { stdout += d; });
+  child.stderr.on('data', (d) => { stderr += d; });
+  child.on('close', (status) => resolve({ status, stdout, stderr }));
+});
+
+test('without TIMELAPSE_SECRET: nothing made, said - and not a failure (before it is set up)', () => {
+  const r = runScript([], { TIMELAPSE_SECRET: '', GITHUB_ACTIONS: 'true' });
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  assert.ok(/TIMELAPSE_SECRET is not set: no timelapse made/.test(r.stdout));
+  assert.ok(/^::notice::TIMELAPSE_SECRET is not set/m.test(r.stdout), 'a note on GitHub\'s run page');
+});
+
+test('--day must be a day', () => {
+  const r = runScript(['--day', 'yesterday'], { TIMELAPSE_SECRET: BUILDER_SECRET });
+  assert.strictEqual(r.status, 2);
+  assert.ok(/--day needs a day like 2026-11-09/.test(r.stderr));
+});
+
+test('by hand, from a day\'s folder of frames (as the Mac keeps them): a video file, nothing sent', () => {
+  if (needVideo()) return 'skip';
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-local-'));
+  for (const t of ['0705', '0710', '0715']) frame(path.join(dir, `2026-11-09_${t}.jpg`));
+  fs.writeFileSync(path.join(dir, '2026-11-09_0720_snapshot.jpg'), 'x');
+  const out = path.join(dir, 'day.mp4');
+  const r = runScript(['--frames', dir, '--out', out], { TIMELAPSE_SECRET: '', TIMELAPSE_WORKER: 'http://127.0.0.1:9' });
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  assert.ok(/2026-11-09: \S+day\.mp4 - 3 frames, 07:05 to 07:15, 0\.3 s/.test(r.stdout), r.stdout);
+  assert.ok(fs.statSync(out).size > 0);
+  fs.writeFileSync(path.join(dir, '2026-11-10_0705.jpg'), fs.readFileSync(path.join(dir, '2026-11-09_0705.jpg')));
+  const two = runScript(['--frames', dir], {});
+  assert.strictEqual(two.status, 1);
+  assert.ok(/frames of 2 days in .* one day's folder at a time/.test(two.stderr), two.stderr);
+  const none = runScript(['--frames', fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-empty-'))], {});
+  assert.ok(/no frames named YYYY-MM-DD_HHMM\.jpg/.test(none.stderr));
+});
+
+test('the workflow: evenings and a morning, never for pull requests, read-only, the secret only where the videos are made', () => {
+  const wf = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'timelapse.yml'), 'utf8');
+  const on = /\non:\n([\s\S]*?)\n\S/.exec(wf)[1];
+  assert.deepStrictEqual([...on.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]), ['schedule', 'workflow_dispatch'], 'no pull_request, no push');
+  assert.deepStrictEqual([...wf.matchAll(/- cron: '([^']+)'/g)].map((m) => m[1]), ['45 22 * * *', '15 1 * * *', '45 3 * * *', '30 11 * * *']);
+  assert.ok(/\npermissions:\n {2}contents: read\n/.test(wf), 'reads the repository, writes nothing');
+  assert.ok(/persist-credentials: false/.test(wf), 'no GitHub token left on the runner\'s disk');
+  assert.strictEqual((wf.match(/secrets\.TIMELAPSE_SECRET/g) || []).length, 1, 'the secret goes to one step');
+  const steps = wf.split(/\n {6}- name: /).slice(1);
+  const build = steps.find((s) => /build_timelapse\.js/.test(s) && !/test_build/.test(s));
+  assert.ok(/TIMELAPSE_SECRET: \$\{\{ secrets\.TIMELAPSE_SECRET \}\}/.test(build), 'and it is the build step');
+  assert.ok(/\n {8}run: node scripts\/build_timelapse\.js \$\{DAY:\+--day "\$DAY"\}\n?$/.test(build), build);
+  for (const s of steps) {
+    const run = /\n {8}run: ([\s\S]*)$/.exec(s);
+    assert.ok(!run || !/\$\{\{/.test(run[1]), `nothing typed into "Run workflow" is pasted into a command: ${s.split('\n')[0]}`);
+  }
+  const iTests = steps.findIndex((s) => /test_build_timelapse\.js/.test(s));
+  assert.ok(iTests >= 0 && iTests < steps.indexOf(build), 'its tests first, on that runner');
+  assert.ok(/fonts-dejavu-core/.test(wf) && /ffmpeg/.test(wf));
+});
+
+test('GitHub runs both timelapse suites at each push and every evening, with the clock moved and the network cut off', () => {
+  const tests = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'tests.yml'), 'utf8');
+  assert.ok(/\n {10}node scripts\/run_suite\.js node camera\/test_timelapse_web\.js \|\| fail=1\n/.test(tests));
+  assert.ok(/\n {10}node scripts\/run_suite\.js node scripts\/test_build_timelapse\.js \|\| fail=1\n/.test(tests));
+  assert.ok(/\n {10}node scripts\/run_suite\.js node scripts\/test_newboathouse\.js \|\| fail=1\n/.test(tests));
+  assert.ok(/install -y -qq --no-install-recommends [^\n]*ffmpeg[^\n]*fonts-dejavu-core/.test(tests));
+  const tt = fs.readFileSync(path.join(__dirname, 'test_time_travel.js'), 'utf8');
+  assert.ok(/name: 'timelapse_web',\s+cmd: \['node', 'camera\/test_timelapse_web\.js'\]/.test(tt));
+  assert.ok(/name: 'build_timelapse',\s+cmd: \['node', 'scripts\/test_build_timelapse\.js'\]/.test(tt));
+  assert.ok(/name: 'newboathouse',\s+cmd: \['node', 'scripts\/test_newboathouse\.js'\]/.test(tt));
+});
+
+test('on GitHub: a server\'s words never become a workflow command, even when the whole run fails', async () => {
+  const w = await setUp({ intercept: (e) => (e.path === '/timelapse/frames/'
+    ? { status: 401, body: 'Unauthorized\n::error title=Injected::from the server\n::add-mask::abc' } : null) });
+  try {
+    const r = await runScriptAsync([], { TIMELAPSE_SECRET: BUILDER_SECRET, TIMELAPSE_WORKER: w.host.url, GITHUB_ACTIONS: 'true' });
+    assert.strictEqual(r.status, 1, r.stdout + r.stderr);
+    const lines = (r.stdout + r.stderr).split('\n');
+    assert.ok(!lines.some((l) => /^::(error title=Injected|add-mask)/.test(l)), lines.join('\n'));
+    assert.ok(lines.some((l) => /^::error::GET \/timelapse\/frames\/: the Worker answered HTTP 401 \(Unauthorized ::error title=Injected::from the server ::add-mask::abc\)$/.test(l)), lines.join('\n'));
+  } finally { await w.close(); }
+}, 60000);
+
+test('on GitHub: a failure is an annotation on the run page, and the job fails', async () => {
+  const w = await setUp({ secret: 'c'.repeat(64) });
+  try {
+    const r = await runScriptAsync([], { TIMELAPSE_SECRET: 'c'.repeat(64), TIMELAPSE_WORKER: w.host.url, GITHUB_ACTIONS: 'true' });
+    assert.strictEqual(r.status, 1, r.stdout + r.stderr);
+    assert.ok(/^::error::.*HTTP 401/m.test(r.stdout), r.stdout + r.stderr);
+  } finally { await w.close(); }
+}, 60000);
+
+run();

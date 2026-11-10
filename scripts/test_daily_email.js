@@ -5238,6 +5238,83 @@ test('phone: a chart library that never answers counts as failed after 30 s', as
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+section('18. The new boathouse timelapse: a line at the end, when yesterday\'s is made');
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** A timelapse day as the Worker lists it. */
+const tlDay = (date, extra = {}) => Object.assign({ date, video: `videos/${date}-0123456789ab.mp4`, poster: `posters/${date}-0123456789ab.jpg`,
+  frames: 112, first: '06:35', last: '16:15', seconds: 11.2, bytes: 6000000, width: 1280, height: 720, set: 'abcdef012345' }, extra);
+
+test('timelapse, email: yesterday at the boathouse - by its own calendar, whatever the hour and the offset', () => {
+  const idx = { days: [tlDay('2026-11-09'), tlDay('2026-11-08')] };
+  // 1:05 AM EST on the 10th: yesterday is the 9th.
+  assert.deepStrictEqual(M.timelapseFor(idx, new Date('2026-11-10T06:05:00Z')),
+    { date: '2026-11-09', frames: 112, first: '06:35', last: '16:15', url: 'https://roworno.com/newboathouse/#2026-11-09' });
+  // 11:30 PM EST on the 9th (04:30 UTC on the 10th): yesterday is still the 8th.
+  assert.strictEqual(M.timelapseFor(idx, new Date('2026-11-10T04:30:00Z')).date, '2026-11-08');
+  // The morning the clocks go back, and the new year.
+  assert.strictEqual(M.timelapseFor({ days: [tlDay('2026-10-31')] }, new Date('2026-11-01T06:30:00Z')).date, '2026-10-31');
+  assert.strictEqual(M.timelapseFor({ days: [tlDay('2026-12-31')] }, new Date('2027-01-01T06:05:00Z')).date, '2026-12-31');
+});
+
+test('timelapse, email: no line when yesterday\'s is not made yet, or the list is not well formed - never an error', () => {
+  const at = new Date('2026-11-10T06:05:00Z');
+  for (const idx of [null, undefined, 'x', {}, { days: 'x' }, { days: [] }, { days: [tlDay('2026-11-08')] },
+    { days: [tlDay('2026-11-09', { frames: 0 })] }, { days: [tlDay('2026-11-09', { frames: '112' })] },
+    { days: [tlDay('2026-11-09', { first: '6:35' })] }, { days: [tlDay('2026-11-09', { last: '<b>' })] },
+    { days: [tlDay('2026-11-09', { video: 'videos/2026-11-08-0123456789ab.mp4' })] },
+    { days: [tlDay('2026-11-09', { video: 'https://evil.example/x.mp4' })] },
+    new Proxy({}, { get() { throw new Error('boom'); } })]) {
+    let label = '(a list that throws)';
+    try { label = JSON.stringify(idx === undefined ? 'undefined' : idx); } catch (e) { /* the Proxy */ }
+    assert.strictEqual(M.timelapseFor(idx, at), null, label);
+  }
+});
+
+test('timelapse, email: the line - a link to that day on the page, the day and its hours; plain ASCII, opaque blocks', () => {
+  const d = everyDigest()[0];
+  d.timelapse = M.timelapseFor({ days: [tlDay('2026-11-09')] }, new Date('2026-11-10T06:05:00Z'));
+  const html = M.renderEmailHtml(d);
+  assert.ok(html.includes('<a href="https://roworno.com/newboathouse/#2026-11-09"'), 'a link to that day');
+  assert.ok(/Watch yesterday&rsquo;s timelapse<\/a>\s*&mdash; Mon, Nov 9: 112 photos, 6:35 AM to 4:15 PM\./.test(html), html.slice(html.indexOf('New boathouse') - 200, html.indexOf('New boathouse') + 900));
+  assert.ok(html.indexOf('New boathouse') > html.indexOf('Weather &mdash;') || html.indexOf('New boathouse') > html.indexOf('Weather'), 'after the conditions');
+  assert.ok(html.indexOf('New boathouse') < html.indexOf('View full conditions'), 'before the button and the footer');
+  assert.strictEqual(nonAsciiChars(html).length, 0);
+  assert.ok(!/<style|@media|\sclass=|rgba\(/i.test(html));
+  for (const tag of html.match(/<(td|div)\b[^>]*style="[^"]*"[^>]*>/gi) || []) {
+    const style = tag.match(/style="([^"]*)"/)[1];
+    if (/(^|;)\s*color\s*:/.test(style)) assert.ok(/background-color\s*:/.test(style), `no background: ${tag}`);
+  }
+  d.timelapse = Object.assign({}, d.timelapse, { frames: 1 });
+  assert.ok(/: 1 photo, 6:35 AM/.test(M.renderEmailHtml(d)));
+  // And none without it: the email exactly as before.
+  const plainD = everyDigest()[0];
+  assert.ok(!/New boathouse|newboathouse/.test(M.renderEmailHtml(plainD)));
+  plainD.timelapse = null;
+  assert.ok(!/New boathouse/.test(M.renderEmailHtml(plainD)));
+  assert.strictEqual(M.renderSubject(d), M.renderSubject(plainD), 'the subject never changes for it');
+});
+
+test('timelapse, email: read from the Worker that has the water readings; unreachable, missing or nonsense is no line', async () => {
+  const realFetch = global.fetch;
+  const asked = [];
+  try {
+    global.fetch = async (url, opts) => { asked.push(String(url)); assert.ok(opts && opts.signal, 'with a deadline'); return { ok: true, status: 200, json: async () => ({ days: [tlDay('2026-11-09')] }) }; };
+    const idx = await M.loadTimelapse(logic);
+    assert.deepStrictEqual(asked, [new URL('/timelapse/index.json', logic.WATER_LATEST_URL).href]);
+    assert.strictEqual(idx.days[0].date, '2026-11-09');
+    for (const f of [async () => { throw new Error('offline'); }, async () => ({ ok: false, status: 404, json: async () => ({}) }),
+      async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token'); } })]) {
+      global.fetch = f;
+      assert.strictEqual(await M.loadTimelapse(logic), null);
+    }
+  } finally { global.fetch = realFetch; }
+  const src = fsT.readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8');
+  assert.ok(/loadNwsForecast\(logic\), loadTimelapse\(logic\),\n {2}\]\);/.test(src), 'build() reads it beside the rest, not after');
+  assert.ok(/digest\.timelapse = timelapseFor\(timelapseIndex, new Date\(\)\);/.test(src));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Report only once every async test has actually finished.
 asyncChain.then(() => {
   console.log(`\n${'='.repeat(60)}`);

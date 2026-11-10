@@ -268,6 +268,44 @@ async function fetchJson(url, timeoutMs = 20000, headers = undefined) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The new boathouse timelapse: one line at the end, when yesterday's is made
+// ─────────────────────────────────────────────────────────────────────────────
+// The videos are made each evening on GitHub (scripts/build_timelapse.js) and
+// listed by the Worker. The line is only ever an extra: when the list cannot
+// be read, or yesterday's video is not made yet, the email is as before.
+
+const TIMELAPSE_TIMEOUT_MS = 10000;
+const TIMELAPSE_PAGE = 'https://roworno.com/newboathouse/';
+
+/** The Worker's list of timelapse days, or null - never an error. */
+async function loadTimelapse(logic) {
+  try {
+    return await fetchJson(new URL('/timelapse/index.json', logic.WATER_LATEST_URL).href, TIMELAPSE_TIMEOUT_MS);
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * Yesterday's timelapse (the boathouse's yesterday) from the list, if it is
+ * there and well formed: { date, frames, first, last, url }, or null.
+ */
+function timelapseFor(index, now = new Date()) {
+  try {
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(now);
+    const y = new Date(Date.parse(`${today}T12:00:00Z`) - 86400000).toISOString().slice(0, 10);
+    const days = index && Array.isArray(index.days) ? index.days : [];
+    const d = days.find((x) => x && x.date === y);
+    const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
+    if (!d || !(Number.isInteger(d.frames) && d.frames > 0 && d.frames <= 2000) || !hhmm.test(d.first) || !hhmm.test(d.last)
+        || typeof d.video !== 'string' || !new RegExp(`^videos/${y}-[0-9a-f]{8,16}\\.mp4$`).test(d.video)) return null;
+    return { date: y, frames: d.frames, first: d.first, last: d.last, url: `${TIMELAPSE_PAGE}#${y}` };
+  } catch (e) {
+    return null;
+  }
+}
+
 function parseGaugeSeries(payload) {
   const arr = payload?.data || [];
   return arr
@@ -737,6 +775,26 @@ function toAsciiSubject(s) {
     .trim();
 }
 
+/**
+ * The timelapse line: "Watch yesterday's timelapse - Mon, Nov 9: 112 photos,
+ * 6:35 AM to 4:15 PM." Nothing without one (see timelapseFor).
+ */
+function timelapseRow(t, PAD = 20) {
+  if (!t) return '';
+  const [y, m, day] = t.date.split('-').map(Number);
+  const when = `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date(Date.UTC(y, m - 1, day)).getUTCDay()]}, `
+    + `${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][m - 1]} ${day}`;
+  const clock = (hm) => { const h = Number(hm.slice(0, 2)); return `${h % 12 === 0 ? 12 : h % 12}:${hm.slice(3, 5)} ${h < 12 ? 'AM' : 'PM'}`; };
+  return `
+      <tr><td style="padding:0 ${PAD}px 18px ${PAD}px;background-color:${C.card};">
+        ${sectionLabel('New boathouse')}
+        <div style="font-size:14px;line-height:1.5;color:${C.ink};background-color:${C.card};font-family:Arial,Helvetica,sans-serif;">
+          <a href="${esc(t.url)}" style="color:${C.ink};font-weight:bold;text-decoration:underline;">Watch yesterday&rsquo;s timelapse</a>
+          &mdash; ${esc(when)}: ${Number(t.frames)} photo${t.frames === 1 ? '' : 's'}, ${esc(clock(t.first))} to ${esc(clock(t.last))}.
+        </div>
+      </td></tr>`;
+}
+
 function renderEmailHtml(d) {
   const PAD = 20; // modest padding so 320px screens still have room
 
@@ -937,6 +995,7 @@ ${warningHtml}
         ${fogQuiet}
       </td></tr>
 
+${timelapseRow(d.timelapse, PAD)}
       <tr><td align="center" style="padding:0 ${PAD}px 20px ${PAD}px;background-color:${C.card};">
         <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
           <tr><td style="background-color:${C.rule};border-radius:6px;padding:11px 20px;font-family:Arial,Helvetica,sans-serif;">
@@ -1192,10 +1251,11 @@ async function checkSubscriberHeadroom() {
 async function build() {
   const logic = loadSiteLogic();
   const local = await loadWater(logic);
-  const [river, weather, fogInputs, nwsForecast] = await Promise.all([
-    loadRiver(logic), loadWeather(logic), loadFogInputs(logic), loadNwsForecast(logic),
+  const [river, weather, fogInputs, nwsForecast, timelapseIndex] = await Promise.all([
+    loadRiver(logic), loadWeather(logic), loadFogInputs(logic), loadNwsForecast(logic), loadTimelapse(logic),
   ]);
   const digest = computeDigest(logic, local, river, weather, new Date(), fogInputs, nwsForecast);
+  digest.timelapse = timelapseFor(timelapseIndex, new Date());
   return { digest, html: renderEmailHtml(digest), subject: renderSubject(digest) };
 }
 
@@ -1259,6 +1319,7 @@ async function main() {
 
 module.exports = {
   loadSiteLogic, loadLocalData, loadWater, loadRiver, loadWeather, loadFogInputs, loadNwsForecast, NWS_HEADERS,
+  loadTimelapse, timelapseFor, timelapseRow, TIMELAPSE_PAGE,
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
   parseGaugeSeries, checkSubscriberHeadroom, isInSeason, dailySlug,
   alreadySentToday, isPrimarySendHour,

@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<!-- Only what this page needs, from where it needs it: its own two scripts
+     (by their hashes - scripts/test_newboathouse.js checks them), and the
+     timelapse from the club's Worker. Nothing else can run or load here. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rrqDV8A+5BVbukieSciXebfrs7j0k/Zju4UwfagvbkU=' 'sha256-YeexXQzw1/mYXlAmgXtcaIKl73KvxMMb7oGRLuv1hps='; style-src 'unsafe-inline'; img-src 'self' https://nhrc-camera.gurpinar-emre.workers.dev; media-src https://nhrc-camera.gurpinar-emre.workers.dev; connect-src https://nhrc-camera.gurpinar-emre.workers.dev; base-uri 'none'; form-action 'none'"/>
+<meta name="referrer" content="strict-origin-when-cross-origin"/>
+<title>New Boathouse Timelapse - New Haven Rowing Club</title>
+<meta name="description" content="Each day at the new boathouse: a photo every 5 minutes from sunrise to sunset, as a short video."/>
+<link rel="icon" type="image/png" sizes="32x32" href="../favicon-32.png"/>
+<link rel="icon" type="image/png" sizes="16x16" href="../favicon-16.png"/>
+<link rel="apple-touch-icon" sizes="180x180" href="../apple-touch-icon.png"/>
+<meta name="color-scheme" content="dark light"/>
+<meta name="theme-color" content="#0d1f3c"/>
+<script id="theme-init">
+// Light or dark, as on roworno.com: the visitor's own choice there (or here),
+// otherwise the device's setting - decided before anything is drawn.
+(function () {
+  var t = null;
+  try { t = localStorage.getItem('nhrc-theme'); } catch (e) { /* storage blocked */ }
+  if (t !== 'light' && t !== 'dark') {
+    t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  }
+  document.documentElement.setAttribute('data-theme', t);
+})();
+</script>
+<style>
+/* The site's colours (index.html), both themes. */
+:root{
+  --navy:#0d1f3c;--navy2:#162d52;--navy3:#1e3d6e;--gold:#f0b429;--white:#f4f7fb;--muted:#9baec7;
+  --border:rgba(240,180,41,0.2);--ink:255,255,255;--focus:#ffd166;--bad:#f49494;
+  --glow-blue:rgba(26,111,181,.15);--glow-green:rgba(46,125,79,.1);
+  --fsans:'Helvetica Neue',Helvetica,Arial,sans-serif;color-scheme:dark;
+}
+:root[data-theme="light"]{
+  --navy:#f2f5f9;--navy2:#ffffff;--navy3:#edf1f6;--gold:#8a5c00;--white:#0d1f3c;--muted:#4a5d78;
+  --border:rgba(138,92,0,.28);--ink:13,31,60;--focus:#1a5c96;--bad:#b42318;
+  --glow-blue:rgba(26,111,181,.07);--glow-green:rgba(46,125,79,.05);color-scheme:light;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--navy);color:var(--white);font-family:var(--fsans);min-height:100vh;font-size:16px;}
+body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+  background:radial-gradient(ellipse 70% 50% at 50% 0%,var(--glow-blue),transparent 60%),
+             radial-gradient(ellipse 50% 40% at 90% 100%,var(--glow-green),transparent 60%);}
+#app{position:relative;z-index:1;max-width:900px;margin:0 auto;padding:28px 16px 60px;}
+a{color:var(--gold);}
+a:focus-visible,button:focus-visible,video:focus-visible{outline:3px solid var(--focus);outline-offset:2px;}
+
+.header{position:relative;display:flex;align-items:center;gap:16px;margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--border);padding-right:56px;}
+.header-logo-wrap{width:64px;height:64px;border-radius:50%;background:#ffffff;border:3px solid #0d1f3c;outline:2px solid #f0b429;outline-offset:2px;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.header-logo-wrap img{width:78%;height:78%;object-fit:contain;}
+.header h1{font-size:clamp(1.15rem,3.6vw,1.5rem);font-weight:700;color:var(--gold);}
+.header p{font-size:.78rem;color:var(--muted);margin-top:4px;line-height:1.5;}
+.header .back{display:inline-block;margin-top:6px;font-size:.78rem;text-decoration:none;font-weight:600;}
+.theme-toggle{position:absolute;top:0;right:0;width:44px;height:44px;border-radius:50%;padding:0;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;background:var(--navy2);color:var(--gold);border:1px solid var(--border);}
+.theme-toggle svg{width:22px;height:22px;display:block;}
+.theme-toggle .icon-moon{display:none;}
+:root[data-theme="light"] .theme-toggle .icon-sun{display:none;}
+:root[data-theme="light"] .theme-toggle .icon-moon{display:block;}
+
+.card{background:var(--navy2);border:1px solid var(--border);border-radius:14px;padding:18px 16px;margin-bottom:16px;}
+.label{font-size:.66rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);margin-bottom:8px;}
+#day-title{font-size:1.15rem;font-weight:700;margin-bottom:12px;line-height:1.3;}
+.video-wrap{border-radius:10px;overflow:hidden;border:1px solid rgba(var(--ink),.08);background:#000;line-height:0;aspect-ratio:16/9;}
+.video-wrap video{width:100%;height:100%;display:block;background:#000;}
+.speeds{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;font-size:.78rem;color:var(--muted);}
+.speeds button{min-width:52px;min-height:36px;padding:6px 12px;border-radius:8px;border:1px solid rgba(var(--ink),.25);background:transparent;
+  color:var(--white);font:inherit;font-size:.8rem;cursor:pointer;}
+.speeds button[aria-pressed="true"]{background:var(--gold);border-color:var(--gold);color:var(--navy);font-weight:700;}
+.note{font-size:.8rem;color:var(--muted);margin-top:10px;line-height:1.6;}
+.message{font-size:.9rem;line-height:1.6;color:var(--white);}
+.message.problem{color:var(--bad);}
+
+.days{list-style:none;display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px;}
+.days button{width:100%;padding:0;border:1px solid rgba(var(--ink),.12);border-radius:10px;overflow:hidden;background:var(--navy3);
+  color:var(--white);cursor:pointer;text-align:left;font:inherit;}
+.days button[aria-current="true"]{border-color:var(--gold);box-shadow:0 0 0 2px var(--gold);}
+.days img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#000;}
+.days span{display:block;padding:7px 9px;font-size:.8rem;font-weight:600;}
+.days small{display:block;padding:0 9px 8px;font-size:.7rem;color:var(--muted);font-weight:400;}
+footer{font-size:.74rem;color:var(--muted);line-height:1.7;margin-top:8px;}
+@media (prefers-reduced-motion: reduce){*{transition:none !important;}}
+</style>
+</head>
+<body>
+<div id="app">
+  <header class="header">
+    <div class="header-logo-wrap"><img src="../nhrc-logo-header.png" width="240" height="200" alt="NHRC Logo"/></div>
+    <div>
+      <h1>The New Boathouse</h1>
+      <p>Each day at the building site: a photo every 5 minutes from sunrise to sunset, as a short video.</p>
+      <a class="back" href="../">&larr; Rowing conditions on roworno.com</a>
+    </div>
+    <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to light mode" title="Switch to light mode">
+      <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77M2 12h2.5M19.5 12H22M4.93 19.07l1.77-1.77M17.3 6.7l1.77-1.77"/></svg>
+      <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+  </header>
+
+  <main>
+    <section class="card" id="player-card" aria-labelledby="day-title">
+      <div class="label">Timelapse</div>
+      <h2 id="day-title">Loading the timelapse&hellip;</h2>
+      <div class="video-wrap" id="video-wrap" hidden>
+        <video id="player" controls playsinline preload="metadata" aria-label="The day's timelapse"></video>
+      </div>
+      <div class="speeds" id="speeds" hidden role="group" aria-label="Playback speed">
+        <span>Speed</span>
+        <button type="button" data-rate="0.5" aria-pressed="false">0.5&times;</button>
+        <button type="button" data-rate="1" aria-pressed="true">1&times;</button>
+        <button type="button" data-rate="2" aria-pressed="false">2&times;</button>
+      </div>
+      <p class="note" id="day-note"></p>
+      <p class="message" id="message" hidden></p>
+    </section>
+
+    <section class="card" id="days-card" hidden aria-labelledby="days-title">
+      <div class="label" id="days-title">Every day so far</div>
+      <ul class="days" id="days"></ul>
+    </section>
+  </main>
+
+  <footer>
+    From the club's Downstream Lot camera. Each day's video is made automatically in the evening, from that day's photos;
+    the date and time on each frame are the boathouse's. Days the camera could not film are missing.
+  </footer>
+</div>
+
+<script id="page">
+'use strict';
+// The timelapse lives on the club's Worker (camera/cloudflare_worker.js): the
+// list of days at index.json, each day's video and poster beside it. The
+// list is checked before anything in it is used, and shown only as text.
+const TIMELAPSE_BASE = 'https://nhrc-camera.gurpinar-emre.workers.dev/timelapse/';
+const INDEX_URL = TIMELAPSE_BASE + 'index.json';
+const LOAD_TIMEOUT_MS = 10000;
+const THEME_KEY = 'nhrc-theme';
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+/** A real calendar day, YYYY-MM-DD. */
+function validDate(s) {
+  const m = /^(\d{4})-(\d\d)-(\d\d)$/.exec(typeof s === 'string' ? s : '');
+  if (!m) return false;
+  const t = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return t.getUTCMonth() === Number(m[2]) - 1 && t.getUTCDate() === Number(m[3]);
+}
+
+/**
+ * The days in the list that are well formed - their video and poster on the
+ * Worker, under their own day's name - newest first. Anything else is left out.
+ */
+function daysFrom(index) {
+  const list = index && Array.isArray(index.days) ? index.days : [];
+  const hhmm = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const out = [];
+  for (const d of list) {
+    if (!d || typeof d !== 'object' || !validDate(d.date)) continue;
+    const video = typeof d.video === 'string' && new RegExp(`^videos/${d.date}-[0-9a-f]{8,16}\\.mp4$`).test(d.video) ? d.video : null;
+    if (!video) continue;
+    const poster = typeof d.poster === 'string' && new RegExp(`^posters/${d.date}-[0-9a-f]{8,16}\\.jpg$`).test(d.poster) ? d.poster : null;
+    out.push({
+      date: d.date, video, poster,
+      frames: Number.isInteger(d.frames) && d.frames > 0 ? d.frames : null,
+      first: hhmm.test(d.first) ? d.first : null,
+      last: hhmm.test(d.last) ? d.last : null,
+      seconds: typeof d.seconds === 'number' && d.seconds > 0 ? d.seconds : null,
+    });
+  }
+  out.sort((a, b) => (a.date < b.date ? 1 : -1));
+  return out.filter((d, i) => i === 0 || d.date !== out[i - 1].date);
+}
+
+/** "Monday, November 9, 2026". */
+function dayTitle(date) {
+  const [y, m, d] = date.split('-').map(Number);
+  return `${WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]}, ${MONTHS[m - 1]} ${d}, ${y}`;
+}
+
+/** "Mon, Nov 9" - for the list. */
+function shortDay(date) {
+  const [y, m, d] = date.split('-').map(Number);
+  return `${WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()].slice(0, 3)}, ${MONTHS[m - 1].slice(0, 3)} ${d}`;
+}
+
+/** "06:35" -> "6:35 AM". */
+function clock12(hhmm) {
+  const h = Number(hhmm.slice(0, 2));
+  return `${h % 12 === 0 ? 12 : h % 12}:${hhmm.slice(3, 5)} ${h < 12 ? 'AM' : 'PM'}`;
+}
+
+/** "112 photos, 6:35 AM to 4:15 PM - 11 seconds". */
+function dayNote(d) {
+  const parts = [];
+  if (d.frames) parts.push(`${d.frames} photo${d.frames === 1 ? '' : 's'}`);
+  if (d.first && d.last) parts.push(`${clock12(d.first)} to ${clock12(d.last)}`);
+  let s = parts.join(', ');
+  if (d.seconds) {
+    const n = Math.max(1, Math.round(d.seconds));
+    s += `${s ? ' - ' : ''}${n} second${n === 1 ? '' : 's'}`;
+  }
+  return s;
+}
+
+/** The day the address asks for (#2026-11-09), if it is in the list; else the newest. */
+function pickDay(days, hash) {
+  const want = String(hash || '').replace(/^#/, '');
+  return days.find((d) => d.date === want) || days[0] || null;
+}
+
+// ─── On the page ─────────────────────────────────────────────────────────────
+
+const $ = (id) => document.getElementById(id);
+
+function show(id, on) { const el = $(id); if (el) el.hidden = !on; }
+
+function say(text, problem) {
+  const el = $('message');
+  el.textContent = text;
+  el.className = problem ? 'message problem' : 'message';
+  el.hidden = !text;
+}
+
+let current = null;
+
+function select(d, days, push) {
+  current = d;
+  const player = $('player');
+  $('day-title').textContent = dayTitle(d.date);
+  $('day-note').textContent = dayNote(d);
+  if (d.poster) player.setAttribute('poster', TIMELAPSE_BASE + d.poster); else player.removeAttribute('poster');
+  player.src = TIMELAPSE_BASE + d.video;
+  player.playbackRate = Number(document.querySelector('#speeds button[aria-pressed="true"]').getAttribute('data-rate')) || 1;
+  say('', false);
+  for (const b of document.querySelectorAll('#days button')) b.setAttribute('aria-current', b.getAttribute('data-date') === d.date ? 'true' : 'false');
+  if (push) { try { history.replaceState(null, '', `#${d.date}`); } catch (e) { /* only the address */ } }
+}
+
+function renderDays(days) {
+  const list = $('days');
+  list.textContent = '';
+  for (const d of days) {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('data-date', d.date);
+    b.setAttribute('aria-label', `Watch ${dayTitle(d.date)}`);
+    if (d.poster) {
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.alt = '';
+      img.src = TIMELAPSE_BASE + d.poster;
+      b.appendChild(img);
+    }
+    const name = document.createElement('span');
+    name.textContent = shortDay(d.date);
+    b.appendChild(name);
+    if (d.frames) {
+      const small = document.createElement('small');
+      small.textContent = `${d.frames} photos`;
+      b.appendChild(small);
+    }
+    b.addEventListener('click', () => {
+      select(d, days, true);
+      try { $('player-card').scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { /* old browser */ }
+    });
+    li.appendChild(b);
+    list.appendChild(li);
+  }
+  show('days-card', days.length > 1);
+}
+
+async function loadIndex() {
+  const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = setTimeout(() => { if (ctrl) ctrl.abort(); }, LOAD_TIMEOUT_MS);
+  try {
+    const res = await fetch(INDEX_URL, { signal: ctrl ? ctrl.signal : undefined });
+    if (res.status === 404) return { days: [] };
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function start() {
+  let days;
+  try {
+    days = daysFrom(await loadIndex());
+  } catch (e) {
+    $('day-title').textContent = 'The timelapse could not be loaded';
+    say('It could not be reached just now. Please try again in a few minutes.', true);
+    return;
+  }
+  if (!days.length) {
+    $('day-title').textContent = 'No timelapse yet';
+    say('The first video appears the evening after the camera\'s first full day of photos.', false);
+    return;
+  }
+  show('video-wrap', true);
+  show('speeds', true);
+  renderDays(days);
+  select(pickDay(days, location.hash), days, false);
+}
+
+function initSpeeds() {
+  for (const b of document.querySelectorAll('#speeds button')) {
+    b.addEventListener('click', () => {
+      for (const o of document.querySelectorAll('#speeds button')) o.setAttribute('aria-pressed', o === b ? 'true' : 'false');
+      $('player').playbackRate = Number(b.getAttribute('data-rate')) || 1;
+    });
+  }
+  // A new video starts at the chosen speed too.
+  $('player').addEventListener('loadedmetadata', () => {
+    const on = document.querySelector('#speeds button[aria-pressed="true"]');
+    $('player').playbackRate = on ? Number(on.getAttribute('data-rate')) || 1 : 1;
+  });
+  $('player').addEventListener('error', () => {
+    if (current) say('This day\'s video could not be played. Please try again later, or pick another day.', true);
+  });
+}
+
+// Light / dark, as on roworno.com - the same choice, kept for both pages.
+function currentTheme() { return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; }
+function updateThemeToggle() {
+  const btn = $('theme-toggle');
+  const label = `Switch to ${currentTheme() === 'dark' ? 'light' : 'dark'} mode`;
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('title', label);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', currentTheme() === 'light' ? '#f2f5f9' : '#0d1f3c');
+}
+function initThemeToggle() {
+  $('theme-toggle').addEventListener('click', () => {
+    const next = currentTheme() === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* this visit only */ }
+    updateThemeToggle();
+  });
+  updateThemeToggle();
+}
+
+if (typeof window !== 'undefined' && typeof document !== 'undefined' && document.getElementById) {
+  window.addEventListener('DOMContentLoaded', () => {
+    try { initThemeToggle(); } catch (e) { /* the switch only */ }
+    try { initSpeeds(); } catch (e) { /* the speed buttons only */ }
+    start();
+  });
+  window.addEventListener('hashchange', () => {
+    // A link to another day (#2026-11-08) while the page is open.
+    const list = document.querySelectorAll('#days button');
+    if (!list.length) return;
+    const want = location.hash.replace(/^#/, '');
+    const b = [...list].find((x) => x.getAttribute('data-date') === want);
+    if (b) b.click();
+  });
+}
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { TIMELAPSE_BASE, INDEX_URL, validDate, daysFrom, dayTitle, shortDay, clock12, dayNote, pickDay };
+}
+</script>
+</body>
+</html>

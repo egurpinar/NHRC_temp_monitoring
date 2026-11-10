@@ -1,0 +1,74 @@
+name: Timelapse
+
+# The new boathouse timelapse (roworno.com/newboathouse): each finished day's
+# frames - sent to the Worker after sunset by the Pi that filmed them - made
+# into the day's video, with the date and time on every frame, and listed for
+# the page and the morning email (scripts/build_timelapse.js).
+#
+# WHEN
+# ----
+# A few tries each evening, and one the next morning: GitHub starts scheduled
+# runs late, sometimes by hours, and a Pi sends a day's frames only after its
+# last one (sunset: 4:25 PM in December, 8:30 PM in June). A run with nothing
+# to make changes nothing and takes a minute. The morning run makes any day no
+# Pi called complete (scripts/build_timelapse.js: from 6 AM the day after).
+#
+# SECRETS
+# -------
+# TIMELAPSE_SECRET - the builder's own secret on the Worker: it can make the
+# timelapse's videos, never the website's photo. Until it is set, each run says
+# so and does nothing (camera/README.md, "The timelapse on the website").
+#
+# This workflow never runs for pull requests (their code must never see the
+# secret), may only read the repository, and pushes nothing.
+
+on:
+  schedule:
+    - cron: '45 22 * * *'   # 5:45 PM EST / 6:45 PM EDT
+    - cron: '15 1 * * *'    # 8:15 PM EST / 9:15 PM EDT
+    - cron: '45 3 * * *'    # 10:45 PM EST / 11:45 PM EDT
+    - cron: '30 11 * * *'   # 6:30 AM EST / 7:30 AM EDT: days no Pi called complete
+  workflow_dispatch:
+    inputs:
+      day:
+        description: 'One day to make now, like 2026-11-09 - even if made before (empty: every finished day not made yet)'
+        required: false
+        default: ''
+
+concurrency:
+  group: timelapse
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: ffmpeg, and the font for the date and time
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg fonts-dejavu-core
+
+      # On this runner, with its ffmpeg, before anything is made: a broken
+      # builder makes no video rather than a wrong one.
+      - name: The timelapse's tests
+        run: node scripts/run_suite.js node scripts/test_build_timelapse.js
+
+      - name: Make the finished days' videos
+        env:
+          TIMELAPSE_SECRET: ${{ secrets.TIMELAPSE_SECRET }}
+          # The day typed in "Run workflow", passed as a value - never as part
+          # of the command - and checked by the builder (YYYY-MM-DD only).
+          DAY: ${{ github.event.inputs.day }}
+        run: node scripts/build_timelapse.js ${DAY:+--day "$DAY"}
