@@ -57,6 +57,7 @@ const SHARP_HEIGHT = 720;
 // tens of MB, joined from each day's piece ("segment") without re-encoding.
 const SLOT_MINUTES = 15;
 const CHUNK_MAX_BYTES = 90 * 1024 * 1024;   // the Worker takes 95 MB at most
+const CHUNK_SMALLER_CRF = [CRF + 4, CRF + 8]; // a chunk over that, re-encoded at these qualities until it fits
 const INDEX_WARN_BYTES = 800 * 1024;          // the Worker takes 1 MB of index: about three years of days
 // The font for the date and time: DejaVu Sans Bold on GitHub's runner (apt
 // install fonts-dejavu-core), Arial Bold on a Mac; TIMELAPSE_FONT overrides.
@@ -367,19 +368,20 @@ async function encoding(file, ffprobe = process.env.FFPROBE || 'ffprobe') {
  * order. Without re-encoding when they are all encoded alike, with no
  * B-frames - always, unless ffmpeg changed between the days; then re-encoded,
  * every frame kept, rather than joined into a video that breaks where the
- * encoding changes. Checked like any video. Returns { file, joined: 'copied'
- * or 're-encoded' }.
+ * encoding changes. Checked like any video. `crf`: re-encoded at that
+ * quality whatever the pieces (a chunk too large to send, made smaller).
+ * Returns { file, joined: 'copied' or 're-encoded' }.
  */
-async function joinSegments({ files, frames, workDir, ffmpeg = process.env.FFMPEG || 'ffmpeg', ffprobe = process.env.FFPROBE || 'ffprobe' }) {
+async function joinSegments({ files, frames, workDir, crf = null, ffmpeg = process.env.FFMPEG || 'ffmpeg', ffprobe = process.env.FFPROBE || 'ffprobe' }) {
   const list = path.join(workDir, 'segments.txt');
   fs.writeFileSync(list, files.map((f) => `file '${f.replace(/'/g, "'\\''")}'\n`).join(''));
   const out = path.join(workDir, 'chunk.mp4');
   const kinds = new Set();
   for (const f of files) kinds.add(await encoding(f, ffprobe));
-  const alike = kinds.size === 1 && JSON.parse([...kinds][0])[6] === 0;
+  const alike = crf === null && kinds.size === 1 && JSON.parse([...kinds][0])[6] === 0;
   const args = alike ? ['-c', 'copy']
     : ['-vf', `scale=${WIDTH}:${HEIGHT}:flags=lanczos:out_range=tv,setsar=1`, '-r', String(FPS), '-c:v', 'libx264', '-preset', 'medium',
-      '-crf', String(CRF), '-g', String(GOP), '-bf', '0', '-profile:v', 'high', '-pix_fmt', 'yuv420p', ...LIMITED_RANGE];
+      '-crf', String(crf === null ? CRF : crf), '-g', String(GOP), '-bf', '0', '-profile:v', 'high', '-pix_fmt', 'yuv420p', ...LIMITED_RANGE];
   const r = await runTool(ffmpeg, ['-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, ...args, '-an', '-movflags', '+faststart', '-y', out], 600000);
   if (r.code !== 0) throw new Error(`ffmpeg could not join the timelapse's pieces: ${r.stderr.trim().split('\n').slice(-3).join(' / ')}`);
   await checkVideo(out, frames, ffprobe);
@@ -438,7 +440,10 @@ function workerClient({ base = WORKER, secret, fetchImpl = globalThis.fetch, bac
         // Plain printable text only: what a server says must never reach the
         // log as a line of its own - on GitHub, "::" at a line's start is a command.
         const text = (await res.text().catch(() => '')).replace(/[^\x20-\x7e]+/g, ' ').trim().slice(0, 200);
-        last = new Error(`${method} ${p}: the Worker answered HTTP ${res.status}${text ? ` (${text})` : ''}`);
+        // Refused: GitHub's secret is not the Worker's. What to do, in the log.
+        const hint = res.status === 401 && auth ? ' - GitHub\'s TIMELAPSE_SECRET is not the Worker\'s: set both again from one value'
+          + ' (camera/README.md, "The timelapse on the website")' : '';
+        last = new Error(`${method} ${p}: the Worker answered HTTP ${res.status}${text ? ` (${text})` : ''}${hint}`);
         if (res.status < 500) throw Object.assign(last, { final: true });   // refused: trying again changes nothing
       } catch (e) {
         if (e.final) throw e;
@@ -593,8 +598,12 @@ function chunkDays(index) {
   return new Map([...out].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
 }
 
-/** Makes again each chunk that does not match its days; returns the index as it now is. */
-async function rebuildChunks({ client, index, result, say, tools = {} }) {
+/**
+ * Makes again each chunk that does not match its days; returns the index as it
+ * now is. A chunk over `maxBytes` (busy summer days: up to 11 days of 60 frames)
+ * is re-encoded at a lower quality until it fits, rather than never sent.
+ */
+async function rebuildChunks({ client, index, result, say, tools = {}, maxBytes = CHUNK_MAX_BYTES }) {
   const wanted = chunkDays(index);
   const had = new Map(((index.timeline && Array.isArray(index.timeline.chunks)) ? index.timeline.chunks : [])
     .filter((c) => c && typeof c.start === 'string').map((c) => [c.start, c]));
@@ -611,9 +620,17 @@ async function rebuildChunks({ client, index, result, say, tools = {} }) {
         files.push(f);
       }
       const frames = days.reduce((n, d) => n + d.timeline.split(',').length, 0);
-      const { file, joined } = await joinSegments(Object.assign({ files, frames, workDir: work }, tools));
-      const bytes = fs.readFileSync(file);
-      if (bytes.length > CHUNK_MAX_BYTES) throw new Error(`the timelapse from ${start} would be ${(bytes.length / 1048576).toFixed(0)} MB - over ${CHUNK_MAX_BYTES / 1048576} MB`);
+      let { file, joined } = await joinSegments(Object.assign({ files, frames, workDir: work }, tools));
+      let bytes = fs.readFileSync(file);
+      let smaller = null;
+      for (const crf of CHUNK_SMALLER_CRF) {
+        if (bytes.length <= maxBytes) break;
+        ({ file, joined } = await joinSegments(Object.assign({ files, frames, workDir: work, crf }, tools)));
+        bytes = fs.readFileSync(file);
+        smaller = crf;
+      }
+      const mb = (n) => (n / 1048576).toFixed(n < 10 * 1048576 ? 1 : 0);
+      if (bytes.length > maxBytes) throw new Error(`the timelapse from ${start} would be ${mb(bytes.length)} MB, even made smaller - over ${mb(maxBytes)} MB`);
       const id = crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 12);
       const entry = { start, video: `whole/${start}-${id}.mp4`, frames, seconds: Math.round(frames / FPS * 100) / 100, bytes: bytes.length,
         days: days.map((d) => ({ date: d.date, set: d.set, times: d.timeline })) };
@@ -624,7 +641,8 @@ async function rebuildChunks({ client, index, result, say, tools = {} }) {
       await client.putIndex(index);
       if (before && before.video !== entry.video && ownFile(before.video, 'whole', start, 'mp4')) await client.remove(before.video).catch(() => {});
       say(`The continuous timelapse from ${start}: made - ${days.length} day${days.length === 1 ? '' : 's'}, ${frames} frames, `
-        + `${entry.seconds} s, ${(bytes.length / 1048576).toFixed(1)} MB${joined === 'copied' ? '' : ' (re-encoded: its pieces were not all encoded alike)'}.`);
+        + `${entry.seconds} s, ${(bytes.length / 1048576).toFixed(1)} MB${smaller !== null ? ` (re-encoded smaller to fit, quality ${smaller})`
+          : joined === 'copied' ? '' : ' (re-encoded: its pieces were not all encoded alike)'}.`);
       result.chunks = (result.chunks || []).concat(start);
     } catch (e) {
       const error = String((e && e.message) || e).replace(/[^\x20-\x7e]+/g, ' ').trim().slice(0, 500);
@@ -679,7 +697,8 @@ async function main(argv = process.argv.slice(2)) {
     console.error(`--day needs a day like 2026-11-09 (it was "${onlyDay}")`);
     return 2;
   }
-  const secret = process.env.TIMELAPSE_SECRET || '';
+  // Spaces and line breaks around a pasted secret are not part of it (the Worker leaves them out too).
+  const secret = (process.env.TIMELAPSE_SECRET || '').trim();
   if (!secret) {
     const msg = 'TIMELAPSE_SECRET is not set: no timelapse made. To set it up, see camera/README.md, "The timelapse on the website".';
     console.log(msg);
@@ -711,7 +730,7 @@ if (require.main === module) {
 module.exports = {
   WORKER, WIDTH, HEIGHT, FPS, GOP, MIN_FRAMES, READY_HOUR, KEEP_FRAMES_DAYS, DROP_FRAMES_DAYS, FONT, FONTS, LOGO, LOGO_HEIGHT,
   stampFilter, look, LIMITED_RANGE, stampText, clock, dayBefore, localParts, dayReady, frameSet, mergeIndex, posterIndex, filterValue, toolEnv, ownFile,
-  SHARP_HEIGHT, SLOT_MINUTES, CHUNK_MAX_BYTES, jpegSize, frameMinutes, sharpFrames, slotPicks, chunkStart, chunkDays,
+  SHARP_HEIGHT, SLOT_MINUTES, CHUNK_MAX_BYTES, CHUNK_SMALLER_CRF, jpegSize, frameMinutes, sharpFrames, slotPicks, chunkStart, chunkDays,
   rebuildChunks, joinSegments, encoding, sequence, encode,
   buildVideo, checkVideo, workerClient, downloadFrames, buildFromWorker, framesFromFolder, main,
 };

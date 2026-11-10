@@ -651,6 +651,60 @@ test('the continuous timelapse: each chunk made from its days\' pieces - and mad
   } finally { await w.close(); }
 }, 150000);
 
+test('a chunk too large to send (busy summer days): re-encoded smaller until it fits, said so - and if even that is too large, that chunk fails, said', async () => {
+  if (needVideo()) return 'skip';
+  const w = await setUp();
+  try {
+    // Busy pictures (rain, leaves): every frame different noise, which compresses worst.
+    const noisy = (dir, t) => {
+      const f = path.join(dir, `${t}.jpg`);
+      const r = spawnSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=gray:s=1280x720', '-vf', `noise=alls=50:allf=t+u:all_seed=${Number(t)}`,
+        '-frames:v', '1', '-q:v', '3', '-y', f]);
+      assert.strictEqual(r.status, 0, String(r.stderr));
+      return { name: `${t}.jpg`, file: f };
+    };
+    const entries = [];
+    for (const [day, times] of [['2026-11-09', ['0700', '0715', '0730']], ['2026-11-10', ['0800', '0815']]]) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-noisy-'));
+      const v = await B.buildVideo({ day, frames: times.map((t) => noisy(dir, t)), workDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-work-')) });
+      await w.client.putSegment(day, fs.readFileSync(v.segment));
+      entries.push(dayEntry(day, `${day.replace(/-/g, '')}aa`, v.timeline.join(',')));
+    }
+    const index = { days: entries.slice().reverse() };
+    // As made at first (joined as is): its size.
+    let result = { failed: [] };
+    await B.rebuildChunks({ client: w.client, index, result, say: () => {} });
+    const asIs = w.index().timeline.chunks[0].bytes;
+    // Allowed a little less than that: made smaller, and fits.
+    const lines = [];
+    result = { failed: [] };
+    const fresh = await setUp();
+    try {
+      for (const e of entries) await fresh.client.putSegment(e.date, await w.client.segment(e.date));
+      await B.rebuildChunks({ client: fresh.client, index, result, say: (l) => lines.push(l), maxBytes: asIs - 1 });
+      assert.deepStrictEqual(result.failed, [], lines.join('\n'));
+      const c = fresh.index().timeline.chunks[0];
+      assert.ok(c.bytes < asIs, `${c.bytes} < ${asIs}`);
+      assert.ok(lines.some((l) => new RegExp(`re-encoded smaller to fit, quality ${B.CHUNK_SMALLER_CRF[0]}\\)\\.$`).test(l)), lines.join('\n'));
+      const got = await fetch(`${fresh.host.url}/timelapse/${c.video}`);
+      const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-bt-dl-')), 'c.mp4');
+      fs.writeFileSync(file, Buffer.from(await got.arrayBuffer()));
+      assert.strictEqual((await B.checkVideo(file, 5)).width, 1280, 'every frame still there, as the page needs it');
+      // Allowed far too little: that chunk fails, said with the sizes; nothing half made.
+      result = { failed: [] };
+      lines.length = 0;
+      const third = await setUp();
+      try {
+        for (const e of entries) await third.client.putSegment(e.date, await w.client.segment(e.date));
+        await B.rebuildChunks({ client: third.client, index, result, say: (l) => lines.push(l), maxBytes: 1000 });
+        assert.deepStrictEqual(result.failed.map((f) => f.day), ['timelapse from 2026-11-01']);
+        assert.ok(/would be [\d.]+ MB, even made smaller - over 0\.0 MB/.test(result.failed[0].error), result.failed[0].error);
+        assert.strictEqual(third.index(), null);
+      } finally { await third.close(); }
+    } finally { await fresh.close(); }
+  } finally { await w.close(); }
+}, 150000);
+
 test('frames are deleted from the Worker 3 days after their video - kept until then, and never kept past 30 days', async () => {
   if (needVideo()) return 'skip';
   const w = await setUp();
@@ -711,7 +765,13 @@ test('--day makes that day now, whatever the Pis have said, even if made before'
 test('the Worker refusing the secret, or without TIMELAPSE_SECRET, or down: said, nothing half-done, a failure', async () => {
   let w = await setUp({ secret: 'c'.repeat(64) });
   try {
-    await assert.rejects(w.build({ now: new Date() }), /GET \/timelapse\/frames\/: the Worker answered HTTP 401 \(Unauthorized\)/);
+    // Said what to do: GitHub's secret is not the Worker's.
+    await assert.rejects(w.build({ now: new Date() }), /GET \/timelapse\/frames\/: the Worker answered HTTP 401 \(Unauthorized\) - GitHub's TIMELAPSE_SECRET is not the Worker's: set both again from one value/);
+  } finally { await w.close(); }
+  // The Pis' secret in GitHub by mistake: the Worker says which one came.
+  w = await setUp({ secret: PI_SECRET });
+  try {
+    await assert.rejects(w.build({ now: new Date() }), /HTTP 401 \(Unauthorized: that is the Pis' UPLOAD_SECRET - the builder needs TIMELAPSE_SECRET\)/);
   } finally { await w.close(); }
   w = await setUp({ env: { TIMELAPSE_SECRET: undefined } });
   try {
@@ -787,10 +847,21 @@ const runScriptAsync = (args, env = {}) => new Promise((resolve) => {
 });
 
 test('without TIMELAPSE_SECRET: nothing made, said - and not a failure (before it is set up)', () => {
-  const r = runScript([], { TIMELAPSE_SECRET: '', GITHUB_ACTIONS: 'true' });
-  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
-  assert.ok(/TIMELAPSE_SECRET is not set: no timelapse made/.test(r.stdout));
-  assert.ok(/^::notice::TIMELAPSE_SECRET is not set/m.test(r.stdout), 'a note on GitHub\'s run page');
+  for (const secret of ['', ' \n']) {
+    const r = runScript([], { TIMELAPSE_SECRET: secret, GITHUB_ACTIONS: 'true' });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.ok(/TIMELAPSE_SECRET is not set: no timelapse made/.test(r.stdout));
+    assert.ok(/^::notice::TIMELAPSE_SECRET is not set/m.test(r.stdout), 'a note on GitHub\'s run page');
+  }
+});
+
+test('a secret pasted into GitHub with its line break (or spaces) works: they are not part of it', async () => {
+  const w = await setUp();
+  try {
+    const r = await runScriptAsync([], { TIMELAPSE_SECRET: ` ${BUILDER_SECRET}\n`, TIMELAPSE_WORKER: w.host.url });
+    assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+    assert.ok(/^Made 0, waiting 0, failed 0/m.test(r.stdout), r.stdout);
+  } finally { await w.close(); }
 });
 
 test('--day must be a day', () => {
@@ -880,7 +951,8 @@ test('on GitHub: a server\'s words never become a workflow command, even when th
     assert.strictEqual(r.status, 1, r.stdout + r.stderr);
     const lines = (r.stdout + r.stderr).split('\n');
     assert.ok(!lines.some((l) => /^::(error title=Injected|add-mask)/.test(l)), lines.join('\n'));
-    assert.ok(lines.some((l) => /^::error::GET \/timelapse\/frames\/: the Worker answered HTTP 401 \(Unauthorized ::error title=Injected::from the server ::add-mask::abc\)$/.test(l)), lines.join('\n'));
+    // One line, the server's words inside it - then only the builder's own hint for a 401.
+    assert.ok(lines.some((l) => /^::error::GET \/timelapse\/frames\/: the Worker answered HTTP 401 \(Unauthorized ::error title=Injected::from the server ::add-mask::abc\) - GitHub's TIMELAPSE_SECRET is not the Worker's: set both again from one value \(camera\/README\.md, "The timelapse on the website"\)$/.test(l)), lines.join('\n'));
   } finally { await w.close(); }
 }, 60000);
 

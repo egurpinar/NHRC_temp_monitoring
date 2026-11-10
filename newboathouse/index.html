@@ -6,7 +6,7 @@
 <!-- Only what this page needs, from where it needs it: its own two scripts
      (by their hashes - scripts/test_newboathouse.js checks them), and the
      timelapse from the club's Worker. Nothing else can run or load here. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rrqDV8A+5BVbukieSciXebfrs7j0k/Zju4UwfagvbkU=' 'sha256-72wfKs/9IGqBlOayeoqoi5P388ytnylAmR3mVPqCeSo='; style-src 'unsafe-inline'; img-src 'self' https://nhrc-camera.gurpinar-emre.workers.dev; media-src https://nhrc-camera.gurpinar-emre.workers.dev; connect-src https://nhrc-camera.gurpinar-emre.workers.dev; base-uri 'none'; form-action 'none'"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rrqDV8A+5BVbukieSciXebfrs7j0k/Zju4UwfagvbkU=' 'sha256-NNwZoHiJ1u+ixbAOVLBFl+r0bVDNPppFz/Wmd85xzNE='; style-src 'unsafe-inline'; img-src 'self' https://nhrc-camera.gurpinar-emre.workers.dev; media-src https://nhrc-camera.gurpinar-emre.workers.dev; connect-src https://nhrc-camera.gurpinar-emre.workers.dev; base-uri 'none'; form-action 'none'"/>
 <meta name="referrer" content="strict-origin-when-cross-origin"/>
 <title>New Boathouse Timelapse - New Haven Rowing Club</title>
 <meta name="description" content="The new boathouse going up: a timelapse of every day so far, and each whole day on its own."/>
@@ -172,6 +172,11 @@ const TIMELAPSE_BASE = 'https://nhrc-camera.gurpinar-emre.workers.dev/timelapse/
 const INDEX_URL = TIMELAPSE_BASE + 'index.json';
 const LOAD_TIMEOUT_MS = 10000;
 const LOOP_PAUSE_MS = 1500;     // on the last frame, before it starts again from the first day
+// A page left open: each evening the newest chunk is made again, under a new
+// name, and the old one deleted. The list is read again on the way back to the
+// first day (at most this often), and when a video will not play.
+const REREAD_MS = 10 * 60 * 1000;
+const REREAD_ON_ERROR_MS = 30 * 1000;
 const THEME_KEY = 'nhrc-theme';
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -255,6 +260,28 @@ function frameAt(tl, g) {
   return { chunk: ci, local: g - c.offset, date: d.date, hhmm: d.times[g - d.offset] };
 }
 
+/**
+ * The frame of a day and time in a timelapse - in a newer list, where the page
+ * was: that day's frame at that time, or the one before it; a day no longer
+ * there, `fallback` (kept within the timelapse).
+ */
+function frameOf(tl, date, hhmm, fallback) {
+  for (const c of tl.chunks) {
+    for (const d of c.days) {
+      if (d.date !== date) continue;
+      let i = 0;
+      while (i + 1 < d.times.length && d.times[i + 1] <= hhmm) i++;
+      return d.offset + i;
+    }
+  }
+  return Math.max(0, Math.min(tl.total - 1, Math.floor(Number(fallback) || 0)));
+}
+
+/** Two lists' continuous timelapses are the same videos, frame for frame. */
+function sameTimeline(a, b) {
+  return !!a && !!b && a.total === b.total && a.chunks.length === b.chunks.length && a.chunks.every((c, i) => c.video === b.chunks[i].video);
+}
+
 /** "Monday, November 9, 2026". */
 function dayTitle(date) {
   const [y, m, d] = date.split('-').map(Number);
@@ -332,15 +359,52 @@ function say(id, text, problem) {
 //    ready with the next, so one day runs into the next across chunks. ──
 
 const P = { tl: null, vis: null, hid: null, playing: false, dragging: false, wasPlaying: false, rate: 1, raf: 0, loop: 0, pending: null };
+// The list as read: when, and a reading under way (one at a time).
+const L = { readAt: 0, reading: null };
 
 function chunkOf(video) { return video && video.getAttribute('data-chunk') !== null ? Number(video.getAttribute('data-chunk')) : -1; }
+
+/** The speed for a video - kept when it loads another chunk (some browsers reset playbackRate to the default then). */
+function setRate(video) {
+  video.defaultPlaybackRate = P.rate;
+  video.playbackRate = P.rate;
+}
 
 /** Puts chunk ci into a video, unless it is there already. */
 function load(video, ci) {
   if (ci < 0 || ci >= P.tl.chunks.length || chunkOf(video) === ci) return;
   video.setAttribute('data-chunk', String(ci));
   video.src = TIMELAPSE_BASE + P.tl.chunks[ci].video;
-  video.playbackRate = P.rate;
+  setRate(video);
+}
+
+/** The list again (one reading at a time): the index, or null when it cannot be had. */
+function reread() {
+  if (!L.reading) {
+    L.reading = loadIndex().then((index) => index, () => null).then((index) => { L.readAt = Date.now(); L.reading = null; return index; });
+  }
+  return L.reading;
+}
+
+/**
+ * A newer continuous timelapse in the list - a new day, or the newest chunk
+ * made again: carried on with, from the same day and time. True when there was one.
+ */
+async function takeNewer() {
+  const index = await reread();
+  const tl = index && timelineFrom(index);
+  if (!tl || sameTimeline(tl, P.tl)) return false;
+  const was = frameAt(P.tl, P.dragging && P.pending !== null ? P.pending : currentFrame());
+  const g = frameOf(tl, was.date, was.hhmm, currentFrame());
+  // A video keeps its chunk only where that chunk is still the very same video.
+  for (const v of [P.vis, P.hid]) {
+    const ci = chunkOf(v);
+    if (ci >= 0 && !(ci < tl.chunks.length && tl.chunks[ci].video === P.tl.chunks[ci].video)) v.removeAttribute('data-chunk');
+  }
+  P.tl = tl;
+  describe(tl);
+  showFrame(g);
+  return true;
 }
 
 /** Shows frame `local` of a video's chunk: now, or as soon as it can. */
@@ -435,7 +499,44 @@ function onEnded(e) {
   }
   mark(P.tl.total - 1);
   if (!P.playing) return;
-  P.loop = setTimeout(() => { showFrame(0); play(); }, LOOP_PAUSE_MS);
+  P.loop = setTimeout(async () => {
+    // A page left open: the list again before starting over - a new day joins in.
+    if (Date.now() - L.readAt >= REREAD_MS) {
+      try { await takeNewer(); } catch (e) { /* the timelapse as it was */ }
+    }
+    if (!P.playing) return;
+    showFrame(0);
+    play();
+  }, LOOP_PAUSE_MS);
+}
+
+/**
+ * A video that will not play - most often a chunk made again since the list
+ * was read, its old video deleted: the list again (not more than every 30 s),
+ * and on from the same frame. Said only when that does not help.
+ */
+async function onVideoError(v) {
+  let took = false;
+  if (Date.now() - L.readAt >= REREAD_ON_ERROR_MS) {
+    try { took = await takeNewer(); } catch (e) { took = false; }
+  }
+  if (took) {
+    say('tl-message', '', false);
+    if (P.playing) play();
+    return;
+  }
+  if (v === P.vis) say('tl-message', 'Part of the timelapse could not be played just now. Please try again in a few minutes.', true);
+}
+
+/** The title, the ends, the note and the drag bar's length, for a timelapse. */
+function describe(tl) {
+  $('tl-range').max = String(tl.total - 1);
+  const first = tl.chunks[0].days[0].date;
+  const lastChunk = tl.chunks[tl.chunks.length - 1];
+  const last = lastChunk.days[lastChunk.days.length - 1].date;
+  $('whole-title').textContent = first === last ? dayTitle(first) : `${dayTitle(first)} to ${dayTitle(last)}`;
+  $('tl-ends').textContent = first === last ? '' : `${mediumDay(first)} → ${mediumDay(last)}`;
+  $('tl-note').textContent = wholeNote(tl);
 }
 
 function initTimeline(tl, autoplay, startAt, poster) {
@@ -444,20 +545,12 @@ function initTimeline(tl, autoplay, startAt, poster) {
   P.hid = $('tl-b');
   if (poster) P.vis.setAttribute('poster', TIMELAPSE_BASE + poster);
   const range = $('tl-range');
-  range.max = String(tl.total - 1);
-  const first = tl.chunks[0].days[0].date;
-  const lastChunk = tl.chunks[tl.chunks.length - 1];
-  const last = lastChunk.days[lastChunk.days.length - 1].date;
-  $('whole-title').textContent = first === last ? dayTitle(first) : `${dayTitle(first)} to ${dayTitle(last)}`;
-  $('tl-ends').textContent = first === last ? '' : `${mediumDay(first)} → ${mediumDay(last)}`;
-  $('tl-note').textContent = wholeNote(tl);
+  describe(tl);
   show('stage', true);
   show('tl-controls', true);
   for (const v of [P.vis, P.hid]) {
     v.addEventListener('ended', onEnded);
-    v.addEventListener('error', () => {
-      if (v === P.vis) say('tl-message', 'Part of the timelapse could not be played just now. Please try again in a few minutes.', true);
-    });
+    v.addEventListener('error', () => { onVideoError(v); });
   }
   $('tl-play').addEventListener('click', () => {
     if (P.playing) { pause(); return; }
@@ -482,8 +575,8 @@ function initTimeline(tl, autoplay, startAt, poster) {
     b.addEventListener('click', () => {
       for (const o of document.querySelectorAll('#tl-speeds button')) o.setAttribute('aria-pressed', o === b ? 'true' : 'false');
       P.rate = Number(b.getAttribute('data-rate')) || 1;
-      P.vis.playbackRate = P.rate;
-      P.hid.playbackRate = P.rate;
+      setRate(P.vis);
+      setRate(P.hid);
     });
   }
   $('tl-full').addEventListener('click', () => {
@@ -499,7 +592,11 @@ function initTimeline(tl, autoplay, startAt, poster) {
 
 // ── Each whole day, below. ──
 
+// The day shown below.
+const D = { current: null };
+
 function selectDay(d, push) {
+  D.current = d;
   const player = $('day-player');
   $('day-title').textContent = dayTitle(d.date);
   $('day-note').textContent = dayNote(d);
@@ -547,7 +644,8 @@ async function loadIndex() {
   const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
   const timer = setTimeout(() => { if (ctrl) ctrl.abort(); }, LOAD_TIMEOUT_MS);
   try {
-    const res = await fetch(INDEX_URL, { signal: ctrl ? ctrl.signal : undefined });
+    // Asked afresh each time (the Worker answers "not changed" when it is not): a cached list can name videos already replaced.
+    const res = await fetch(INDEX_URL, { cache: 'no-cache', signal: ctrl ? ctrl.signal : undefined });
     if (res.status === 404) return { days: [] };
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
@@ -564,6 +662,7 @@ async function start() {
   let index;
   try {
     index = await loadIndex();
+    L.readAt = Date.now();
   } catch (e) {
     $('whole-title').textContent = 'The timelapse could not be loaded';
     say('tl-message', 'It could not be reached just now. Please try again in a few minutes.', true);
@@ -594,10 +693,28 @@ async function start() {
   }
 }
 
+/**
+ * A day's video that will not play - most often made again since the list was
+ * read (a late frame), the old one deleted: the list again, and the new one.
+ */
+async function onDayError() {
+  const was = D.current;
+  if (was && Date.now() - L.readAt >= REREAD_ON_ERROR_MS) {
+    let index = null;
+    try { index = await reread(); } catch (e) { index = null; }
+    const days = index ? daysFrom(index) : [];
+    const now = days.find((d) => d.date === was.date);
+    if (now && now.video !== was.video) {
+      renderDays(days);
+      selectDay(now, false);
+      return;
+    }
+  }
+  say('day-message', 'This day\'s video could not be played. Please try again later, or pick another day.', true);
+}
+
 function initDayPlayer() {
-  $('day-player').addEventListener('error', () => {
-    say('day-message', 'This day\'s video could not be played. Please try again later, or pick another day.', true);
-  });
+  $('day-player').addEventListener('error', () => { onDayError(); });
 }
 
 // Light / dark, as on roworno.com - the same choice, kept for both pages.
@@ -634,8 +751,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined' && document
   });
 }
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { TIMELAPSE_BASE, INDEX_URL, LOOP_PAUSE_MS, validDate, daysFrom, timelineFrom, frameAt, dayTitle, shortDay, mediumDay,
-    clock12, whenText, dayNote, wholeNote, askedDay, pickDay };
+  module.exports = { TIMELAPSE_BASE, INDEX_URL, LOOP_PAUSE_MS, REREAD_MS, REREAD_ON_ERROR_MS, validDate, daysFrom, timelineFrom, frameAt, frameOf,
+    sameTimeline, dayTitle, shortDay, mediumDay, clock12, whenText, dayNote, wholeNote, askedDay, pickDay };
 }
 </script>
 </body>

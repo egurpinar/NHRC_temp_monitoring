@@ -131,6 +131,22 @@ test('any frame of the whole timelapse: which chunk, which frame in it, which da
   assert.deepStrictEqual(at('x'), at(0));
 });
 
+test('where the page was, in a newer list: the same day and time - or the time before it; a day gone, the frame number, kept in range', () => {
+  const tl = raw.timelineFrom(THREE);
+  assert.strictEqual(raw.frameOf(tl, '2026-11-10', '1600', 0), 4);
+  assert.strictEqual(raw.frameOf(tl, '2026-11-11', '0715', 0), 6);
+  assert.strictEqual(raw.frameOf(tl, '2026-11-11', '0740', 0), 7, 'a time no longer there: the one before it');
+  assert.strictEqual(raw.frameOf(tl, '2026-11-11', '0600', 0), 5, 'before the first: the first');
+  assert.strictEqual(raw.frameOf(tl, '2026-11-21', '0715', 0), 10);
+  assert.strictEqual(raw.frameOf(tl, '2026-10-01', '0700', 7), 7, 'a day not there: where it was');
+  assert.strictEqual(raw.frameOf(tl, '2026-10-01', '0700', 99), 10);
+  assert.strictEqual(raw.sameTimeline(raw.timelineFrom(INDEX), raw.timelineFrom(INDEX)), true);
+  assert.strictEqual(raw.sameTimeline(raw.timelineFrom(INDEX), tl), false, 'a chunk more');
+  const renamed = JSON.parse(JSON.stringify(INDEX));
+  renamed.timeline.chunks[1].video = 'whole/2026-11-11-abcdefabcdef.mp4';
+  assert.strictEqual(raw.sameTimeline(raw.timelineFrom(INDEX), raw.timelineFrom(renamed)), false, 'a chunk made again');
+});
+
 test('the words: the day, the time under the drag bar, the hours and the lengths', () => {
   assert.strictEqual(P.dayTitle('2026-11-09'), 'Monday, November 9, 2026');
   assert.strictEqual(P.shortDay('2026-11-09'), 'Mon, Nov 9');
@@ -189,11 +205,13 @@ function dom(responses, opts = {}) {
   const video = (id) => {
     const v = make('video', id);
     let src = '';
-    Object.assign(v, { readyState: 0, currentTime: 0, playbackRate: 1, paused: true, plays: 0, loads: [] });
-    Object.defineProperty(v, 'src', { get: () => src, set: (x) => { src = x; v.readyState = 0; v.currentTime = 0; v.loads.push(x); } });
+    Object.assign(v, { readyState: 0, currentTime: 0, playbackRate: 1, defaultPlaybackRate: 1, paused: true, plays: 0, loads: [] });
+    // A new video stops the one before: paused, as browsers do on loading.
+    Object.defineProperty(v, 'src', { get: () => src, set: (x) => { src = x; v.readyState = 0; v.currentTime = 0; v.paused = true; v.loads.push(x); } });
     v.play = () => { v.plays++; v.paused = false; return opts.refusePlay ? Promise.reject(new Error('NotAllowedError')) : Promise.resolve(); };
     v.pause = () => { v.paused = true; };
-    v.ready = () => { v.readyState = 4; v.fire('loadedmetadata'); };
+    // As a browser may: the speed back to the default once the new video has loaded.
+    v.ready = () => { v.readyState = 4; v.playbackRate = v.defaultPlaybackRate; v.fire('loadedmetadata'); };
     return v;
   };
   const els = {};
@@ -218,11 +236,14 @@ function dom(responses, opts = {}) {
     querySelectorAll: (sel) => (sel === '#tl-speeds button' ? speeds : sel === '#days button' ? all(els.days).filter((e) => e.tagName === 'BUTTON') : []),
   };
   const fetched = [];
+  const fetchOpts = [];
   const location = { hash: opts.hash || '' };
   const storage = {};
   let now = 0;
+  // The page's clock is the test's: Date.now() moves with advance().
+  class PageDate extends Date { static now() { return 1.8e12 + now; } }
   const ctx = {
-    document, location, console, Date, Math, JSON, Number, String, Array, Object, RegExp, Promise, Error, AbortController,
+    document, location, console, Date: PageDate, Math, JSON, Number, String, Array, Object, RegExp, Promise, Error, AbortController,
     setTimeout: (fn, ms) => { timers.push({ fn, at: now + (ms || 0) }); return timers.length; },
     clearTimeout: (n) => { if (timers[n - 1]) timers[n - 1].fn = null; },
     requestAnimationFrame: (fn) => { frames.push(fn); return frames.length; },
@@ -230,8 +251,9 @@ function dom(responses, opts = {}) {
     history: { replaceState: (a, b, h) => { location.hash = h; } },
     localStorage: { getItem: (k) => storage[k] || null, setItem: (k, v) => { storage[k] = v; } },
     window: { addEventListener: (type, fn) => { listeners[type] = fn; }, matchMedia: (q) => ({ matches: !!(opts.reducedMotion && /reduce/.test(q)) }) },
-    fetch: async (url) => {
+    fetch: async (url, o) => {
       fetched.push(url);
+      fetchOpts.push(o || {});
       const r = typeof responses === 'function' ? responses(url) : responses;
       if (r instanceof Error) throw r;
       return { ok: r.status >= 200 && r.status < 300, status: r.status, json: async () => (typeof r.body === 'string' ? JSON.parse(r.body) : r.body) };
@@ -242,7 +264,7 @@ function dom(responses, opts = {}) {
   vm.runInNewContext(pageScript, ctx);
   const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r)); };
   return {
-    els, speeds, fetched, location, storage, docEl, meta, timers,
+    els, speeds, fetched, fetchOpts, location, storage, docEl, meta, timers,
     a: els['tl-a'], b: els['tl-b'], range: els['tl-range'],
     visible: () => (els['tl-a'].hidden ? els['tl-b'] : els['tl-a']),
     startPage: async () => { listeners.DOMContentLoaded(); await settle(); },
@@ -436,7 +458,131 @@ test('a part that will not play: said, with what to do', async () => {
   const d = dom(OK);
   await d.startPage();
   d.a.fire('error');
+  await d.settle();
   assert.ok(/Part of the timelapse could not be played/.test(d.els['tl-message'].textContent) && !d.els['tl-message'].hidden);
+  assert.strictEqual(d.fetched.length, 1, 'the list was read just now: not again');
+  // Later, the list again first - the same list: said, and not read again for 30 s.
+  await d.advance(31000);
+  d.a.fire('error');
+  await d.settle();
+  assert.strictEqual(d.fetched.length, 2);
+  assert.ok(/Part of the timelapse could not be played/.test(d.els['tl-message'].textContent));
+  d.a.fire('error');
+  await d.settle();
+  assert.strictEqual(d.fetched.length, 2);
+});
+
+test('the list is asked for afresh each time (the Worker says "not changed" when it is not): a kept copy can name videos already replaced', async () => {
+  const d = dom(OK);
+  await d.startPage();
+  assert.strictEqual(d.fetchOpts[0].cache, 'no-cache');
+});
+
+/** Answers that change as the test goes: { list } as the Worker's index now. */
+function changing(list) {
+  const state = { list };
+  return { state, respond: () => ({ status: 200, body: state.list }) };
+}
+
+test('a page left open: on the way back to the first day it reads the list again (not more than every 10 minutes) - a new day joins in', async () => {
+  const w = changing(INDEX);
+  const d = dom(w.respond);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.a.fire('ended'); d.b.fire('ended');
+  await d.advance(1600);
+  assert.strictEqual(d.fetched.length, 1, 'just read: not again');
+  assert.strictEqual(d.visible(), d.a);
+  // Ten minutes on, the evening's new day in the list: read on the way round, and played.
+  w.state.list = THREE;
+  await d.advance(10 * 60 * 1000);
+  d.visible().fire('ended');
+  d.visible().ready();
+  d.visible().fire('ended');
+  await d.advance(1600);
+  assert.strictEqual(d.fetched.length, 2);
+  assert.strictEqual(d.range.max, '10', 'the drag bar now spans the new day too');
+  assert.strictEqual(d.els['whole-title'].textContent, 'Monday, November 9, 2026 to Saturday, November 21, 2026');
+  assert.strictEqual(d.visible().src, src('2026-11-01'), 'from the first day again');
+  assert.strictEqual(d.range.value, '0');
+  assert.strictEqual(d.visible().paused, false);
+});
+
+test('a chunk made again while the page is open (its old video deleted): it reads the list again and carries on from the same frame', async () => {
+  const renamed = JSON.parse(JSON.stringify(INDEX));
+  renamed.timeline.chunks[1].video = 'whole/2026-11-11-abcdefabcdef.mp4';
+  const w = changing(INDEX);
+  const d = dom(w.respond);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.drag(6); d.tick(); d.release();
+  assert.strictEqual(d.visible(), d.b);
+  await d.advance(31000);
+  w.state.list = renamed;
+  d.b.fire('error');
+  await d.settle();
+  assert.strictEqual(d.fetched.length, 2);
+  const v = d.visible();
+  assert.strictEqual(v.src, `${WORKER}/timelapse/whole/2026-11-11-abcdefabcdef.mp4`, 'the new video');
+  v.ready();
+  assert.strictEqual(v.currentTime, 0.15, 'the same frame: the 11th at 7:15');
+  assert.strictEqual(d.els['tl-when'].textContent, 'Wed, Nov 11, 2026 · 7:15 AM');
+  assert.strictEqual(d.els['tl-message'].hidden, true, 'nothing to say');
+  assert.strictEqual(v.paused, false, 'and playing, as it was');
+  // The first chunk was not made again: its video is not loaded anew.
+  assert.strictEqual(d.a.loads.filter((x) => x === src('2026-11-01')).length, 1);
+});
+
+test('the next chunk, made again while it waited behind (its old video deleted): only it is loaded anew - the one on screen plays on', async () => {
+  const renamed = JSON.parse(JSON.stringify(THREE));
+  renamed.timeline.chunks[2].video = 'whole/2026-11-21-abcdefabcdef.mp4';
+  const w = changing(THREE);
+  const d = dom(w.respond);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.drag(6); d.tick(); d.release();
+  assert.deepStrictEqual([d.visible(), d.a.src], [d.b, src('2026-11-21')], 'the 11th on screen, the 21st behind it');
+  const shownLoads = d.b.loads.length;
+  await d.advance(31000);
+  w.state.list = renamed;
+  d.a.fire('error');
+  await d.settle();
+  assert.strictEqual(d.a.src, `${WORKER}/timelapse/whole/2026-11-21-abcdefabcdef.mp4`, 'the new one behind');
+  assert.strictEqual(d.b.loads.length, shownLoads, 'the one on screen not loaded again');
+  assert.strictEqual(d.visible(), d.b);
+  assert.strictEqual(d.els['tl-message'].hidden, true);
+});
+
+test('a day\'s video made again (a late frame) while the page is open: it reads the list again and plays the new one', async () => {
+  const later = JSON.parse(JSON.stringify(INDEX));
+  later.days[1].video = 'videos/2026-11-11-abcdefabcdef.mp4';
+  const w = changing(INDEX);
+  const d = dom(w.respond);
+  await d.startPage();
+  assert.strictEqual(d.els['day-title'].textContent, 'Wednesday, November 11, 2026');
+  await d.advance(31000);
+  w.state.list = later;
+  d.els['day-player'].fire('error');
+  await d.settle();
+  assert.strictEqual(d.els['day-player'].src, `${WORKER}/timelapse/videos/2026-11-11-abcdefabcdef.mp4`);
+  assert.strictEqual(d.els['day-message'].hidden, true);
+  // Nothing new: said plainly.
+  await d.advance(31000);
+  d.els['day-player'].fire('error');
+  await d.settle();
+  assert.ok(/could not be played/.test(d.els['day-message'].textContent) && !d.els['day-message'].hidden);
+});
+
+test('the speed chosen stays when the next chunk loads - even in a browser that puts it back to the default on loading', async () => {
+  const d = dom({ status: 200, body: THREE });
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.speeds[2].click();
+  d.drag(10); d.tick();
+  const v = d.visible();
+  assert.strictEqual(v.src, src('2026-11-21'));
+  v.ready();
+  assert.deepStrictEqual([v.playbackRate, v.defaultPlaybackRate], [2, 2]);
 });
 
 test('light and dark: the switch changes the page and remembers it for roworno.com too', async () => {

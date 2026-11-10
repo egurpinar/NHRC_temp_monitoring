@@ -1109,9 +1109,12 @@ How it is made, without adding work to the Pis:
    last frame (sunset), outside the filming hours only, one frame at a time:
    it asks the Worker which frames it already has, sends the rest as they are
    on the card (nothing decoded or converted on the Pi), then says the day is
-   complete. It waits while a dock photo is being taken, sends nothing with
-   less than `TIMELAPSE_MIN_MEMORY_MB` + 20 MB of memory available, always
-   stops 15 seconds before the next slot, and carries on where it left off.
+   complete. The dock photo comes first: it is taken half a second into every
+   slot and lasts a few seconds, and the sending - which wakes 2 seconds in -
+   waits for it each time. It sends nothing with less than
+   `TIMELAPSE_MIN_MEMORY_MB` + 20 MB of memory available (said in the journal,
+   hourly while it lasts), always stops 15 seconds before the next slot, and
+   carries on where it left off.
    If the Worker cannot be reached it tries again 30 minutes later. Days missed
    are caught up for up to 3 days. The standby sends what it filmed, as
    itself; neither Pi's frames replace the other's. The frames stay on the Pis
@@ -1132,10 +1135,16 @@ How it is made, without adding work to the Pis:
    encoded alike, with no B-frames; if ffmpeg on GitHub's runner ever encodes
    differently, that chunk is re-encoded instead, so a join can never break
    the video). A chunk is made again whenever one of its days is, and the
-   page plays the chunks one after another as one. Everything is listed in
+   page plays the chunks one after another as one. A chunk too large to send
+   (the Worker takes 95 MB; busy summer days could pass 90) is re-encoded at
+   a lower quality until it fits. Everything is listed in
    `/timelapse/index.json`. The frames are deleted from the Worker 3 days after
    their video is made; the videos, chunks and segments are kept.
-3. **The page and the email read the list** from the Worker.
+3. **The page and the email read the list** from the Worker - the page afresh
+   each time. A page left open (a screen at the club) reads it again on its
+   way back to the first day, at most every 10 minutes, so each evening's day
+   joins in; and a video replaced meanwhile (made again, the old one deleted)
+   is found again in the list rather than shown as an error.
 
 What it costs:
 
@@ -1151,23 +1160,43 @@ What it costs:
 
 Once, in this order (nothing goes public before step 4):
 
-1. **A secret for the builder.** On your Mac, generate one and copy it:
+1. **A secret for the builder.** In one Terminal window on your Mac, line by
+   line. It is kept in a variable `S` of that window - never printed, never in
+   a file - and put on the clipboard without a line break:
 
    ```bash
-   openssl rand -hex 32 | pbcopy
+   S=$(openssl rand -hex 32)
+   printf %s "$S" | pbcopy
    ```
 
-   Paste it in two places, and nowhere else (never in chat, never in a file):
-   Cloudflare - the Worker, **Settings → Variables and Secrets → Add →
-   Secret**, name `TIMELAPSE_SECRET`; and GitHub - this repository,
-   **Settings → Secrets and variables → Actions → New repository secret**,
-   name `TIMELAPSE_SECRET`. It must not be the Pis' `UPLOAD_SECRET` (the
-   Worker refuses one that is, or that is shorter than 32 characters). Then
-   empty the clipboard:
+   Paste it into Cloudflare - the Worker, **Settings → Variables and Secrets →
+   Add → Secret**, name `TIMELAPSE_SECRET` - and deploy. Copying anything else
+   (a command from here) replaces the clipboard, so put the secret back on it:
 
    ```bash
+   printf %s "$S" | pbcopy
+   ```
+
+   Paste it into GitHub - this repository, **Settings → Secrets and variables
+   → Actions → New repository secret**, name `TIMELAPSE_SECRET`. It must not
+   be the Pis' `UPLOAD_SECRET` (the Worker refuses one that is, or that is
+   shorter than 32 characters). Check that the Worker has it - `200` it does,
+   `401` it has another (only the number is printed):
+
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $S" https://nhrc-camera.gurpinar-emre.workers.dev/timelapse/frames/
+   ```
+
+   Then forget it:
+
+   ```bash
+   unset S
    pbcopy < /dev/null
    ```
+
+   GitHub's copy is checked by the next run (**Actions → Timelapse → Run
+   workflow**): a refused one says `HTTP 401 ... GitHub's TIMELAPSE_SECRET is
+   not the Worker's`, and `that is the Pis' UPLOAD_SECRET` when it is that one.
 2. **The Worker.** Replace its code with `camera/cloudflare_worker.js`
    (**Edit code**, paste, **Deploy**). Check: `curl https://nhrc-camera.<account>.workers.dev/status`
    ends with `"timelapse": { "latest": null, "days": 0 }`.
@@ -1200,6 +1229,7 @@ What the journal says:
 | `Timelapse 2026-11-09: already on the website (112 frames).` | Nothing was missing (e.g. after a restart) |
 | `...; 1 damaged, not sent (0705.jpg)` | A frame the Worker will not take: the rest went |
 | `could not send the frames to the website (... could not be reached ...); trying again in 30 min.` | Said once, then hourly while it lasts |
+| `Timelapse: not sending to the website yet - 52 MB of memory available, it waits for 60 MB ...` | Memory short for now (Pi-hole first): it tries again each slot; said hourly while it lasts |
 | `... this Worker does not take timelapse frames yet: update it` | Step 2 above |
 | `... the upload secret was refused` | `CAMERA_UPLOAD_SECRET` differs from the Worker's `UPLOAD_SECRET` |
 | `Timelapse 2026-11-05: not sent to the website - more than 3 days old now` | The Pi was away too long; the frames stay on the Pi and in iCloud |

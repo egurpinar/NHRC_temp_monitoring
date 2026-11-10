@@ -210,6 +210,31 @@ test('a builder secret that is short, or the same as the Pis\', is refused as if
   }
 });
 
+test('the builder\'s secret as pasted, with a line break or spaces around it, still works; the Pis\' secret sent by mistake is named', async () => {
+  // "openssl rand -hex 32 | pbcopy" copies a line break too; a request's header never ends with one.
+  for (const stored of [`${BUILDER_SECRET}\n`, ` ${BUILDER_SECRET} \r\n`, `\t${BUILDER_SECRET}`]) {
+    const e = env({ TIMELAPSE_SECRET: stored });
+    const r = await call(e, 'GET', '/timelapse/frames/', { headers: builder() });
+    assert.strictEqual(r.status, 200, JSON.stringify(stored));
+  }
+  const e = env();
+  // Another secret: refused, nothing said about it.
+  let r = await call(e, 'GET', '/timelapse/frames/', { headers: { Authorization: `Bearer ${'c'.repeat(64)}` } });
+  assert.deepStrictEqual([r.status, await r.text()], [401, 'Unauthorized']);
+  // The Pis' secret on a builder route: said which one came - on every builder route.
+  for (const [m, p] of [['GET', '/timelapse/frames/'], ['PUT', '/timelapse/index.json'], ['GET', `/timelapse/frames/${etDay(-1)}/0705.jpg`],
+    ['DELETE', `/timelapse/frames/${etDay(-1)}/`], ['GET', `/timelapse/segments/${etDay(-1)}.mp4`]]) {
+    r = await call(e, m, p, { headers: pi(), body: m === 'PUT' ? '{}' : undefined });
+    assert.strictEqual(r.status, 401, `${m} ${p}`);
+    assert.ok(/that is the Pis' UPLOAD_SECRET - the builder needs TIMELAPSE_SECRET/.test(await r.text()), `${m} ${p}`);
+  }
+  // The same secret as the Pis', but for a line break: still the same secret - refused as before.
+  const same = env({ TIMELAPSE_SECRET: `${PI_SECRET}\n` });
+  r = await call(same, 'GET', '/timelapse/frames/', { headers: pi() });
+  assert.strictEqual(r.status, 503);
+  assert.ok(/must not be the same as UPLOAD_SECRET/.test(await r.text()));
+});
+
 test('the days that have frames - for the builder only', async () => {
   const e = env();
   for (const d of [etDay(-3), etDay(-1), etDay(-2)]) await putFrame(e, d, '0705');
@@ -375,7 +400,14 @@ test('the index\'s continuous timelapse: kept only when every part fits - its da
   const other = `${start.slice(0, 8)}${start.endsWith('01') ? '11' : '01'}`;
   for (const [why, obj] of [
     ['a day\'s times out of order', { days: [indexDay(d, { timeline: '0715,0700' })] }],
+    ['a day\'s time twice', { days: [indexDay(d, { timeline: '0700,0700' })] }],
     ['a day\'s time not a time', { days: [indexDay(d, { timeline: '0760' })] }],
+    ['a day\'s time past midnight', { days: [indexDay(d, { timeline: '2400' })] }],
+    ['a day\'s times ending in a comma', { days: [indexDay(d, { timeline: '0700,' })] }],
+    ['a day\'s times with a space', { days: [indexDay(d, { timeline: '0700, 0715' })] }],
+    ['a day\'s times empty', { days: [indexDay(d, { timeline: '' })] }],
+    ['a day\'s time of three digits', { days: [indexDay(d, { timeline: '700' })] }],
+    ['a day with 97 times', { days: [indexDay(d, { timeline: Array.from({ length: 97 }, (_, i) => `${String(Math.floor(i * 5 / 60)).padStart(2, '0')}${String(i * 5 % 60).padStart(2, '0')}`).join(',') })] }],
     ['a day\'s times not a list', { days: [indexDay(d, { timeline: ['0700'] })] }],
     ['fps', { days: [day], timeline: tl({ fps: 0 }) }],
     ['a chunk not from the 1st, 11th or 21st', { days: [day], timeline: tl({}, [chunk({ start: `${start.slice(0, 8)}05`, video: `whole/${start.slice(0, 8)}05-0123456789ab.mp4` })]) }],
@@ -391,6 +423,37 @@ test('the index\'s continuous timelapse: kept only when every part fits - its da
     assert.strictEqual((await put(obj)).status, 400, why);
   }
   assert.deepStrictEqual(JSON.parse(e.BUCKET.bytes('timelapse/index.json').toString()).timeline, tl(), 'the good one stays');
+  // Every quarter hour of a day - 96 times, the most there can be - is a day.
+  const all = Array.from({ length: 96 }, (_, i) => `${String(Math.floor(i / 4)).padStart(2, '0')}${String(i % 4 * 15).padStart(2, '0')}`).join(',');
+  r = await put({ days: [indexDay(d, { timeline: all })], timeline: tl({}, [chunk({ frames: 96, days: [{ date: d, set: 'abcdef012345', times: all }] })]) });
+  assert.strictEqual(r.status, 200, await r.text());
+});
+
+test('three years of days in the index: taken whole, checked quickly (a Worker on the free plan has 10 ms of CPU a request)', async () => {
+  const days = [], chunks = new Map();
+  const times = Array.from({ length: 60 }, (_, i) => { const m = 6 * 60 + i * 15; return `${String(Math.floor(m / 60)).padStart(2, '0')}${String(m % 60).padStart(2, '0')}`; }).join(',');
+  let t = Date.parse(`${etDay(-1)}T12:00:00Z`) - 1094 * 86400000;
+  for (let i = 0; i < 1095; i++, t += 86400000) {
+    const date = new Date(t).toISOString().slice(0, 10);
+    days.push(indexDay(date, { timeline: times }));
+    const n = Number(date.slice(8, 10));
+    const start = `${date.slice(0, 8)}${n <= 10 ? '01' : n <= 20 ? '11' : '21'}`;
+    if (!chunks.has(start)) chunks.set(start, []);
+    chunks.get(start).push({ date, set: 'abcdef012345', times });
+  }
+  const timeline = { fps: 10, slotMinutes: 15, chunks: [...chunks].map(([start, ds]) => ({ start, video: `whole/${start}-0123456789ab.mp4`,
+    frames: ds.length * 60, seconds: ds.length * 6, bytes: 9000, days: ds })) };
+  const body = JSON.stringify({ days: days.reverse(), timeline });
+  assert.ok(body.length < 1024 * 1024 && body.length > 900 * 1024, `${body.length} bytes`);
+  const e = env();
+  await call(e, 'PUT', '/timelapse/index.json', { headers: builder(), body });   // once to warm up
+  const t0 = process.hrtime.bigint();
+  const r = await call(e, 'PUT', '/timelapse/index.json', { headers: builder(), body });
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.strictEqual(r.status, 200, await r.text());
+  assert.strictEqual(JSON.parse(e.BUCKET.bytes('timelapse/index.json').toString()).days.length, 1095);
+  // Loose on purpose (machines differ): what it guards against is checking that grows out of hand.
+  assert.ok(ms < 100, `${ms.toFixed(1)} ms`);
 });
 /** A day in another chunk than the one starting at `start`. */
 const dayOutside = (start) => S.dayBefore(start, 1);
@@ -580,7 +643,7 @@ function publisher(cfg, e, extra = {}) {
   const fetch = extra.fetch || workerFetch(e);
   const clock = { t: Date.now() };
   const p = S.createPublisher(cfg, Object.assign({
-    fetch, now: () => new Date(clock.t), availableMb: () => 300,
+    fetch, now: () => new Date(clock.t), availableMb: () => 300, pause: async (ms) => { clock.t += ms; },
     log: (m) => lines.push(`LOG ${m}`), logError: (m) => lines.push(`ERR ${m}`),
   }, extra.deps || {}));
   const tickAt = async (day, hm) => { const slot = slotAt(cfg, day, hm); clock.t = slot.start + 2000; await p.tick(slot); };
@@ -650,7 +713,34 @@ test('frames the Worker has already are not sent again (a restart mid-day, the r
   assert.ok(lines.some((l) => l === `LOG Timelapse ${DAY}: already on the website (3 frames).`), lines.join('\n'));
 });
 
-test('a dock photo under way: it stops and carries on at the next slot, where it left off', async () => {
+test('as on the Pi: the dock photo is taken 0.5 s into every slot and lasts a few seconds, the sender wakes 2 s in - it waits, then sends the whole day in that slot', async () => {
+  // 115 frames, 7:00 to 16:30. The live Worker showed the dock photo done 3.3 s into its slot.
+  const times = [];
+  for (let m = 7 * 60; m <= 16 * 60 + 30; m += 5) times.push(`${String(Math.floor(m / 60)).padStart(2, '0')}${String(m % 60).padStart(2, '0')}`);
+  for (const dockMs of [3600, 9000]) {
+    const dir = piDir({ [DAY]: times });
+    const cfg = piCfg(dir);
+    const e = env();
+    const clock = { t: 0 };
+    const busy = () => { const into = clock.t % 300000; return into >= 500 && into < dockMs; };
+    const base = workerFetch(e);
+    const during = [];
+    const fetch = async (url, opts) => { if (busy()) during.push(url); clock.t += 300; return base(url, opts); };   // each request: 300 ms
+    fetch.log = base.log;
+    const lines = [];
+    const p = S.createPublisher(cfg, { fetch, now: () => new Date(clock.t), availableMb: () => 300, dockBusy: busy,
+      pause: async (ms) => { clock.t += ms; }, log: (m) => lines.push(m), logError: (m) => lines.push(`ERR ${m}`) });
+    const slot = slotAt(cfg, DAY, '20:00');
+    clock.t = slot.start + 2000;
+    await p.tick(slot);
+    assert.strictEqual(e.BUCKET.keys().filter((k) => k.endsWith('.jpg')).length, 115, `dock photo ${dockMs} ms: ${lines.join(' | ')}`);
+    assert.ok(e.BUCKET.keys().some((k) => /done-main/.test(k)), 'and said so, in that slot');
+    assert.deepStrictEqual(during, [], 'nothing sent while the dock photo was being taken');
+    assert.ok(clock.t < slot.end - S.PUBLISH_SLOT_MARGIN_MS, 'done well before the next slot');
+  }
+});
+
+test('a dock photo that outlasts the slot\'s time: it stops, and carries on at the next slot where it left off', async () => {
   const dir = piDir({ [DAY]: ['0700', '0705', '0710', '0715'] });
   const cfg = piCfg(dir);
   const e = env();
@@ -658,9 +748,13 @@ test('a dock photo under way: it stops and carries on at the next slot, where it
   const base = workerFetch(e);
   const fetch = async (url, opts) => { const r = await base(url, opts); if (opts && opts.method === 'PUT' && /\d{4}\.jpg$/.test(url) && ++sent === 2) busy = true; return r; };
   fetch.log = base.log;
-  const { tickAt } = publisher(cfg, e, { fetch, deps: { dockBusy: () => busy } });
+  const { tickAt, clock } = publisher(cfg, e, { fetch, deps: { dockBusy: () => busy } });
   await tickAt(DAY, '20:00');
   assert.strictEqual(sent, 2);
+  // It waits for the dock photo as long as this slot's sending may last: 4 minutes, and never into its last 15 s.
+  const slot = slotAt(cfg, DAY, '20:00');
+  const deadline = Math.min(slot.start + 2000 + S.PUBLISH_BUDGET_MS, slot.end - S.PUBLISH_SLOT_MARGIN_MS);
+  assert.ok(clock.t <= deadline && clock.t >= deadline - 1000, `stopped waiting ${(deadline - clock.t) / 1000} s before its deadline`);
   assert.ok(!fs.existsSync(path.join(dir, '.published')), 'not done yet');
   assert.ok(!e.BUCKET.keys().some((k) => /done-/.test(k)));
   busy = false;
@@ -674,11 +768,16 @@ test('memory short (under TIMELAPSE_MIN_MEMORY_MB + 20 MB): nothing read or sent
   const cfg = piCfg(dir);
   const e = env();
   let mb = 59;
-  const { tickAt, fetch } = publisher(cfg, e, { deps: { availableMb: () => mb } });
+  const { tickAt, fetch, lines } = publisher(cfg, e, { deps: { availableMb: () => mb } });
   await tickAt(DAY, '20:00');
   assert.deepStrictEqual(fetch.log.map((r) => r.method), ['GET'], 'it asked, and sent nothing');
-  mb = 60;
+  // Said - not a silent night - and only hourly while it lasts.
   await tickAt(DAY, '20:05');
+  await tickAt(DAY, '20:10');
+  const said = lines.filter((l) => /not sending to the website yet - 59 MB of memory available, it waits for 60 MB/.test(l));
+  assert.strictEqual(said.length, 1, lines.join('\n'));
+  mb = 60;
+  await tickAt(DAY, '20:15');
   assert.strictEqual(fetch.log.filter((r) => r.method === 'PUT').length, 3);
   // Where memory cannot be read (not Linux), it is not a reason to stop.
   const dir2 = piDir({ [DAY]: ['0700'] });

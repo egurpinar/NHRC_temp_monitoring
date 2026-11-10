@@ -2882,8 +2882,9 @@ function dayBefore(day, n = 1) {
 
 /**
  * deps: now(), fetch, dockBusy() (a dock photo under way), availableMb()
- * (null where it cannot be read), log/logError (the service's own). tick(slot)
- * is called once a slot by the timelapse (intervalTick), with that slot.
+ * (null where it cannot be read), log/logError (the service's own), pause(ms)
+ * (a wait; the tests move their clock instead). tick(slot) is called once a
+ * slot by the timelapse (intervalTick), with that slot.
  */
 function createPublisher(cfg, deps = {}) {
   const tl = cfg.timelapse;
@@ -2892,9 +2893,32 @@ function createPublisher(cfg, deps = {}) {
   const memory = deps.availableMb || availableMb;
   const say = deps.log || log;
   const sayError = deps.logError || logError;
+  const wait = deps.pause || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const record = path.join(tl.dir, '.published');
   const pi = cfg.pi === 'standby' ? 'standby' : 'main';
-  const st = { running: false, retryAt: 0, failing: null, failingSince: 0, lastErrorLog: 0, gaveUp: new Set(), refused: new Map() };
+  const st = { running: false, retryAt: 0, failing: null, failingSince: 0, lastErrorLog: 0, lastShortLog: 0, gaveUp: new Set(), refused: new Map() };
+
+  /**
+   * The website's photo first: while a dock photo is being taken, wait for it
+   * - it is taken half a second into every slot and lasts a few seconds, just
+   * when this wakes (2 s in) - until the deadline. True once it is done.
+   */
+  async function dockFree(deadline) {
+    while (deps.dockBusy && deps.dockBusy()) {
+      if (now().getTime() + DOCK_POLL_MS > deadline) return false;
+      await wait(DOCK_POLL_MS);
+    }
+    return true;
+  }
+
+  /** Memory too short to send: said hourly while it lasts, so a night without sending is never a silent one. */
+  function memoryShort(mb) {
+    const t = now().getTime();
+    if (t - st.lastShortLog < LOG_REPEAT_MS) return;
+    st.lastShortLog = t;
+    say(`Timelapse: not sending to the website yet - ${mb} MB of memory available, it waits for ${tl.minMemoryMb + PUBLISH_MEMORY_EXTRA_MB} MB `
+      + '(TIMELAPSE_MIN_MEMORY_MB + 20); trying again each slot.');
+  }
 
   const published = () => {
     try {
@@ -2993,6 +3017,7 @@ function createPublisher(cfg, deps = {}) {
   async function publishDay(day, today, deadline) {
     const frames = localFrames(day);
     if (!frames.length) { notePublished(day, today); return 'done'; }
+    if (!(await dockFree(deadline))) return 'later';
     const listing = await call('GET', `/timelapse/frames/${day}/`);
     if (!listing.ok) throw refusal(listing, 'asking which frames the Worker has');
     let there;
@@ -3003,10 +3028,10 @@ function createPublisher(cfg, deps = {}) {
     let sent = 0, bytes = 0;
     for (const f of frames) {
       if (there.has(f.name)) continue;
+      if (!(await dockFree(deadline))) return 'later';
       if (now().getTime() > deadline) return 'later';
-      if (deps.dockBusy && deps.dockBusy()) return 'later';
       const mb = memory();
-      if (mb !== null && mb < tl.minMemoryMb + PUBLISH_MEMORY_EXTRA_MB) return 'later';
+      if (mb !== null && mb < tl.minMemoryMb + PUBLISH_MEMORY_EXTRA_MB) { memoryShort(mb); return 'later'; }
       let buf;
       try { buf = fs.readFileSync(f.file); } catch (e) { continue; }   // deleted meanwhile
       const refused = st.refused.get(day) || new Set();

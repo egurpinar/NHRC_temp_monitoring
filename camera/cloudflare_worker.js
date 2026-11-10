@@ -609,16 +609,26 @@ function recentDay(s, now = Date.now()) {
  * the same as the Pis' (which would let either do both jobs), is as good as none.
  */
 function builderSecretProblem(env) {
-  if (!env.TIMELAPSE_SECRET) return 'TIMELAPSE_SECRET is not set';
-  if (String(env.TIMELAPSE_SECRET).length < 32) return 'TIMELAPSE_SECRET is too short (openssl rand -hex 32 gives 64 characters)';
-  if (env.TIMELAPSE_SECRET === env.UPLOAD_SECRET) return 'TIMELAPSE_SECRET must not be the same as UPLOAD_SECRET';
+  const secret = builderSecret(env);
+  if (!secret) return 'TIMELAPSE_SECRET is not set';
+  if (secret.length < 32) return 'TIMELAPSE_SECRET is too short (openssl rand -hex 32 gives 64 characters)';
+  if (secret === String(env.UPLOAD_SECRET || '').trim()) return 'TIMELAPSE_SECRET must not be the same as UPLOAD_SECRET';
   return null;
+}
+
+/**
+ * The builder's secret as set, without spaces or line breaks around it: a
+ * value pasted with its line break would otherwise never match (a request's
+ * header never ends with one).
+ */
+function builderSecret(env) {
+  return String(env.TIMELAPSE_SECRET || '').trim();
 }
 
 /** The builder's own secret. Without a usable one on the Worker, nothing of the builder's is allowed. */
 function builderAuthorized(request, env) {
   const auth = request.headers.get('Authorization') || '';
-  return !builderSecretProblem(env) && timingSafeEqual(auth, `Bearer ${env.TIMELAPSE_SECRET}`);
+  return !builderSecretProblem(env) && timingSafeEqual(auth, `Bearer ${builderSecret(env)}`);
 }
 
 /** Every key under a prefix, page by page. */
@@ -769,15 +779,18 @@ function sanitizeTimelapseIndex(obj) {
   return out;
 }
 
-/** "0700,0715,1630": times of the day, each real, in order - or null. At most 96 (every quarter hour). */
+const TIMES_RE = /^(?:[01]\d|2[0-3])[0-5]\d(?:,(?:[01]\d|2[0-3])[0-5]\d)*$/;
+
+/**
+ * "0700,0715,1630": times of the day, each real, in order - how many, or
+ * null. At most 96 (every quarter hour). Checked in one pass and without
+ * making a list: the index holds two of these for every day, and the Worker's
+ * time for a request is short (10 ms of CPU on Cloudflare's free plan).
+ */
 function timesList(s) {
-  if (typeof s !== 'string' || !/^\d{4}(,\d{4})*$/.test(s)) return null;
-  const list = s.split(',');
-  if (list.length > 96) return null;
-  for (let i = 0; i < list.length; i++) {
-    if (!/^([01]\d|2[0-3])[0-5]\d$/.test(list[i]) || (i && list[i] <= list[i - 1])) return null;
-  }
-  return list;
+  if (typeof s !== 'string' || s.length > 96 * 5 - 1 || !TIMES_RE.test(s)) return null;
+  for (let i = 5; i < s.length; i += 5) if (s.slice(i, i + 4) <= s.slice(i - 5, i - 1)) return null;
+  return (s.length + 1) / 5;
 }
 
 /** The chunk of the continuous timelapse a day belongs to: the 1st, 11th or 21st of its month. */
@@ -812,7 +825,7 @@ function sanitizeTimeline(t) {
       if (typeof d.set !== 'string' || !/^[0-9a-f]{8,64}$/.test(d.set)) return null;
       const times = timesList(d.times);
       if (!times) return null;
-      frames += times.length;
+      frames += times;
       days.push({ date: d.date, set: d.set, times: d.times });
     }
     if (frames !== c.frames) return null;
@@ -850,6 +863,10 @@ async function handleTimelapse(request, env, url) {
   const problem = builderSecretProblem(env);
   const builder = () => (problem ? null : builderAuthorized(request, env));
   const notSetUp = () => tlText(503, `The timelapse is not set up on this Worker: ${problem} (camera/README.md)`);
+  // Refused - and when the Pis' secret came instead of the builder's, said so:
+  // GitHub's secret is then the wrong one. (It tells nothing to anyone without it.)
+  const refused = () => tlText(401, authorized(request, env)
+    ? 'Unauthorized: that is the Pis\' UPLOAD_SECRET - the builder needs TIMELAPSE_SECRET' : 'Unauthorized');
   try {
     if (method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: Object.assign({ 'Access-Control-Allow-Methods': 'GET, HEAD',
@@ -861,7 +878,7 @@ async function handleTimelapse(request, env, url) {
       if (method !== 'PUT') return tlText(405, 'Method not allowed');
       const ok = builder();
       if (ok === null) return notSetUp();
-      if (!ok) return tlText(401, 'Unauthorized');
+      if (!ok) return refused();
       const text = await request.text();
       if (text.length > TL_INDEX_MAX) return tlText(413, 'Too large');
       let parsed;
@@ -882,7 +899,7 @@ async function handleTimelapse(request, env, url) {
       if (method !== 'PUT' && method !== 'DELETE') return tlText(405, 'Method not allowed');
       const ok = builder();
       if (ok === null) return notSetUp();
-      if (!ok) return tlText(401, 'Unauthorized');
+      if (!ok) return refused();
       if (method === 'DELETE') {
         await env.BUCKET.delete(key);
         return json({ ok: true });
@@ -906,7 +923,7 @@ async function handleTimelapse(request, env, url) {
       if (method !== 'PUT' && method !== 'DELETE') return tlText(405, 'Method not allowed');
       const ok = builder();
       if (ok === null) return notSetUp();
-      if (!ok) return tlText(401, 'Unauthorized');
+      if (!ok) return refused();
       if (method === 'DELETE') {
         await env.BUCKET.delete(key);
         return json({ ok: true });
@@ -919,7 +936,7 @@ async function handleTimelapse(request, env, url) {
     if (m && validDay(m[1])) {
       const ok = builder();
       if (ok === null) return notSetUp();
-      if (!ok) return tlText(401, 'Unauthorized');
+      if (!ok) return refused();
       const key = `timelapse/${p}`;
       if (method === 'GET') {
         const o = await env.BUCKET.get(key);
@@ -938,7 +955,7 @@ async function handleTimelapse(request, env, url) {
       if (method !== 'GET') return tlText(405, 'Method not allowed');
       const ok = builder();
       if (ok === null) return notSetUp();
-      if (!ok) return tlText(401, 'Unauthorized');
+      if (!ok) return refused();
       return json({ ok: true, days: await timelapseDays(env) });
     }
 
@@ -955,7 +972,7 @@ async function handleTimelapse(request, env, url) {
         if (method !== 'DELETE') return tlText(405, 'Method not allowed');
         const ok = builder();
         if (ok === null) return notSetUp();
-        if (!ok) return tlText(401, 'Unauthorized');
+        if (!ok) return refused();
         const keys = (await listAll(env, `${TL_FRAMES}${day}/`)).map((o) => o.key);
         for (let i = 0; i < keys.length; i += 1000) await env.BUCKET.delete(keys.slice(i, i + 1000));
         return json({ ok: true, deleted: keys.length });
@@ -964,7 +981,7 @@ async function handleTimelapse(request, env, url) {
         if (!/^([01]\d|2[0-3])[0-5]\d$/.test(hhmm)) return tlText(404, 'Not found');
         const key = `${TL_FRAMES}${day}/${hhmm}.jpg`;
         if (method === 'GET') {
-          if (!builderAuthorized(request, env)) return tlText(401, 'Unauthorized');
+          if (!builderAuthorized(request, env)) return refused();
           const o = await env.BUCKET.get(key);
           if (!o) return tlText(404, 'Not found');
           return new Response(o.body, { headers: Object.assign({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store' }, TL_CORS) });
