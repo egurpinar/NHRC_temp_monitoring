@@ -641,4 +641,18 @@ test('the main page links here, under the camera\'s photo', () => {
   assert.ok(card.indexOf('newboathouse/') > card.indexOf('id="camera-img"'), 'under the photo');
 });
 
+test('the dock photo carries the club\'s logo, top right, as the timelapse does - in the photo\'s own box, so it goes when the photo does', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  // The box around the photo: hidden whole when there is no photo (showCameraFrame hides img.parentElement).
+  const box = /<div style="position:relative;[^"]*">\s*<img id="camera-img"[\s\S]*?<\/div>\s*<div class="note-text" id="camera-note">/.exec(main);
+  assert.ok(box, 'the photo\'s box');
+  assert.ok(/<img class="camera-logo" src="map\/nhrc-map\.png" width="160" height="136" alt=""\/>/.test(box[0]), 'the map\'s logo, in that box, decorative');
+  assert.ok(/img\.parentElement\.style\.display = 'none'/.test(main), 'the box is what is hidden when there is no photo');
+  const css = /\.camera-logo\{([^}]*)\}/.exec(main)[1];
+  assert.ok(/position:absolute;top:8px;right:8px;/.test(css) && /width:clamp\(36px, 9%, 113px\)/.test(css) && /pointer-events:none/.test(css), css);
+  // The backup camera's label (top left) stops short of it.
+  assert.ok(/\.camera-badge\{[^}]*max-width:calc\(100% - 24px - clamp\(36px, 9%, 113px\)\)/.test(main));
+  assert.ok(fs.existsSync(path.join(__dirname, '..', 'map', 'nhrc-map.png')));
+});
+
 run();

@@ -192,7 +192,9 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .chart-stats{margin:2px 0 14px;}
 .camera-badge{position:absolute;top:8px;left:8px;padding:4px 9px;border-radius:8px;background:rgba(13,31,60,.88);
   border:1px solid rgba(255,209,102,.6);color:#ffd166;font-size:.66rem;font-weight:700;letter-spacing:.06em;
-  text-transform:uppercase;line-height:1.3;max-width:calc(100% - 16px);}
+  text-transform:uppercase;line-height:1.3;max-width:calc(100% - 24px - clamp(36px, 9%, 113px));}
+/* The club's logo on the photo, top right - as on the timelapse's frames (9% of the width there too). */
+.camera-logo{position:absolute;top:8px;right:8px;width:clamp(36px, 9%, 113px);height:auto;pointer-events:none;}
 .temp-stat label{display:block;font-family:var(--fsans);font-size:.63rem;color:var(--muted);letter-spacing:.09em;text-transform:uppercase;margin-bottom:3px;}
 .temp-stat span{font-family:var(--fserif);font-size:1.4rem;font-weight:700;color:var(--white);}
 
@@ -545,6 +547,9 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         <!-- On the photo itself, so nobody mistakes the backup camera's view
              (a different stretch of river) for the dock's. -->
         <div id="camera-badge" class="camera-badge" style="display:none;"></div>
+        <!-- The club's logo, as on the timelapse: drawn over the photo here,
+             so the Pi sends the photo as before. It goes with the photo. -->
+        <img class="camera-logo" src="map/nhrc-map.png" width="160" height="136" alt=""/>
       </div>
       <div class="note-text" id="camera-note">Updates automatically, around the clock.</div>
       <!-- The new boathouse's daily timelapse (newboathouse/index.html). -->
