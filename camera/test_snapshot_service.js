@@ -50,6 +50,21 @@ async function awayFromSlotMark(secs = 30) {
   if (left < secs * 1000) await new Promise(r => setTimeout(r, left + 1500));
 }
 
+/**
+ * Whether a capture's "done" is in the timelapse's notes (tlDir/.interval-log)
+ * - the last thing a capture does. A test that stops the service and then
+ * reads the notes must wait for this, not for the "saved" line or the
+ * recording's folder going: the service removes the recording, then looks
+ * through /proc for an ffmpeg left running, and only then notes "done". On
+ * GitHub's busy runner that look took long enough, now and then, for a test
+ * that stopped the service once the folder had gone to find "start" alone
+ * (the evening runs of 7 and 9 November 2026; reproduced with the look slowed
+ * to a quarter of a second).
+ */
+const notedDone = (tlDir) => {
+  try { return / done$/m.test(fs.readFileSync(path.join(tlDir, '.interval-log'), 'utf8')); } catch (e) { return false; }
+};
+
 let passed = 0, failed = 0;
 const failures = [];
 // Async tests run one after another, each with a deadline, and the summary
@@ -4442,11 +4457,13 @@ if (HAVE_FFMPEG) {
     const box = timelapseSandbox();
     await awayFromSlotMark();
     const t0 = Date.now();
-    // Stopped once the frame is saved AND its recording removed: the service
-    // says "saved" first and clears up just after, and stopping it at the
-    // first word beat the clearing up now and then (on GitHub's runner).
+    // Stopped once the frame is saved, its recording removed AND the capture
+    // noted as done: the service says "saved" first, clears up just after, and
+    // notes "done" last - stopping it at the word, or once the folder had gone,
+    // beat the rest now and then on GitHub's runner (see notedDone).
     const r = await box.run([], Object.assign({ TIMELAPSE_RECORD_SECONDS: '20', TIMELAPSE_WORK_DIR: path.join(box.dir, 'run') }, allDay),
-      { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)/.test(o) && noRecordingIn(path.join(box.dir, 'run')), maxMs: 45000 });
+      { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)/.test(o) && noRecordingIn(path.join(box.dir, 'run'))
+        && notedDone(box.tlOut), maxMs: 45000 });
     assert.ok(/Timelapse: "Downstream Lot" every 5 min from 00:00 to 23:59 \(today 00:00-23:59, 288 frames\) -> \S+timelapse\/YYYY-MM-DD\/ \(the sharpest frame of up to 20 s of live video, stopping once a 1080-line keyframe has arrived; a frame that fails is skipped; paused under 40% battery; keeps 40 MB of memory for Pi-hole and 500 MB of disk free\); recorded in \S+\/run( \((in memory|on the SD card)\))?\. Test it now with: sudo kill -USR2 \d+/.test(r.out), r.out);
     const saved = /Timelapse (\d{4}-\d\d-\d\d) (\d\d):(\d\d): saved (\S+) - 1920x1080, \d+ KB, from live video \(\d+ s; stopped once 1920x1080 had arrived; \d+ of \d+ packets missing; resolution 1920x1080 from [\d.]+ s; keyframes checked: [\d.]+ s 1920x1080 clean\); took \d+ s\. Battery 87%\. Memory: this program \d+ MB.*; the Pi had at least \d+ MB available throughout\./.exec(r.out);
     assert.ok(saved, r.out);
@@ -5539,7 +5556,8 @@ if (HAVE_FFMPEG) {
     try {
       await awayFromSlotMark();
       await seedMain(box, 20);
-      const r = await box.run('standby', [], {}, { until: anyFrame, settleMs: 300, maxMs: 45000 });
+      // Until the capture is noted as done, which this test reads (see notedDone).
+      const r = await box.run('standby', [], {}, { until: (o) => anyFrame(o) && notedDone(box.tlOut('standby')), settleMs: 300, maxMs: 45000 });
       assert.ok(/The main Pi has not checked in for 20 min - this Pi is taking over the cameras/.test(r.out), r.out);
       const saved = /Timelapse (\d{4}-\d\d-\d\d) (\d\d):(\d\d): saved (\S+) - 1920x1080, \d+ KB, from live video/.exec(r.out);
       assert.ok(saved, r.out);
