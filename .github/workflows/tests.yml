@@ -55,9 +55,11 @@ jobs:
         # skipped without them; jq and bc are fetch_temp.sh's; ffmpeg and the
         # DejaVu font make the timelapse's videos (test_build_timelapse.js).
         # The versions go on the run page: the runner's tools are newer than a
-        # laptop's, and that is where a test meets them first.
+        # laptop's, and that is where a test meets them first. A stalled
+        # download from Ubuntu's mirror is given up after 30 s and tried again.
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends jq bc ffmpeg openssh-server fonts-dejavu-core \
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $APT update -qq && sudo apt-get $APT install -y -qq --no-install-recommends jq bc ffmpeg openssh-server fonts-dejavu-core \
             || echo "::warning::could not install the tools - the camera suite's ffmpeg and ssh tests will be skipped"
           v() { "$@" 2>&1 | head -1 || true; }
           echo "::notice title=The runner::$(. /etc/os-release && echo "$PRETTY_NAME") | node $(node --version) | $(v jq --version) | $(v bash --version | sed 's/ (.*//') | $(v date --version) | $(v git --version) | $(v bc --version) | $(v python3 --version) | $(v ffmpeg -version | cut -d' ' -f1-3) | $(v ssh -V)"
