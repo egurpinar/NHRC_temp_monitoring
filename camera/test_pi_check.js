@@ -620,6 +620,43 @@ test('install is for the Mac, and checks the Pis\' names before it does anything
 section('3. With a real ssh server: the key gets the report, and nothing else');
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** A port of 127.0.0.1 the system has just given out as free - not one another test's server is on. */
+function freePort() {
+  return Number(execFileSync(process.execPath, ['-e',
+    "const s = require('net').createServer().listen(0, '127.0.0.1', () => { process.stdout.write(String(s.address().port)); s.close(); });"],
+  { encoding: 'utf8' }));
+}
+
+/**
+ * A real sshd of this test's, answering on a free port: { sshd, port }, or
+ * null. Several of these suites run at once in the time-travel step: a server
+ * that could not have its port (taken by another meanwhile) never wrote its
+ * pid file, and is tried again on another port - its pid file, and its
+ * greeting on the port, are the proof it is this test's own and listening.
+ */
+function startSshd(t, user) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const port = freePort();
+    const pidFile = path.join(t, 'sshd.pid');
+    try { fs.unlinkSync(pidFile); } catch (e) { /* none yet */ }
+    fs.writeFileSync(path.join(t, 'sshd_config'), [`Port ${port}`, 'ListenAddress 127.0.0.1', `HostKey ${t}/hostkey`, `PidFile ${pidFile}`,
+      `AuthorizedKeysFile ${t}/authorized_keys`, 'StrictModes no', 'UsePAM no', 'PasswordAuthentication no',
+      'KbdInteractiveAuthentication no', 'PubkeyAuthentication yes', 'AcceptEnv LANG LC_*'].join('\n') + '\n');
+    fs.writeFileSync(path.join(t, 'ssh_config'), `Host pi\n  HostName 127.0.0.1\n  Port ${port}\n  User ${user}\n`
+      + `  UserKnownHostsFile ${t}/known_hosts\n  StrictHostKeyChecking no\n  LogLevel ERROR\n`);
+    const sshd = require('child_process').spawn('/usr/sbin/sshd', ['-D', '-e', '-f', path.join(t, 'sshd_config')], { stdio: 'ignore' });
+    const ours = () => { try { return Number(fs.readFileSync(pidFile, 'utf8').trim()) === sshd.pid; } catch (e) { return false; } };
+    const greets = () => /^SSH-2\.0/.test(spawnSync('bash', ['-c', `exec 3<>/dev/tcp/127.0.0.1/${port} || exit 9; timeout 3 head -c 7 <&3`],
+      { encoding: 'utf8', timeout: 5000 }).stdout || '');
+    for (let i = 0; i < 50; i++) {
+      if (ours() && greets()) return { sshd, port };
+      execFileSync('sleep', ['0.1']);
+    }
+    sshd.kill('SIGKILL');
+  }
+  return null;
+}
+
 if (fs.existsSync('/usr/sbin/sshd') && fs.existsSync('/usr/bin/ssh-keygen') && fs.existsSync('/usr/bin/ssh')) {
   const t = fresh('sshd');
   const user = os.userInfo().username;
@@ -628,18 +665,12 @@ if (fs.existsSync('/usr/sbin/sshd') && fs.existsSync('/usr/bin/ssh-keygen') && f
   execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'nhrc-pi-health (read-only health report)', '-f', key]);
   // The line install puts on the Pi - with the report from this repository.
   fs.writeFileSync(path.join(t, 'authorized_keys'), `restrict,command="${HEALTH}" ${fs.readFileSync(`${key}.pub`, 'utf8')}`, { mode: 0o600 });
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  fs.writeFileSync(path.join(t, 'sshd_config'), [`Port ${port}`, 'ListenAddress 127.0.0.1', `HostKey ${t}/hostkey`, `PidFile ${t}/sshd.pid`,
-    `AuthorizedKeysFile ${t}/authorized_keys`, 'StrictModes no', 'UsePAM no', 'PasswordAuthentication no',
-    'KbdInteractiveAuthentication no', 'PubkeyAuthentication yes', 'AcceptEnv LANG LC_*'].join('\n') + '\n');
-  fs.writeFileSync(path.join(t, 'ssh_config'), `Host pi\n  HostName 127.0.0.1\n  Port ${port}\n  User ${user}\n`
-    + `  UserKnownHostsFile ${t}/known_hosts\n  StrictHostKeyChecking no\n  LogLevel ERROR\n`);
   const wrapper = path.join(t, 'ssh');
   fs.writeFileSync(wrapper, `#!/bin/bash\nexec ssh -F ${t}/ssh_config "$@"\n`, { mode: 0o755 });
-  const sshd = require('child_process').spawn('/usr/sbin/sshd', ['-D', '-e', '-f', path.join(t, 'sshd_config')], { stdio: 'ignore' });
+  const started = startSshd(t, user);
+  test('a real ssh server for these tests: started, on a port of its own, answering', () => { assert.ok(started, 'sshd did not answer on any of 3 ports'); });
+  const { sshd, port } = started || { sshd: { kill() {} }, port: 0 };
   try {
-    for (let i = 0; i < 50 && !fs.existsSync(path.join(t, 'sshd.pid')); i++) execFileSync('sleep', ['0.1']);
-    execFileSync('sleep', ['0.3']);
     const as = (args, opts = {}) => spawnSync(args[0], args.slice(1), Object.assign({ encoding: 'utf8', timeout: 20000 }, opts));
     const base = ['-F', `${t}/ssh_config`, '-i', key, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes'];
 
@@ -674,7 +705,7 @@ if (fs.existsSync('/usr/sbin/sshd') && fs.existsSync('/usr/bin/ssh-keygen') && f
       assert.ok(x.status !== 0 && !/etc|usr/.test(x.stdout), 'no sftp');
       // A forward through the key to the ssh server itself: a connection made
       // through it must get nothing - not the server's greeting.
-      const local = port + 1;
+      const local = freePort();
       const fwd = require('child_process').spawn('ssh', [...base, '-N', '-L', `${local}:127.0.0.1:${port}`, 'pi'], { stdio: 'ignore' });
       try {
         execFileSync('sleep', ['1.5']);
