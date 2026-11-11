@@ -53,38 +53,43 @@
     if (day >= sunday - 8 * 864e5 && day <= sunday + 864e5) return 'easter';
     return '';
   }
+  /**
+   * The season, on every page - its colours (SEASONS and 8-BIT SEASONS below)
+   * and its pixel art (8bit/seasons.js, fetched only then): the one on the
+   * club's calendar, or the one named in the address, to see it on any day
+   * (?season=halloween; season=none: none).
+   */
+  function season(root, q) {
+    try {
+      var m = /(^|&)season=([a-z0-9]*)(&|$)/.exec(q);
+      var s = m ? m[2] : seasonOn(new Date());
+      if (/^(halloween|christmas|newyear|easter|july4)$/.test(s)) {
+        var art = document.createElement('script');
+        art.src = '8bit/seasons.js';
+        art.async = true;
+        // Not there (no signal, say): the year-round look, not an empty space above the header.
+        art.onerror = function () { root.removeAttribute('data-season'); };
+        document.head.appendChild(art);
+        root.setAttribute('data-season', s);
+      }
+    } catch (e) { /* the year-round look */ }
+  }
+  var root = document.documentElement, q = '';
+  try { q = String(location.search).replace(/^\?/, ''); } catch (e) { /* no address to read */ }
   // roworno.com/8bit (it comes here as /?8bit): the 8-bit look, for as long
   // as the address says so - never remembered, so the next visit is as before.
-  try {
-    var q = String(location.search).replace(/^\?/, '');
-    if (/(^|&)8bit(=|&|$)/.test(q)) {
-      var root = document.documentElement;
-      root.setAttribute('data-theme', '8bit');
-      // Its season, with its colours (8-BIT SEASONS below) and its pixel art
-      // (8bit/seasons.js, fetched only then). A season named in the address
-      // shows it on any day (?8bit&season=halloween; season=none: none).
-      try {
-        var m = /(^|&)season=([a-z0-9]*)(&|$)/.exec(q);
-        var s = m ? m[2] : seasonOn(new Date());
-        if (/^(halloween|christmas|newyear|easter|july4)$/.test(s)) {
-          var art = document.createElement('script');
-          art.src = '8bit/seasons.js';
-          art.async = true;
-          // Not there (no signal, say): the year-round look, not an empty space above the header.
-          art.onerror = function () { root.removeAttribute('data-season'); };
-          document.head.appendChild(art);
-          root.setAttribute('data-season', s);
-        }
-      } catch (e) { /* the year-round 8-bit look */ }
-      return;
-    }
-  } catch (e) { /* no address to read */ }
+  if (/(^|&)8bit(=|&|$)/.test(q)) {
+    root.setAttribute('data-theme', '8bit');
+    season(root, q);
+    return;
+  }
   var t = null;
   try { t = localStorage.getItem('nhrc-theme'); } catch (e) { /* storage blocked */ }
   if (t !== 'light' && t !== 'dark') {
     t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   }
-  document.documentElement.setAttribute('data-theme', t);
+  root.setAttribute('data-theme', t);
+  season(root, q);
 })();
 </script>
 
@@ -246,6 +251,73 @@
 :root[data-theme="8bit"][data-season="july4"]{
   --px-line:#f2f4f8;--px-tile-line:#86a6d4;
   --border:#f2f4f8;--rb-border:#f2f4f8;--input-border:#f2f4f8;--chart-tip-border:#f2f4f8;
+}
+/* SEASONS: the main page's colours at Halloween, Christmas and the New Year,
+   Easter and the Fourth of July (the <head> script sets data-season; the
+   pixel art is 8bit/seasons.js), dark and light alike, in its usual design.
+   Statuses keep their colours; red is never a frame or a heading. Each pair
+   checked as the year-round ones are (scripts/test_site_theme.js, section 8). */
+:root[data-theme="dark"][data-season="halloween"]{
+  --navy:#170e24;--navy2:#21153a;--navy3:#2c1d4a;--gold:#ff9e45;--gold2:#ffc27a;--white:#f7f2ff;--muted:#c4b6da;
+  --border:rgba(255,158,69,0.24);--danger:#ff6b6b;--warn:#ff9b45;--ok:#7fe08e;--caution:#ffe066;--bad:#ffa3a3;--warn-text:#ffb35c;
+  --ok-dot:#7fe08e;--caution-dot:#ffe066;--bad-dot:#ff7a7a;--warn-dot:#ffb35c;--rb-border:rgba(196,182,218,.3);
+  --glow-blue:rgba(140,80,220,.18);--glow-green:rgba(255,140,40,.10);--focus:#ffe066;--chart-line:#ff9e45;--chart-fill:255,158,69;
+  --chart-tick:#d9cdeb;--chart-observed-fill:rgba(255,158,69,0.10);--chart-forecast:#b99bff;--chart-forecast-fill:rgba(185,155,255,0.05);
+  --chart-point-border:#21153a;--chart-tip-bg:#21153a;--chart-tip-border:rgba(185,155,255,0.45);--chart-tip-title:#c9b3ff;
+  --chart-tip-body:#f7f2ff;--flood-8:#ffd166;--flood-9:#ffb35c;--flood-10:#ff8c42;--flood-11:#ff8a8a;--flood-12:#ff5c5c;
+}
+:root[data-theme="light"][data-season="halloween"]{
+  --navy:#fbf3ea;--navy2:#ffffff;--navy3:#f6eadc;--gold:#6a2c9e;--gold2:#55207f;--white:#26152f;--muted:#5b4868;--border:rgba(106,44,158,.24);
+  --ink:38,21,47;--rb-border:rgba(91,72,104,.45);--input-border:#8a7a96;--code-bg:rgba(38,21,47,.07);--glow-blue:rgba(106,44,158,.07);
+  --glow-green:rgba(255,140,40,.08);--focus:#6a2c9e;--chart-line:#c25400;--chart-fill:230,120,30;--chart-tick:#5b4868;
+  --chart-grid:rgba(38,21,47,0.08);--chart-observed-fill:rgba(230,120,30,0.14);--chart-forecast:#6a2c9e;
+  --chart-forecast-fill:rgba(106,44,158,0.06);--chart-point-border:#ffffff;--chart-tip-bg:#ffffff;--chart-tip-border:rgba(106,44,158,0.45);
+  --chart-tip-title:#6a2c9e;--chart-tip-body:#26152f;
+  color-scheme:light;
+}
+:root[data-theme="dark"][data-season="christmas"],:root[data-theme="dark"][data-season="newyear"]{
+  --navy:#0c2419;--navy2:#123323;--navy3:#1a432f;--gold:#f6c75a;--gold2:#ffe08a;--white:#f6fbf7;--muted:#b6d2c3;
+  --border:rgba(246,199,90,0.24);--danger:#ff6b6b;--warn:#f5a85a;--ok:#8be0a4;--caution:#ffe066;--bad:#ffaaaa;--warn-text:#f7ae62;
+  --ok-dot:#8be0a4;--caution-dot:#ffe066;--bad-dot:#ff7a7a;--warn-dot:#f7ae62;--rb-border:rgba(182,210,195,.3);
+  --glow-blue:rgba(246,199,90,.10);--glow-green:rgba(80,200,120,.12);--focus:#ffe066;--chart-line:#f6c75a;--chart-fill:246,199,90;
+  --chart-tick:#cfe4d8;--chart-observed-fill:rgba(246,199,90,0.10);--chart-forecast:#8cc8ff;--chart-forecast-fill:rgba(140,200,255,0.05);
+  --chart-point-border:#123323;--chart-tip-bg:#123323;--chart-tip-border:rgba(140,200,255,0.45);--chart-tip-title:#8cc8ff;
+  --chart-tip-body:#f6fbf7;--flood-8:#ffd166;--flood-9:#f7ae62;--flood-10:#f5873a;--flood-11:#ff8a8a;--flood-12:#ff5c5c;
+}
+:root[data-theme="light"][data-season="christmas"],:root[data-theme="light"][data-season="newyear"]{
+  --navy:#f0f6f2;--navy2:#ffffff;--navy3:#e6f0e9;--gold:#8a5c00;--gold2:#7a5200;--white:#11261a;--muted:#465c4f;--border:rgba(29,107,58,.24);
+  --ink:17,38,26;--rb-border:rgba(70,92,79,.45);--input-border:#74887b;--code-bg:rgba(17,38,26,.07);--glow-blue:rgba(196,148,30,.07);
+  --glow-green:rgba(29,107,58,.07);--focus:#1d6b3a;--chart-line:#1d6b3a;--chart-fill:29,107,58;--chart-tick:#465c4f;
+  --chart-grid:rgba(17,38,26,0.08);--chart-observed-fill:rgba(29,107,58,0.12);--chart-forecast:#1a6fb5;
+  --chart-forecast-fill:rgba(26,111,181,0.06);--chart-point-border:#ffffff;--chart-tip-bg:#ffffff;--chart-tip-border:rgba(29,107,58,0.45);
+  --chart-tip-title:#1d6b3a;--chart-tip-body:#11261a;
+  color-scheme:light;
+}
+:root[data-theme="dark"][data-season="easter"]{
+  --navy:#1a1830;--navy2:#232043;--navy3:#2d2a55;--gold:#cbb2ff;--gold2:#e2d4ff;--white:#f8f6ff;--muted:#c8c3e3;
+  --border:rgba(203,178,255,0.26);--danger:#ff6b6b;--warn:#f0a450;--ok:#8be0a4;--caution:#ffe066;--bad:#ffaaaa;--warn-text:#f7ae62;
+  --ok-dot:#8be0a4;--caution-dot:#ffe066;--bad-dot:#ff7a7a;--warn-dot:#f7ae62;--rb-border:rgba(200,195,227,.3);
+  --glow-blue:rgba(203,178,255,.14);--glow-green:rgba(255,170,212,.10);--focus:#ffe066;--chart-line:#ffaad4;--chart-fill:255,170,212;
+  --chart-tick:#d6d1ee;--chart-observed-fill:rgba(255,170,212,0.10);--chart-forecast:#8be0a4;--chart-forecast-fill:rgba(139,224,164,0.05);
+  --chart-point-border:#232043;--chart-tip-bg:#232043;--chart-tip-border:rgba(203,178,255,0.45);--chart-tip-title:#cbb2ff;
+  --chart-tip-body:#f8f6ff;--flood-8:#ffd166;--flood-9:#f7ae62;--flood-10:#f5873a;--flood-11:#ff8a8a;--flood-12:#ff5c5c;
+}
+:root[data-theme="light"][data-season="easter"]{
+  --navy:#fbf8ff;--navy2:#ffffff;--navy3:#f3eefb;--gold:#6b3fa0;--gold2:#55307f;--white:#1f2433;--muted:#545a70;--border:rgba(107,63,160,.22);
+  --ink:31,36,51;--rb-border:rgba(84,90,112,.45);--input-border:#7c8196;--code-bg:rgba(31,36,51,.07);--glow-blue:rgba(255,150,200,.08);
+  --glow-green:rgba(108,192,112,.08);--focus:#6b3fa0;--chart-line:#2e7a45;--chart-fill:46,122,69;--chart-tick:#545a70;
+  --chart-grid:rgba(31,36,51,0.08);--chart-observed-fill:rgba(46,122,69,0.12);--chart-forecast:#6b3fa0;
+  --chart-forecast-fill:rgba(107,63,160,0.06);--chart-point-border:#ffffff;--chart-tip-bg:#ffffff;--chart-tip-border:rgba(107,63,160,0.45);
+  --chart-tip-title:#6b3fa0;--chart-tip-body:#1f2433;
+  color-scheme:light;
+}
+:root[data-theme="dark"][data-season="july4"]{
+  --border:rgba(242,244,248,0.22);--rb-border:rgba(242,244,248,.3);--glow-blue:rgba(26,111,181,.25);--glow-green:rgba(214,51,58,.10);
+}
+:root[data-theme="light"][data-season="july4"]{
+  --gold:#1d3f7a;--gold2:#163261;--border:rgba(29,63,122,.25);--focus:#1d3f7a;--glow-blue:rgba(29,63,122,.08);
+  --glow-green:rgba(214,51,58,.06);--chart-forecast:#1d3f7a;--chart-tip-title:#1d3f7a;--chart-tip-border:rgba(29,63,122,0.45);
+  color-scheme:light;
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--navy);color:var(--white);font-family:var(--fsans);min-height:100vh;font-size:16px;}
@@ -640,12 +712,13 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 :root[data-theme="8bit"] .camera-badge{background:var(--px-screen);color:var(--gold);border:2px solid var(--gold);}
 :root[data-theme="8bit"] .w24-plot svg path{shape-rendering:crispEdges;}
 :root[data-theme="8bit"] #toast{background:var(--px-line);color:var(--px-screen);border:2px solid var(--px-line);}
-/* The seasons (8-BIT SEASONS above; 8bit/seasons.js): room above the header for
-   the season's scene from the first moment, so nothing moves when it is drawn;
-   a picnic cloth either side at the Fourth of July; the map's photos in the
-   season's colours at Halloween and Easter (the same four brightness steps). */
-:root[data-theme="8bit"][data-season] #app{padding-top:100px;}
-@media(max-width:599px){:root[data-theme="8bit"][data-season] #app{padding-top:76px;}}
+/* The seasons (SEASONS and 8-BIT SEASONS above; 8bit/seasons.js): room above
+   the header for the season's scene from the first moment, on every page, so
+   nothing moves when it is drawn. On the 8-bit page, a picnic cloth either
+   side at the Fourth of July, and the map's photos in the season's colours at
+   Halloween and Easter (the same four brightness steps). */
+:root[data-season] #app{padding-top:100px;}
+@media(max-width:599px){:root[data-season] #app{padding-top:76px;}}
 :root[data-theme="8bit"][data-season="july4"] body{background-color:#fff7ef;
   background-image:linear-gradient(90deg,rgba(214,51,58,.5) 50%,transparent 0),linear-gradient(rgba(214,51,58,.5) 50%,transparent 0);background-size:16px 16px;}
 :root[data-theme="8bit"][data-season="halloween"] .leaflet-tile{filter:url(#px-tones-halloween);}

@@ -20,13 +20,14 @@
  *     from the address and never remembered, statuses told apart by more
  *     than colour, its charts, the font (the site's own, renamed as its
  *     licence asks) and the small page at /8bit.
- *  8. The 8-bit page through the year: each season's colours (contrast, the
- *     statuses' meaning, red never a frame or a heading), its dates on New
- *     York's calendar (every day of six years, the midnights, Easter by two
- *     methods and a third source), the season named in the address, the
- *     pixel art (8bit/seasons.js) fetched only then, and drawn: where, hidden
- *     from screen readers, never in the way of a tap, still when motion is
- *     turned down, snow only in winter.
+ *  8. The seasons, on the main page (dark and light) and the 8-bit one: each
+ *     season's colours (contrast, the statuses' meaning, red never a frame or
+ *     a heading), its dates on New York's calendar (every day of six years,
+ *     the midnights, Easter by two methods and a third source), the season
+ *     named in the address, the pixel art (8bit/seasons.js) fetched only
+ *     then, and drawn: where, more on a wide screen, hidden from screen
+ *     readers, never in the way of a tap, still when motion is turned down,
+ *     snow only in winter.
  *
  * Before release (October 2026) the page was also checked in a real browser
  * engine, both themes, at widths from 320 to 900px: every element's real
@@ -165,10 +166,11 @@ section('3. No colour outside the palette');
 test('no dark-only colour is written into the page outside the palette', () => {
   const style = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
   // The palettes: dark, light, 8-bit and the 8-bit page's seasons (section 8), together at the top.
-  const palettes = [style.indexOf(':root{'), style.indexOf('}', style.indexOf(':root[data-theme="8bit"][data-season="july4"]{'))];
+  const palettes = [style.indexOf(':root{'), style.indexOf('*{box-sizing:border-box;')];
   assert.ok(style.indexOf(':root[data-theme="light"]{') < style.indexOf(':root[data-theme="8bit"]{'), 'the palettes together, at the top');
   assert.ok(style.indexOf(':root[data-theme="8bit"]{') < style.indexOf(':root[data-theme="8bit"][data-season="halloween"]{')
-    && style.indexOf(':root[data-theme="8bit"][data-season="july4"]{') < style.indexOf('*{box-sizing:border-box;'), 'the seasons straight after the 8-bit one');
+    && style.indexOf(':root[data-theme="light"][data-season="july4"]{') < style.indexOf('*{box-sizing:border-box;'), 'the seasons straight after the 8-bit one');
+  assert.ok(!/:root[^{]*\{[^}]*--[a-z0-9-]+:/.test(style.slice(palettes[1])), 'no colours set after them');
   const css = style.slice(0, palettes[0]) + style.slice(palettes[1]);
   const body = html.slice(html.indexOf('<body>'));
   // Allowed on purpose: the logo (on its own white disc), the Subscribe button
@@ -599,19 +601,20 @@ test('roworno.com/8bit: a small page that sends the visitor to /?8bit - replace(
   assert.ok(!/<link rel="stylesheet"|<img|<iframe|src=/.test(stub), 'nothing loaded from anywhere');
 });
 
-section('8. The 8-bit page through the year (8bit/seasons.js)');
+section('8. The seasons, on the main page and the 8-bit one (8bit/seasons.js)');
 
 const SEASON_NAMES = ['halloween', 'christmas', 'newyear', 'easter', 'july4'];
 const CSS_ALL = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
-/** A season's own colours, as its rule in the palettes sets them (the New Year shares Christmas's). */
-function seasonBlock(name) {
-  const m = new RegExp(`(?:^|\\n|,)(:root\\[data-theme="8bit"\\]\\[data-season="${name}"\\][^{]*)\\{([^}]*)\\}`).exec(CSS_ALL);
-  assert.ok(m, `no colours for ${name}`);
+/** A season's own colours in a theme (8bit, dark or light), as its rule sets them (the New Year shares Christmas's). */
+function seasonBlock(name, theme) {
+  const m = new RegExp(`(?:^|\\n|,)(:root\\[data-theme="${theme}"\\]\\[data-season="${name}"\\][^{]*)\\{([^}]*)\\}`).exec(CSS_ALL);
+  assert.ok(m, `no colours for ${name} (${theme})`);
   const out = {};
   for (const v of m[2].matchAll(/--([a-z0-9-]+):([^;]+);/g)) out[v[1]] = v[2].trim();
   return { selector: m[1], vars: out, body: m[2] };
 }
-const SEASON_PALETTES = Object.fromEntries(SEASON_NAMES.map(n => [n, Object.assign({}, EIGHT, seasonBlock(n).vars)]));
+const BASE_OF = { '8bit': EIGHT, dark: DARK, light: LIGHT };
+const PALETTE = (name, theme) => Object.assign({}, BASE_OF[theme], seasonBlock(name, theme).vars);
 const ART = require(path.join(__dirname, '..', '8bit', 'seasons.js'));
 const ART_SRC = fs.readFileSync(path.join(__dirname, '..', '8bit', 'seasons.js'), 'utf8');
 
@@ -625,30 +628,53 @@ function hue(c) {
 }
 const red = (c) => { const h = hue(c); return h !== null && (h >= 345 || h <= 12); };
 
-test('seasons: every text and status colour is readable where it is used, in each season\'s colours', () => {
+test('seasons on the 8-bit page: every text and status colour readable where its styles put it', () => {
   const short = [];
-  for (const [name, v] of Object.entries(SEASON_PALETTES)) {
+  for (const name of SEASON_NAMES) {
+    const v = PALETTE(name, '8bit');
     for (const [what, fg, bgs, min] of PAIRS_8BIT) {
       const r = ratio(v[fg], bgs.map(b => PX(v, b)));
       if (r < min) short.push(`${name}, ${what}: ${v[fg]} = ${r.toFixed(2)}:1, needs ${min}:1`);
     }
   }
   assert.deepStrictEqual(short, []);
-  // The New Year in Christmas's colours; Easter a light page, its browser controls light too.
-  assert.ok(CSS_ALL.includes(':root[data-theme="8bit"][data-season="christmas"],:root[data-theme="8bit"][data-season="newyear"]{'));
-  assert.ok(/color-scheme:light;/.test(seasonBlock('easter').body));
+  assert.ok(CSS_ALL.includes(':root[data-theme="8bit"][data-season="christmas"],:root[data-theme="8bit"][data-season="newyear"]{'), 'the New Year in Christmas\'s colours');
+  assert.ok(/color-scheme:light;/.test(seasonBlock('easter', '8bit').body), 'Easter a light page, its controls light too');
 });
 
-test('seasons: statuses keep their colours\' meaning (green, yellow, orange, solid red), and red is never a frame or a heading', () => {
-  for (const [name, v] of Object.entries(SEASON_PALETTES)) {
-    const own = seasonBlock(name).vars;
-    assert.deepStrictEqual(Object.keys(own).filter(k => !(k in EIGHT)), [], `${name}: only the 8-bit page's own colour names`);
-    const h = (k) => hue(v[k]);
-    assert.ok(h('ok') >= 90 && h('ok') <= 170, `${name}: no restriction is green (${v.ok})`);
-    assert.ok(h('caution') >= 38 && h('caution') <= 62, `${name}: caution is yellow (${v.caution})`);
-    assert.ok(h('warn-text') >= 15 && h('warn-text') <= 40, `${name}: a warning is orange (${v['warn-text']})`);
-    assert.ok(red(v.bad) && red(v['px-bad-bg']) && red(v['bad-dot']), `${name}: restricted is red`);
-    for (const k of ['px-line', 'px-tile-line', 'gold', 'border', 'white', 'muted', 'chart-line']) assert.ok(!red(v[k]), `${name}: --${k} is not red (${v[k]})`);
+test('seasons on the main page, dark and light: every text and status colour readable where it is used', () => {
+  const short = [];
+  for (const name of SEASON_NAMES) {
+    for (const theme of ['dark', 'light']) {
+      const v = PALETTE(name, theme);
+      for (const [what, fg, bgs, min] of PAIRS) {
+        const r = ratio(v[fg], bgs.map(b => layer(v, b)));
+        if (r < min) short.push(`${name} (${theme}), ${what}: ${v[fg]} = ${r.toFixed(2)}:1, needs ${min}:1`);
+      }
+    }
+    assert.ok(/color-scheme:light;/.test(seasonBlock(name, 'light').body), `${name}: a light page`);
+    assert.ok(!/color-scheme/.test(seasonBlock(name, 'dark').body), `${name}: dark stays dark`);
+  }
+  assert.deepStrictEqual(short, []);
+  for (const theme of ['dark', 'light']) {
+    assert.ok(CSS_ALL.includes(`:root[data-theme="${theme}"][data-season="christmas"],:root[data-theme="${theme}"][data-season="newyear"]{`), theme);
+  }
+});
+
+test('seasons on both pages: statuses keep their colours\' meaning (green, yellow, orange, red), and red is never a frame or a heading', () => {
+  for (const name of SEASON_NAMES) {
+    for (const theme of ['8bit', 'dark', 'light']) {
+      const v = PALETTE(name, theme), own = seasonBlock(name, theme).vars, at = `${name} (${theme})`;
+      assert.deepStrictEqual(Object.keys(own).filter(k => !(k in BASE_OF[theme])), [], `${at}: only the theme's own colour names`);
+      const h = (k) => hue(v[k]);
+      assert.ok(h('ok') >= 90 && h('ok') <= 170, `${at}: no restriction is green (${v.ok})`);
+      assert.ok(h('caution') >= 38 && h('caution') <= 62, `${at}: caution is yellow (${v.caution})`);
+      assert.ok(h('warn-text') >= 15 && h('warn-text') <= 40, `${at}: a warning is orange (${v['warn-text']})`);
+      assert.ok(red(v.bad) && red(v['bad-dot']), `${at}: restricted is red`);
+      for (const k of ['border', 'gold', 'white', 'muted', 'chart-line'].concat(theme === '8bit' ? ['px-line', 'px-tile-line'] : [])) {
+        assert.ok(!red(v[k]), `${at}: --${k} is not red (${v[k]})`);
+      }
+    }
   }
 });
 
@@ -664,8 +690,8 @@ function headAt(iso, search = '?8bit', opts = {}) {
   });
   INIT.runInNewContext({
     Date: At, Intl: IntlAway, location: { search },
-    localStorage: { getItem: () => null, setItem: (k, v) => writes.push([k, v]) },
-    window: { matchMedia: () => ({ matches: false }) },
+    localStorage: { getItem: (k) => (k === 'nhrc-theme' ? opts.stored || null : null), setItem: (k, v) => writes.push([k, v]) },
+    window: { matchMedia: (q) => ({ matches: q === '(prefers-color-scheme: light)' && !!opts.light }) },
     document: {
       documentElement: { setAttribute: (n, val) => { attrs[n] = val; }, removeAttribute: (n) => { delete attrs[n]; } },
       createElement: (tag) => ({ tag }),
@@ -692,7 +718,7 @@ test('Easter Sunday: the page\'s formula against dateutil\'s dates (2025-2060) a
   for (let y = 1900; y < 2300; y++) assert.deepStrictEqual([...easter(y)], gaussEaster(y), `${y}`);
 });
 
-test('seasons on the club\'s calendar: every day of 2026-2031 at noon in New York, as the dates say', () => {
+test('seasons on the club\'s calendar: every day of 2026-2031 at noon in New York, as the dates say - on both pages', () => {
   const ymd = (ms) => new Date(ms).toISOString().slice(0, 10);
   const wrong = [];
   for (let ms = Date.UTC(2026, 0, 1); ms < Date.UTC(2032, 0, 1); ms += 864e5) {
@@ -700,8 +726,9 @@ test('seasons on the club\'s calendar: every day of 2026-2031 at noon in New Yor
     const e = EASTER_REF[y - 2025], sunday = Date.UTC(y, +e.slice(0, 2) - 1, +e.slice(2));
     const want = md >= 1015 && md <= 1031 ? 'halloween' : md >= 1201 && md <= 1225 ? 'christmas' : md >= 1226 || md === 101 ? 'newyear'
       : md >= 628 && md <= 705 ? 'july4' : ms >= sunday - 8 * 864e5 && ms <= sunday + 864e5 ? 'easter' : undefined;
-    const got = headAt(new Date(ms + 17 * 3600e3).toISOString()).season;   // noon in New York is 16:00 or 17:00 UTC
-    if (got !== want) wrong.push(`${ymd(ms)}: ${got} (should be ${want})`);
+    const noon = new Date(ms + 17 * 3600e3).toISOString();   // noon in New York is 16:00 or 17:00 UTC
+    const got = [headAt(noon).season, headAt(noon, '').season];
+    if (got[0] !== want || got[1] !== want) wrong.push(`${ymd(ms)}: ${got} (should be ${want})`);
   }
   assert.deepStrictEqual(wrong, []);
   // The ten days up to Easter Monday, 2027 (Easter Sunday March 28): March 20 to 29.
@@ -710,7 +737,7 @@ test('seasons on the club\'s calendar: every day of 2026-2031 at noon in New Yor
 });
 
 test('seasons begin and end at midnight in New York, not in the visitor\'s or the server\'s time zone', () => {
-  const at = (iso) => headAt(iso).season;
+  const at = (iso) => headAt(iso, '').season;
   // October: EDT, UTC-4.
   assert.deepStrictEqual([at('2026-10-15T03:59:00Z'), at('2026-10-15T04:00:00Z')], [undefined, 'halloween']);
   assert.deepStrictEqual([at('2026-11-01T03:59:00Z'), at('2026-11-01T04:00:00Z')], ['halloween', undefined]);
@@ -723,59 +750,65 @@ test('seasons begin and end at midnight in New York, not in the visitor\'s or th
   assert.deepStrictEqual([at('2027-07-06T03:59:00Z'), at('2027-07-06T04:00:00Z')], ['july4', undefined]);
 });
 
-test('a season named in the address shows it on any day (?8bit&season=...); season=none shows none; nothing else is taken, nothing remembered', () => {
+test('every visitor gets the season, in their own light or dark - or on the 8-bit page; one named in the address shows on any day; nothing remembered', () => {
   const summer = '2027-08-10T16:00:00Z', halloween = '2026-10-20T16:00:00Z';
-  for (const s of SEASON_NAMES) assert.strictEqual(headAt(summer, `?8bit&season=${s}`).season, s, s);
+  // The main page: the season with the visitor's own choice, or their device's.
+  assert.deepStrictEqual(['theme', 'season'].map(k => headAt(halloween, '')[k]), ['dark', 'halloween']);
+  assert.deepStrictEqual(['theme', 'season'].map(k => headAt(halloween, '', { light: true })[k]), ['light', 'halloween']);
+  assert.deepStrictEqual(['theme', 'season'].map(k => headAt(halloween, '', { stored: 'light' })[k]), ['light', 'halloween']);
+  assert.deepStrictEqual(['theme', 'season'].map(k => headAt(halloween, '?8bit')[k]), ['8bit', 'halloween']);
+  assert.deepStrictEqual(['theme', 'season'].map(k => headAt(summer, '')[k]), ['dark', undefined], 'none out of season');
+  // Named in the address, on either page.
+  for (const s of SEASON_NAMES) {
+    assert.strictEqual(headAt(summer, `?season=${s}`).season, s, s);
+    assert.strictEqual(headAt(summer, `?8bit&season=${s}`).season, s, `${s} (8-bit)`);
+  }
   assert.strictEqual(headAt(summer, '?season=easter&8bit').season, 'easter', 'in either order');
-  assert.strictEqual(headAt(halloween, '?8bit&season=none').season, undefined, 'none, in a season');
-  for (const s of ['xmas', 'HALLOWEEN', 'halloween2', '%3Cscript%3E', '']) {
-    const r = headAt(halloween, `?8bit&season=${s}`);
-    assert.strictEqual(r.season, s === '' ? undefined : r.season, s);
-    assert.ok(r.season === undefined || SEASON_NAMES.includes(r.season), `${s}: only a season's name ever reaches the page`);
-  }
-  assert.strictEqual(headAt(halloween, '?8bit&season=<script>').season, 'halloween', 'not a name: the day\'s own season');
-  // Never without the 8-bit page, and never remembered.
-  for (const s of ['?season=halloween', '', '?x=8bit&season=easter']) {
-    const r = headAt(halloween, s);
-    assert.strictEqual(r.season, undefined, s || '(none)');
-    assert.notStrictEqual(r.theme, '8bit');
-    assert.deepStrictEqual(r.fetched, []);
-  }
-  assert.deepStrictEqual(headAt(halloween, '?8bit').writes, []);
+  assert.strictEqual(headAt(halloween, '?season=none').season, undefined, 'none, in a season');
+  assert.strictEqual(headAt(halloween, '?8bit&season=none').season, undefined);
+  for (const s of ['xmas', 'halloween2', '']) assert.strictEqual(headAt(halloween, `?season=${s}`).season, undefined, `not a season's name: ${s}`);
+  for (const s of ['<script>', 'HALLOWEEN', '%3Cscript%3E']) assert.strictEqual(headAt(halloween, `?season=${s}`).season, 'halloween', `not even a name: the day's own season (${s})`);
+  // Never remembered; the 8-bit page only from its address.
+  assert.deepStrictEqual(headAt(halloween, '?8bit&season=easter').writes, []);
+  assert.notStrictEqual(headAt(halloween, '?x=8bit&season=easter').theme, '8bit');
 });
 
-test('the pixel art is fetched only in a season, only on the 8-bit page, from the site itself - and a page that cannot fetch it keeps the year-round look', () => {
-  const r = headAt('2026-10-20T16:00:00Z');
-  assert.strictEqual(r.season, 'halloween');
-  assert.deepStrictEqual(r.fetched.map(e => [e.tag, e.src, e.async]), [['script', '8bit/seasons.js', true]]);
-  assert.deepStrictEqual(headAt('2026-08-10T16:00:00Z').fetched, [], 'not out of season');
-  // Fetched, but not there (no signal): the year-round look again, no empty room above the header.
-  assert.strictEqual(typeof r.fetched[0].onerror, 'function');
-  r.fetched[0].onerror();
-  assert.deepStrictEqual([r.theme, r.season], ['8bit', undefined]);
-  const failed = headAt('2026-10-20T16:00:00Z', '?8bit', { appendThrows: true });
-  assert.deepStrictEqual([failed.theme, failed.season], ['8bit', undefined], 'no season colours, and no empty room above the header');
-  assert.ok(!/<script[^>]*seasons\.js/.test(html), 'never from the page itself: everyone else would fetch it too');
+test('the pixel art is fetched only in a season, on either page, from the site itself - and a page that cannot fetch it keeps the year-round look', () => {
+  for (const search of ['', '?8bit']) {
+    const r = headAt('2026-10-20T16:00:00Z', search);
+    assert.strictEqual(r.season, 'halloween');
+    assert.deepStrictEqual(r.fetched.map(e => [e.tag, e.src, e.async]), [['script', '8bit/seasons.js', true]], search || '(main page)');
+    assert.deepStrictEqual(headAt('2026-08-10T16:00:00Z', search).fetched, [], 'not out of season');
+    // Fetched, but not there (no signal): the year-round look again, no empty room above the header.
+    assert.strictEqual(typeof r.fetched[0].onerror, 'function');
+    r.fetched[0].onerror();
+    assert.strictEqual(r.season, undefined);
+    assert.ok(['dark', '8bit'].includes(r.theme));
+    const failed = headAt('2026-10-20T16:00:00Z', search, { appendThrows: true });
+    assert.deepStrictEqual([failed.theme, failed.season], [search ? '8bit' : 'dark', undefined], 'no season colours, and no empty room');
+  }
+  assert.ok(!/<script[^>]*seasons\.js/.test(html), 'never from the page itself: everyone would fetch it all year');
 });
 
-test('the room kept above the header is the scene\'s size in 8bit/seasons.js; the season\'s colours and room only on the 8-bit page', () => {
-  const wide = /:root\[data-theme="8bit"\]\[data-season\] #app\{padding-top:(\d+)px;\}/.exec(CSS_ALL);
-  const narrow = /@media\(max-width:599px\)\{:root\[data-theme="8bit"\]\[data-season\] #app\{padding-top:(\d+)px;\}\}/.exec(CSS_ALL);
+test('the room kept above the header is the scene\'s size in 8bit/seasons.js, on every page; each season\'s colours name their theme', () => {
+  const wide = /\n:root\[data-season\] #app\{padding-top:(\d+)px;\}/.exec(CSS_ALL);
+  const narrow = /@media\(max-width:599px\)\{:root\[data-season\] #app\{padding-top:(\d+)px;\}\}/.exec(CSS_ALL);
   assert.ok(wide && narrow);
   // 12px above the scene, its height, 16px below it.
   assert.strictEqual(+wide[1], 12 + ART.SCENE_SIZE.wide.height + 16);
   assert.strictEqual(+narrow[1], 12 + ART.SCENE_SIZE.narrow.height + 16);
-  assert.ok(ART_SRC.includes('width >= 600 ? SCENE_SIZE.wide : SCENE_SIZE.narrow') && ART_SRC.includes("'(min-width: 600px)'"), 'the same 600px as the CSS');
-  // Every rule naming a season names the 8-bit page too.
-  const uses = [...CSS_ALL.matchAll(/([^{}]*?)\[data-season/g)].map(m => m[1].split(/[,{}]/).pop());
+  assert.ok(ART_SRC.includes('const wide = width >= 600;') && ART_SRC.includes("'(min-width: 600px)'"), 'the same 600px as the CSS');
+  // Every rule naming a season names its theme too - but the room above the header, kept on every page.
+  const uses = [...CSS_ALL.matchAll(/([^{}]*?)\[data-season/g)].map(m => m[1].split(/[,{}]/).pop().trim());
   assert.strictEqual(uses.length, (CSS_ALL.match(/\[data-season/g) || []).length);
-  assert.ok(uses.length >= 10);
-  for (const u of uses) assert.ok(/:root\[data-theme="8bit"\]$/.test(u.trim()), `a season rule without the 8-bit page: ${u.trim()}`);
+  assert.ok(uses.length >= 20);
+  for (const u of uses) assert.ok(/:root\[data-theme="(8bit|dark|light)"\]$/.test(u) || /(^|\n):root$/.test(u), `a season rule without its theme: ${u}`);
+  assert.strictEqual(uses.filter(u => /(^|\n):root$/.test(u)).length, 2, 'only the room, wide and narrow');
   // The main script - the one the daily email reuses - knows nothing of seasons.
   assert.ok(!/data-season|seasons\.js/.test(mainSrc));
 });
 
-test('the map\'s photos in the season\'s colours at Halloween and Easter: the same four brightness steps as the navy ones', () => {
+test('the 8-bit page\'s map photos in the season\'s colours at Halloween and Easter: the same four brightness steps as the navy ones', () => {
   const tables = (id) => {
     const f = html.match(new RegExp(`<filter id="${id}"[\\s\\S]*?</filter>`))[0];
     return ['R', 'G', 'B'].map(ch => f.match(new RegExp(`<feFunc${ch} type="discrete" tableValues="([^"]+)"`))[1].split(' ').map(Number));
@@ -787,6 +820,7 @@ test('the map\'s photos in the season\'s colours at Halloween and Easter: the sa
     own.forEach((l, i) => assert.ok(Math.abs(l - navy[i]) / navy[i] < 0.05, `${s}, step ${i + 1}: ${l.toFixed(4)} vs ${navy[i].toFixed(4)}`));
     assert.ok(CSS_ALL.includes(`:root[data-theme="8bit"][data-season="${s}"] .leaflet-tile{filter:url(#px-tones-${s});}`));
   }
+  assert.ok(!/:root\[data-theme="(dark|light)"\][^{]*\.leaflet-tile/.test(CSS_ALL), 'the main page\'s map keeps its photos as they are');
 });
 
 test('8bit/seasons.js: every picture well formed, every season\'s things there, and each fits where it goes', () => {
@@ -800,19 +834,39 @@ test('8bit/seasons.js: every picture well formed, every season\'s things there, 
       }
     }
   }
+  for (const t of Object.values(ART.TINTS).concat(Object.values(ART.BURSTS))) for (const c of Object.values(t)) assert.ok(/^#[0-9a-f]{6}$/.test(c), c);
   assert.deepStrictEqual(Object.keys(ART.SCENES), SEASON_NAMES);
+  for (const sk of Object.values(ART.SCENE_SIZE)) assert.ok((sk.height - 8) / sk.k >= 20, 'the frame holds 20 rows');
+  const thingOk = (season, where, it) => {
+    assert.ok(ART.SPRITES[it.s], `${season} ${where}: ${it.s}`);
+    if (it.tint) assert.ok(ART.TINTS[it.tint], `${season} ${where}: ${it.tint}`);
+    if (it.color) assert.ok(ART.BURSTS[it.color], `${season} ${where}: ${it.color}`);
+    if (it.frames) assert.ok(ART.size(it.s).n > 1, `${season} ${where}: ${it.s} has frames to run`);
+  };
   for (const [season, plan] of Object.entries(ART.SCENES)) {
-    for (const k of ['floor', 'sky', 'lights']) if (plan[k]) assert.ok(ART.SPRITES[plan[k]], `${season}: ${plan[k]}`);
-    for (const it of plan.scene) {
-      const { h } = ART.size(it.s);
-      // The scene is 20 picture pixels high inside its frame (40 screen pixels on a phone, 3 x 21 wider).
-      if (it.t !== undefined) assert.ok(it.t + h <= 20, `${season}: ${it.s} from the top`);
-      if (it.b !== undefined) assert.ok(it.b + h <= 20, `${season}: ${it.s} from the bottom`);
-      if (it.color) assert.ok(ART.BURSTS[it.color]);
+    for (const where of ['top', 'bottom']) {
+      const part = plan[where];
+      for (const k of ['floor', 'sky', 'lights']) if (part[k]) assert.ok(ART.SPRITES[part[k]], `${season}: ${part[k]}`);
+      assert.ok(part.things.length >= 8, `${season} ${where}: plenty`);
+      for (const it of part.things) {
+        thingOk(season, where, it);
+        const { h } = ART.size(it.s);
+        // The scenes are 20 picture pixels high inside their frames.
+        if (it.t !== undefined) assert.ok(it.t + h <= 20, `${season} ${where}: ${it.s} from the top`);
+        if (it.b !== undefined) assert.ok(it.b + h <= 20, `${season} ${where}: ${it.s} from the bottom`);
+        if (it.x !== undefined) assert.ok(it.x >= 0 && it.x < 100, `${season} ${where}: ${it.s} across`);
+      }
     }
-    for (const sk of Object.values(ART.SCENE_SIZE)) assert.ok((sk.height - 8) / sk.k >= 20, 'the frame holds 20 rows');
     // The header's line: 10 rows at 2 = 20px, in its 22px of padding, clear of its words.
-    for (const it of plan.ground) assert.ok(ART.size(it.s).h * ART.GROUND.k <= ART.GROUND.height && ART.GROUND.height < 22, `${season}: ${it.s} on the line`);
+    for (const it of plan.line) { thingOk(season, 'line', it); assert.ok(ART.size(it.s).h * ART.GROUND.k <= ART.GROUND.height && ART.GROUND.height < 22, `${season}: ${it.s} on the line`); }
+    for (const side of ['left', 'right']) {
+      assert.strictEqual(plan.margins[side].length, 3, `${season}: three in the ${side} margin`);
+      for (const it of plan.margins[side]) {
+        thingOk(season, side, it);
+        assert.ok(['top', 'middle', 'bottom'].includes(it.v) && it.k >= 4 && ART.size(it.s).w * it.k <= 96, `${season} ${side}: ${it.s} fits a 100px margin`);
+      }
+    }
+    for (const it of plan.flyers || []) { thingOk(season, 'flyers', it); assert.ok(it.t >= 0 && it.t <= 90 && ['fly', 'flutter'].includes(it.move), `${season}: ${it.s} crosses the page`); }
   }
   // The pictures as images: SVG, crisp, the colours as given.
   const uri = ART.svgUri('pumpkin');
@@ -820,9 +874,10 @@ test('8bit/seasons.js: every picture well formed, every season\'s things there, 
   const svg = decodeURIComponent(uri.slice(29, -2));
   assert.ok(/shape-rendering="crispEdges"/.test(svg) && /fill="#ff8a1f"/.test(svg) && /width="24" height="10"/.test(svg));
   assert.ok(/fill="#ff4d4d"/.test(decodeURIComponent(ART.svgUri('burst', ART.BURSTS.red))), 'a firework in another colour');
+  assert.ok(/fill="#f2efe6"/.test(decodeURIComponent(ART.svgUri('pumpkin', ART.TINTS.whitePumpkin))), 'a white pumpkin');
 });
 
-/** Just enough of a page for 8bit/seasons.js: <html>, <head>, <body>, #app, .header. */
+/** Just enough of a page for 8bit/seasons.js: <html>, <head>, <body>, #app with its header, summary and disclaimer, and what follows. */
 function artPage(opts = {}) {
   const make = (tag) => {
     const el = {
@@ -834,12 +889,15 @@ function artPage(opts = {}) {
       removeChild(c) { this.children = this.children.filter(x => x !== c); c.parentNode = null; return c; },
       addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); },
       get firstChild() { return this.children[0] || null; },
+      get nextSibling() { const p = this.parentNode; return p ? p.children[p.children.indexOf(this) + 1] || null : null; },
     };
     return el;
   };
   const root = make('html'), head = make('head'), body = make('body'), app = make('div'), header = make('div'), summary = make('div');
-  app.id = 'app'; header.className = 'header'; summary.className = 'dash-top';
-  root.appendChild(head); root.appendChild(body); body.appendChild(app); app.appendChild(header); app.appendChild(summary);
+  const disclaimer = make('div'), footer = make('div');
+  app.id = 'app'; header.className = 'header'; summary.className = 'dash-top'; disclaimer.id = 'site-disclaimer'; footer.className = 'license';
+  root.appendChild(head); root.appendChild(body); body.appendChild(app);
+  for (const el of [header, summary, disclaimer, footer]) app.appendChild(el);
   const all = (n) => [n, ...n.children.flatMap(all)];
   const is = (el, sel) => sel.split(',').some(s => (s = s.trim(), s[0] === '#' ? el.id === s.slice(1) : s[0] === '.' && el.className.split(' ').includes(s.slice(1))));
   const doc = {
@@ -853,20 +911,26 @@ function artPage(opts = {}) {
 }
 const flat = (el) => [el, ...el.children.flatMap(flat)];
 
-test('8bit/seasons.js on a page: the scene first in #app, things on the header\'s line, the margins and the snow in <body> - all hidden from screen readers and never in the way of a tap', () => {
+test('on a page: a scene above the header and one after the disclaimer, things on the header\'s line, the margins, things crossing behind the page - hidden from screen readers, never in the way of a tap', () => {
   for (const season of SEASON_NAMES) {
     const p = artPage();
     const added = ART.build(p.doc, season, { width: 1024, random: () => 0.5 });
-    const [scene] = p.app.children;
-    assert.strictEqual(scene.className, `px-scene px-${season}`, `${season}: the scene, first in #app`);
-    assert.strictEqual(p.app.children[1], p.header, 'the header next, as before');
+    const names = p.app.children.map(e => e.id || e.className);
+    assert.deepStrictEqual(names, [`px-scene px-${season}`, 'header', 'dash-top', 'site-disclaimer', `px-scene px-bottom px-${season}`, 'license'], `${season}: where the scenes go`);
     const ground = p.header.children.find(e => e.className === 'px-ground');
     const margins = p.body.children.find(e => e.className === 'px-margins');
     assert.ok(ground && margins, season);
+    assert.strictEqual(margins.children.length, 6, `${season}: three a side`);
+    assert.strictEqual(!!p.body.children.find(e => e.className === 'px-flyers'), !!ART.SCENES[season].flyers, `${season}: flyers`);
     for (const el of added.filter(e => e.tagName !== 'STYLE')) assert.strictEqual(el.getAttribute('aria-hidden'), 'true', `${season}: ${el.className}`);
     const css = p.head.children.find(e => e.id === 'px-season-css').textContent;
-    for (const c of ['px-scene', 'px-ground', 'px-margins', 'px-snow']) assert.ok(new RegExp(`\\.${c}\\{[^}]*pointer-events:none`).test(css), `${c} takes no taps`);
-    assert.ok(/\.px-scene i,\.px-scene b,\.px-ground i,\.px-ground b,\.px-margins i,\.px-margins b,\.px-snow i\{[^}]*pointer-events:none/.test(css));
+    for (const c of ['px-scene', 'px-ground', 'px-margins', 'px-flyers', 'px-snow']) assert.ok(new RegExp(`\\.${c}\\{[^}]*pointer-events:none`).test(css), `${c} takes no taps`);
+    assert.ok(/\.px-scene i,\.px-scene b,\.px-ground i,\.px-ground b,\.px-margins i,\.px-margins b,\.px-flyers i,\.px-flyers b,\.px-snow i\{[^}]*pointer-events:none/.test(css));
+    // Crossing behind the page's boxes and words (the column is z-index 1); only the snow falls in front.
+    assert.ok(/\.px-flyers\{[^}]*z-index:0;/.test(css) && /\.px-margins\{[^}]*z-index:0;/.test(css) && /\.px-snow\{[^}]*z-index:5;/.test(css));
+    // Framed as each page frames its boxes.
+    assert.ok(css.includes(':root:not([data-theme="8bit"]) .px-scene{border:1px solid var(--border);border-radius:14px;box-shadow:none;}'));
+    assert.ok(/\.px-scene\{[^}]*border:4px solid var\(--px-line\);box-shadow:4px 4px 0 var\(--px-shadow\)/.test(css));
     // Nothing but the site's own pictures: data: addresses made here, no text, no links, nothing to focus.
     for (const el of added.flatMap(flat)) {
       const bg = el.style.backgroundImage;
@@ -874,33 +938,57 @@ test('8bit/seasons.js on a page: the scene first in #app, things on the header\'
       assert.ok(['DIV', 'I', 'B', 'STYLE'].includes(el.tagName), el.tagName);
       if (el.tagName !== 'STYLE') assert.strictEqual(el.textContent, '');
     }
-    // The 8-bit rules' frames for every sprite that moves frame by frame.
-    for (const id of new Set(added.flatMap(flat).map(e => (/px-(?:f|flick|burst|tw|patrol)-([a-z]+-\d)/.exec(e.style.animation || '') || [])[1]).filter(Boolean))) {
+    // The frames for every sprite that moves frame by frame.
+    for (const id of new Set(added.flatMap(flat).flatMap(e => [...String(e.style.animation || '').matchAll(/px-(?:f|flick|burst|tw|patrol)-([a-z0-9]+-\d)/g)].map(m => m[1])))) {
       assert.ok(css.includes(`-${id}{`), `${season}: the frames for ${id}`);
     }
   }
+  // A page without the disclaimer: the bottom scene last in #app.
+  const q = artPage();
+  q.app.children = q.app.children.filter(e => e.id !== 'site-disclaimer');
+  ART.build(q.doc, 'easter', { width: 1024 });
+  assert.strictEqual(q.app.children[q.app.children.length - 1].className, 'px-scene px-bottom px-easter');
   // No way for anything from outside into the page: no HTML from strings, no network, no eval.
   assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function|fetch\(|XMLHttpRequest|import\(/.test(ART_SRC));
   assert.deepStrictEqual([...ART_SRC.matchAll(/https?:\/\/[^\s"'`]+/g)].map(m => m[0]), ['http://www.w3.org/2000/svg'], 'no address but the SVG namespace');
 });
 
-test('motion turned down: nothing moves, no snow, the fireworks shown at their widest - and the styles stop motion too', () => {
+test('more on a wide screen: every thing on a page 600px wide or more, a phone the ones marked for it - and the scenes in proportion', () => {
+  const count = (plan, wide) => plan.things.filter(it => wide || !it.wide).length;
+  for (const season of SEASON_NAMES) {
+    const plan = ART.SCENES[season];
+    for (const [width, wide] of [[1024, true], [375, false]]) {
+      const p = artPage();
+      ART.build(p.doc, season, { width });
+      const [top] = p.app.children, bottom = p.app.children.find(e => /px-bottom/.test(e.className));
+      const own = (el) => el.children.filter(e => !/px-(sky|tile)/.test(e.className)).length;
+      assert.strictEqual(own(top), count(plan.top, wide), `${season} at ${width}: the top scene`);
+      assert.strictEqual(own(bottom), count(plan.bottom, wide), `${season} at ${width}: the bottom scene`);
+      const flyers = p.body.children.find(e => e.className === 'px-flyers');
+      if (plan.flyers) assert.strictEqual(flyers.children.length, plan.flyers.filter(it => wide || !it.wide).length, `${season} at ${width}: flyers`);
+    }
+    assert.ok(count(plan.top, true) > count(plan.top, false), `${season}: more above the header on a wide screen`);
+    assert.ok(count(plan.top, false) >= 6, `${season}: a phone still gets a scene`);
+  }
+});
+
+test('motion turned down: nothing moves, nothing crosses, no snow, the fireworks shown at their widest - and the styles stop motion too', () => {
   for (const season of SEASON_NAMES) {
     const p = artPage();
     const added = ART.build(p.doc, season, { width: 1024, still: true });
-    assert.ok(!added.some(e => e.className === 'px-snow'), `${season}: no snow`);
+    assert.ok(!added.some(e => e.className === 'px-snow' || e.className === 'px-flyers'), `${season}: no snow, nothing crossing`);
     for (const el of added.flatMap(flat)) assert.ok(!el.style.animation, `${season}: ${el.className || el.tagName} moves`);
   }
   const p = artPage();
   ART.build(p.doc, 'july4', { width: 1024, still: true });
   const bursts = p.all().filter(e => /%23ff4d4d|%236cb6ff/.test(e.style.backgroundImage || ''));
-  assert.ok(bursts.length >= 2 && bursts.every(b => b.style.backgroundPosition === '-90px 0'), 'the third picture of five, at 3 pixels a pixel');
+  assert.ok(bursts.length >= 4 && bursts.every(b => b.style.backgroundPosition === '-90px 0'), 'the third picture of five, at 3 pixels a pixel');
   const css = p.head.children[0].textContent;
-  assert.ok(/@media \(prefers-reduced-motion: reduce\)\{\.px-scene \*,\.px-ground \*,\.px-margins \*\{animation:none !important;\}\.px-snow\{display:none;\}\}/.test(css));
-  assert.ok(/@media print\{\.px-scene,\.px-ground,\.px-margins,\.px-snow\{display:none;\}\}/.test(css), 'and none on paper');
+  assert.ok(/@media \(prefers-reduced-motion: reduce\)\{\.px-scene \*,\.px-ground \*,\.px-margins \*\{animation:none !important;\}\.px-snow,\.px-flyers\{display:none;\}\}/.test(css));
+  assert.ok(/@media print\{\.px-scene,\.px-ground,\.px-margins,\.px-flyers,\.px-snow\{display:none;\}\}/.test(css), 'and none on paper');
 });
 
-test('snow at Christmas and the New Year only: 18 flakes on a phone, 36 wider, spread across the page; the scene at 2 pixels a pixel on a phone, 3 wider', () => {
+test('snow at Christmas and the New Year only: 18 flakes on a phone, 36 wider, spread across the page; the scenes at 2 pixels a pixel on a phone, 3 wider', () => {
   const flakes = (season, width) => {
     const p = artPage();
     let i = 0;
@@ -922,11 +1010,11 @@ test('an unknown season draws nothing; clear() takes a season out again, all of 
   const p = artPage();
   const page = () => p.all().map(e => e.tagName + (e.id ? '#' + e.id : '') + (e.className ? '.' + e.className : ''));
   const before = page();
-  assert.deepStrictEqual(before, ['HTML', 'HEAD', 'BODY', 'DIV#app', 'DIV.header', 'DIV.dash-top']);
+  assert.deepStrictEqual(before, ['HTML', 'HEAD', 'BODY', 'DIV#app', 'DIV.header', 'DIV.dash-top', 'DIV#site-disclaimer', 'DIV.license']);
   assert.deepStrictEqual(ART.build(p.doc, 'xmas', {}), []);
   assert.deepStrictEqual(page(), before, 'the page as it was');
   ART.build(p.doc, 'christmas', { width: 1024 });
-  assert.ok(page().length > before.length + 20);
+  assert.ok(page().length > before.length + 40);
   ART.clear(p.doc);
   assert.deepStrictEqual(page(), before, 'nothing left of it');
 });
@@ -944,25 +1032,28 @@ test('in the page: drawn once the page is there, for the season <html> names - a
   assert.strictEqual(p.app.children[0], p.header, 'nothing before the page is there');
   p.doc.listeners.DOMContentLoaded.forEach(f => f());
   assert.strictEqual(p.app.children[0].className, 'px-scene px-easter');
-  // Narrower than 600px now: drawn again at 2 pixels a pixel - one scene, not two.
+  // Narrower than 600px now: drawn again at 2 pixels a pixel - one of each, not two.
   const cloudWidth = () => p.app.children[0].children.find(e => /%23d6ecfb/.test(e.style.backgroundImage || '')).style.width;
   assert.strictEqual(cloudWidth(), '45px', 'a cloud, 15 pixels at 3');
   window.innerWidth = 375;
   assert.ok(mqs['(min-width: 600px)'].handlers.length, 'it listens for the width');
   mqs['(min-width: 600px)'].handlers.forEach(f => f());
   assert.strictEqual(cloudWidth(), '30px', 'and at 2');
-  assert.strictEqual(p.all().filter(e => e.className === 'px-scene px-easter').length, 1);
+  for (const cls of ['px-scene px-easter', 'px-scene px-bottom px-easter', 'px-ground', 'px-margins', 'px-flyers']) {
+    assert.strictEqual(p.all().filter(e => e.className === cls).length, 1, cls);
+  }
   assert.strictEqual(p.all().filter(e => e.id === 'px-season-css').length, 1);
   // Motion turned down while the page is open: drawn again, still.
   mqs['(prefers-reduced-motion: reduce)'].matches = true;
   mqs['(prefers-reduced-motion: reduce)'].handlers.forEach(f => f());
   assert.ok(p.all().every(e => !(e.style && e.style.animation)));
+  assert.strictEqual(p.all().filter(e => e.className === 'px-flyers').length, 0);
   // No season, or one it does not know: nothing at all.
   for (const s of [null, 'xmas']) {
     const r = run(s);
     assert.deepStrictEqual(Object.keys(r.p.doc.listeners), [], String(s));
   }
-  // A page without its #app or header (an error page): no error, and the rest still drawn.
+  // A page without its #app or header (an error page): no error.
   const q = run('halloween');
   q.p.app.children = [];
   assert.doesNotThrow(() => q.p.doc.listeners.DOMContentLoaded.forEach(f => f()));
