@@ -81,6 +81,8 @@ const TL = { fps: 10, slotMinutes: 15, chunks: [chunk('2026-11-01', [['2026-11-0
   chunk('2026-11-11', [['2026-11-11', '0700,0715,0730,0745']])] };
 const INDEX = { days: [day('2026-11-09'), day('2026-11-11', { frames: 98 }), day('2026-11-10')], timeline: TL };
 const THREE = Object.assign({}, INDEX, { timeline: Object.assign({}, TL, { chunks: TL.chunks.concat([chunk('2026-11-21', [['2026-11-21', '0700,0715']])]) }) });
+/** Each chunk's frames, by its first day: how long the stand-in videos are. */
+const CHUNK_FRAMES = { '2026-11-01': 5, '2026-11-11': 4, '2026-11-21': 2 };
 
 test('only the Worker\'s own, well formed days are used - newest first, each once', () => {
   const days = P.daysFrom({ days: [
@@ -198,7 +200,7 @@ function dom(responses, opts = {}) {
       appendChild(c) { this.children.push(c); c.parent = this; return c; },
       addEventListener(type, fn) { (this.handlers[type] = this.handlers[type] || []).push(fn); },
       removeEventListener(type, fn) { this.handlers[type] = (this.handlers[type] || []).filter((f) => f !== fn); },
-      fire(type) { for (const fn of (this.handlers[type] || []).slice()) fn({ target: this }); },
+      fire(type) { for (const fn of (this.handlers[type] || []).slice()) fn({ target: this, type }); },
       click() { this.fire('click'); },
       scrollIntoView() {},
     };
@@ -206,26 +208,67 @@ function dom(responses, opts = {}) {
   };
   const video = (id) => {
     const v = make('video', id);
-    let src = '';
-    Object.assign(v, { readyState: 0, currentTime: 0, playbackRate: 1, defaultPlaybackRate: 1, paused: true, plays: 0, loads: [] });
-    // A new video stops the one before: paused, as browsers do on loading.
-    Object.defineProperty(v, 'src', { get: () => src, set: (x) => { src = x; v.readyState = 0; v.currentTime = 0; v.paused = true; v.loads.push(x); } });
-    v.play = () => { v.plays++; v.paused = false; return opts.refusePlay ? Promise.reject(new Error('NotAllowedError')) : Promise.resolve(); };
-    v.pause = () => { v.paused = true; };
-    // As a browser may: the speed back to the default once the new video has loaded.
-    v.ready = () => { v.readyState = 4; v.playbackRate = v.defaultPlaybackRate; v.fire('loadedmetadata'); };
+    let src = '', time = 0, rate = 1;
+    Object.assign(v, { readyState: 0, defaultPlaybackRate: 1, paused: true, plays: 0, loads: [], seeks: [], restarts: 0, duration: NaN });
+    // opts.maxRate: a browser that will not play faster than that (it throws, as the standard says).
+    Object.defineProperty(v, 'playbackRate', { get: () => rate, set: (x) => {
+      if (opts.maxRate && x > opts.maxRate) throw new Error('NotSupportedError');
+      rate = x;
+    } });
+    // The page moving the video: each move kept, with how far it had loaded then. The video playing on: v.playTo(t).
+    Object.defineProperty(v, 'currentTime', { get: () => time, set: (x) => { time = Number(x); v.seeks.push({ t: time, readyState: v.readyState }); } });
+    v.playTo = (t) => { time = t; };
+    v.seeking = false;
+    // A new picture on screen: v.present() (where the browser says so - not with opts.noFrameCallbacks).
+    v.frameCallbacks = [];
+    if (!opts.noFrameCallbacks) v.requestVideoFrameCallback = (fn) => { v.frameCallbacks.push(fn); return v.frameCallbacks.length; };
+    v.present = () => { for (const fn of v.frameCallbacks.splice(0)) fn(0, { mediaTime: time }); };
+    // A new video stops the one before: paused, nothing loaded, as browsers do on loading.
+    Object.defineProperty(v, 'src', { get: () => src, set: (x) => { src = x; v.readyState = 0; time = 0; v.duration = NaN; v.paused = true; v.loads.push(x); } });
+    // opts.slowPlay: play() still starting until paused - then refused, a moment later, as browsers do.
+    const starting = [];
+    v.play = () => {
+      v.plays++;
+      if (opts.refusePlay) { v.paused = true; return Promise.reject(new Error('NotAllowedError')); }
+      // As Chrome does: on its last frame a video counts as over, and play() starts it again from the first.
+      if (v.duration > 0 && time >= v.duration - 0.1 - 1e-9) { time = 0; v.restarts++; }
+      v.paused = false;
+      return opts.slowPlay ? new Promise((resolve, reject) => starting.push(reject)) : Promise.resolve();
+    };
+    v.pause = () => {
+      v.paused = true;
+      const cut = starting.splice(0);
+      setImmediate(() => { for (const reject of cut) reject(new Error('AbortError: play() interrupted by pause()')); });
+    };
+    // Loaded: at the start its address asks for (#t=) - unless this browser ignores that - and,
+    // as a browser may, at the default speed again.
+    v.ready = () => {
+      const start = /#t=([\d.]+)$/.exec(src);
+      const chunkStart = /\/whole\/(\d{4}-\d\d-\d\d)-/.exec(src);
+      v.readyState = 4;
+      time = start && !opts.noFragments ? Number(start[1]) : 0;
+      v.duration = chunkStart && CHUNK_FRAMES[chunkStart[1]] ? CHUNK_FRAMES[chunkStart[1]] / 10 : NaN;
+      v.playbackRate = v.defaultPlaybackRate;
+      for (const type of ['loadedmetadata', 'loadeddata', 'canplay']) v.fire(type);
+    };
     return v;
   };
   const els = {};
   for (const id of ['whole-title', 'stage', 'tl-controls', 'tl-play', 'tl-range', 'tl-full', 'tl-when', 'tl-ends', 'tl-message', 'day-label',
     'day-card', 'day-title', 'day-note', 'day-message', 'days', 'theme-toggle']) els[id] = make('div', id);
   for (const id of ['stage', 'tl-controls', 'day-card', 'tl-message', 'day-message']) els[id].hidden = true;
+  // Where the stage is on the screen (800 high): on it, unless the test scrolls it away.
+  els.stage.rect = { top: 100, bottom: 400 };
+  els.stage.getBoundingClientRect = () => els.stage.rect;
   els['tl-a'] = video('tl-a');
   els['tl-b'] = video('tl-b');
-  els['tl-b'].hidden = true;
+  // As in the page: the one behind is see-through (aria-hidden), not hidden.
   els['tl-b'].attrs['aria-hidden'] = 'true';
   els['day-player'] = video('day-player');
-  const speeds = ['0.5', '1', '2', '4'].map((r) => { const b = make('button'); b.attrs['data-rate'] = r; b.attrs['aria-pressed'] = r === '1' ? 'true' : 'false'; return b; });
+  // The speed buttons, as in the page.
+  const speeds = [...html.matchAll(/<button type="button" data-rate="([\d.]+)" aria-pressed="(true|false)">/g)].map(([, r, pressed]) => {
+    const b = make('button'); b.attrs['data-rate'] = r; b.attrs['aria-pressed'] = pressed; return b;
+  });
   const all = (node) => [node, ...node.children.flatMap(all)];
   const meta = make('meta');
   const docEl = make('html');
@@ -252,7 +295,7 @@ function dom(responses, opts = {}) {
     cancelAnimationFrame: (n) => { if (frames[n - 1]) frames[n - 1] = null; },
     history: { replaceState: (a, b, h) => { location.hash = h; } },
     localStorage: { getItem: (k) => storage[k] || null, setItem: (k, v) => { storage[k] = v; } },
-    window: { addEventListener: (type, fn) => { listeners[type] = fn; }, matchMedia: (q) => ({ matches: !!(opts.reducedMotion && /reduce/.test(q)) }) },
+    window: { addEventListener: (type, fn) => { listeners[type] = fn; }, matchMedia: (q) => ({ matches: !!(opts.reducedMotion && /reduce/.test(q)) }), innerHeight: 800 },
     fetch: async (url, o) => {
       fetched.push(url);
       fetchOpts.push(o || {});
@@ -268,7 +311,7 @@ function dom(responses, opts = {}) {
   return {
     els, speeds, fetched, fetchOpts, location, storage, docEl, meta, timers,
     a: els['tl-a'], b: els['tl-b'], range: els['tl-range'],
-    visible: () => (els['tl-a'].hidden ? els['tl-b'] : els['tl-a']),
+    visible: () => (els['tl-a'].getAttribute('aria-hidden') === 'true' ? els['tl-b'] : els['tl-a']),
     startPage: async () => { listeners.DOMContentLoaded(); await settle(); },
     settle,
     /** Runs the frames asked for so far (the drag bar following the video, a drag drawn). */
@@ -282,6 +325,13 @@ function dom(responses, opts = {}) {
 }
 const OK = { status: 200, body: INDEX };
 const src = (c) => `${WORKER}/timelapse/whole/${c}-0123456789ab.mp4`;
+/** A video's address without where it starts (#t=). */
+const base = (v) => v.src.split('#')[0];
+/** Exactly one of the two in front, neither ever taken out of the page. */
+function oneInFront(d) {
+  assert.ok(!d.a.hidden && !d.b.hidden, 'neither video hidden (display:none)');
+  assert.deepStrictEqual([d.a, d.b].map((v) => v.getAttribute('aria-hidden')).sort(), ['true', null].sort());
+}
 
 test('it plays from the first day at once: the first chunk on screen, the next made ready behind it; the drag bar spans every frame', async () => {
   const d = dom(OK);
@@ -290,18 +340,22 @@ test('it plays from the first day at once: the first chunk on screen, the next m
   assert.strictEqual(d.els['whole-title'].textContent, 'Nov 9, 2026 to Nov 11, 2026', 'the days it spans');
   assert.strictEqual(d.els['tl-ends'].textContent, 'Nov 9, 2026 → Nov 11, 2026');
   assert.deepStrictEqual([d.els.stage.hidden, d.els['tl-controls'].hidden], [false, false]);
-  assert.strictEqual(d.a.src, src('2026-11-01'));
-  assert.strictEqual(d.b.src, src('2026-11-11'), 'the next chunk loading behind');
-  assert.ok(d.b.hidden && d.b.getAttribute('aria-hidden') === 'true');
-  assert.strictEqual(d.a.getAttribute('poster'), `${WORKER}/timelapse/posters/2026-11-09-0123456789ab.jpg`);
+  assert.strictEqual(d.a.src, `${src('2026-11-01')}#t=0.050`, 'from its first frame');
+  assert.strictEqual(d.b.src, `${src('2026-11-11')}#t=0.050`, 'the next chunk loading behind');
+  assert.strictEqual(d.b.getAttribute('aria-hidden'), 'true');
+  oneInFront(d);
+  assert.strictEqual(d.a.getAttribute('poster'), `${WORKER}/timelapse/posters/2026-11-09-0123456789ab.jpg`, 'the first day\'s picture until it has its own');
+  d.b.ready();
+  assert.strictEqual(d.a.getAttribute('poster'), `${WORKER}/timelapse/posters/2026-11-09-0123456789ab.jpg`, 'the one behind loading changes nothing in front');
   assert.strictEqual(d.range.max, '8');
   assert.strictEqual(d.a.plays, 1);
   assert.strictEqual(d.els['tl-play'].getAttribute('aria-label'), 'Pause');
   assert.strictEqual(d.els['tl-when'].textContent, 'Mon, Nov 9, 2026 · 7:00 AM');
   assert.strictEqual(d.range.getAttribute('aria-valuetext'), 'Mon, Nov 9, 2026 · 7:00 AM');
   assert.ok(!/so far|quarter hour/.test(Object.values(d.els).map((e) => e.textContent).join(' ')), 'no count of days and frames under it');
-  // The bar follows the video, frame by frame.
+  // The bar follows the video, frame by frame; the poster goes once the video has a picture.
   d.a.ready();
+  assert.strictEqual(d.a.getAttribute('poster'), null);
   d.a.currentTime = 0.35;
   d.tick();
   assert.strictEqual(d.range.value, '3');
@@ -315,9 +369,11 @@ test('one chunk runs into the next: the ready one plays at once, and the one aft
   d.a.currentTime = 0.5;
   d.a.fire('ended');
   assert.strictEqual(d.visible(), d.b, 'the second chunk on screen');
-  assert.ok(d.a.hidden && !d.b.hidden && d.b.getAttribute('aria-hidden') === null);
+  assert.ok(d.a.getAttribute('aria-hidden') === 'true' && d.b.getAttribute('aria-hidden') === null);
+  oneInFront(d);
   assert.strictEqual(d.b.plays, 1);
-  assert.strictEqual(d.a.src, src('2026-11-21'), 'the third loading behind');
+  assert.deepStrictEqual(d.b.seeks, [], 'ready at its first frame already: not moved');
+  assert.strictEqual(base(d.a), src('2026-11-21'), 'the third loading behind');
   d.b.currentTime = 0.05;
   d.tick();
   assert.strictEqual(d.range.value, '5');
@@ -368,27 +424,60 @@ test('dragging: the frame under the finger at once, in whichever chunk - and pla
   assert.strictEqual(d.a.currentTime, 0.45);
 });
 
-test('dragging to a chunk not loaded yet: it loads, and shows that frame once it can', async () => {
+test('dragging to a chunk not loaded yet: it loads, starting at that frame, and plays from there on letting go', async () => {
   const d = dom({ status: 200, body: THREE });
   await d.startPage();
   d.a.ready(); d.b.ready();
-  d.drag(10);
+  d.drag(9);
   d.tick();
-  assert.strictEqual(d.visible().src, src('2026-11-21'));
-  assert.strictEqual(d.visible().currentTime, 0, 'not before it has loaded');
-  d.visible().ready();
-  assert.strictEqual(d.visible().currentTime, 0.15);
+  const v = d.visible();
+  assert.strictEqual(v.src, `${src('2026-11-21')}#t=0.050`, 'where to start, in its address');
+  assert.strictEqual(v.currentTime, 0, 'not moved before it has loaded');
+  assert.strictEqual(d.els['tl-when'].textContent, 'Sat, Nov 21, 2026 · 7:00 AM');
   d.release();
-  assert.strictEqual(d.visible().paused, false);
+  d.tick();
+  assert.strictEqual(d.els['tl-when'].textContent, 'Sat, Nov 21, 2026 · 7:00 AM', 'the words stay on that frame while it loads');
+  v.ready();
+  assert.strictEqual(v.currentTime, 0.05);
+  assert.deepStrictEqual(v.seeks, [], 'there already: not moved');
+  assert.strictEqual(v.paused, false);
+  oneInFront(d);
+  // The chunk behind not loaded yet either: the words stay on the frame let go on, not its chunk's first.
+  const e = dom({ status: 200, body: THREE });
+  await e.startPage();
+  e.a.ready();
+  e.drag(7); e.tick(); e.release();
+  e.tick();
+  assert.strictEqual(e.els['tl-when'].textContent, 'Wed, Nov 11, 2026 · 7:30 AM');
+  assert.strictEqual(e.range.value, '7');
+  e.b.ready();
+  assert.deepStrictEqual(e.b.seeks.map((s) => s.t), [0.25], 'then moved there, once it has a picture');
+});
+
+test('dragging back into the chunk before: it loads behind, then comes to the front - the chunk that was in front waits behind as the next', async () => {
+  const d = dom({ status: 200, body: THREE });
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.drag(6); d.tick();
+  assert.deepStrictEqual([d.visible(), base(d.a)], [d.b, src('2026-11-21')], 'the 11th in front, the 21st behind');
+  const bLoads = d.b.loads.length;
+  d.drag(2); d.tick();
+  assert.strictEqual(d.visible(), d.a);
+  assert.strictEqual(d.a.src, `${src('2026-11-01')}#t=0.250`, 'the 9th\'s third frame, loaded behind and brought forward');
+  assert.strictEqual(d.b.loads.length, bLoads, 'the 11th, now behind, not loaded again');
+  oneInFront(d);
 });
 
 test('speed for both videos; the button pauses and plays; at the end it starts again from the first day', async () => {
   const d = dom(OK);
   await d.startPage();
   d.a.ready(); d.b.ready();
+  assert.deepStrictEqual(d.speeds.map((b) => b.getAttribute('data-rate')), ['0.5', '1', '2', '4', '8']);
+  d.speeds[4].click();
+  assert.deepStrictEqual([d.a.playbackRate, d.b.playbackRate, d.a.defaultPlaybackRate], [8, 8, 8], '8x');
   d.speeds[3].click();
   assert.deepStrictEqual([d.a.playbackRate, d.b.playbackRate], [4, 4]);
-  assert.deepStrictEqual(d.speeds.map((b) => b.getAttribute('aria-pressed')), ['false', 'false', 'false', 'true']);
+  assert.deepStrictEqual(d.speeds.map((b) => b.getAttribute('aria-pressed')), ['false', 'false', 'false', 'true', 'false']);
   d.els['tl-play'].click();
   assert.strictEqual(d.a.paused, true);
   d.drag(8); d.tick(); d.release();
@@ -396,6 +485,178 @@ test('speed for both videos; the button pauses and plays; at the end it starts a
   assert.strictEqual(d.visible(), d.a, 'from the first chunk');
   assert.strictEqual(d.a.currentTime, 0.05);
   assert.strictEqual(d.a.paused, false);
+});
+
+test('let go on the last frame of a chunk: on into the next chunk - not that chunk again from its first day, as browsers would play it', async () => {
+  const d = dom({ status: 200, body: THREE });
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  // Playing; let go on the 10th's last frame, the first chunk's last.
+  d.drag(4); d.tick(); d.release();
+  assert.strictEqual(d.a.restarts, 0, 'the first chunk not started again');
+  assert.strictEqual(d.visible(), d.b, 'on into the next chunk');
+  assert.deepStrictEqual([d.b.currentTime, d.b.paused], [0.05, false]);
+  d.tick();
+  assert.strictEqual(d.range.value, '5');
+  // Paused there, then Play: the same.
+  d.els['tl-play'].click();
+  d.drag(8); d.tick(); d.release();
+  assert.strictEqual(d.b.paused, true, 'paused before: still paused');
+  d.els['tl-play'].click();
+  assert.strictEqual(d.b.restarts, 0);
+  assert.strictEqual(d.visible(), d.a, 'the third chunk');
+  assert.strictEqual(d.a.paused, false);
+  d.a.ready();
+  assert.strictEqual(d.a.currentTime, 0.05);
+  // Let go on the very last frame: a moment on it, as when it gets there by itself, then the first day.
+  const plays = d.a.plays;
+  d.drag(10); d.tick(); d.release();
+  assert.deepStrictEqual([d.a.restarts, d.a.plays], [0, plays], 'not played from there');
+  assert.strictEqual(d.els['tl-play'].getAttribute('aria-label'), 'Pause');
+  assert.strictEqual(d.els['tl-when'].textContent, 'Sat, Nov 21, 2026 · 7:15 AM');
+  await d.advance(1600);
+  assert.strictEqual(base(d.visible()), src('2026-11-01'), 'the first day again');
+  assert.strictEqual(d.visible().paused, false);
+  assert.strictEqual(d.range.value, '0');
+});
+
+test('nothing is moved while a video loads: it starts where its address says, then goes to the last frame asked for, once', async () => {
+  for (const noFragments of [false, true]) {
+    const d = dom({ status: 200, body: THREE }, { reducedMotion: true, noFragments });
+    await d.startPage();
+    // Dragged about before anything has loaded.
+    d.drag(4); d.tick();
+    d.drag(1); d.tick();
+    d.release();
+    assert.deepStrictEqual(d.a.seeks, [], 'nothing set on a video still loading');
+    assert.strictEqual(d.els['tl-when'].textContent, 'Mon, Nov 9, 2026 · 7:15 AM');
+    d.a.ready();
+    assert.deepStrictEqual(d.a.seeks.map((s) => s.t), [0.15], noFragments ? 'a browser that ignores #t=: moved once it has a picture' : 'moved once');
+    assert.ok(d.a.seeks.every((s) => s.readyState >= 2));
+    // A late "loaded" from the chunk before, after a new one has started loading: not taken for the new one.
+    d.drag(9); d.tick();
+    const v = d.visible();
+    v.fire('loadeddata');
+    d.drag(10); d.tick();
+    assert.deepStrictEqual(v.seeks, [], 'still loading: not moved');
+    v.ready();
+    assert.deepStrictEqual(v.seeks.map((s) => s.t), [0.15]);
+  }
+});
+
+test('let go without the browser saying "changed" (a touch taken over by scrolling): playing again, the bar following it again', async () => {
+  for (const ending of ['touchcancel', 'pointercancel', 'pointerup', 'touchend', 'mouseup']) {
+    const d = dom(OK);
+    await d.startPage();
+    d.a.ready(); d.b.ready();
+    d.drag(6); d.tick();
+    d.range.fire(ending);
+    assert.strictEqual(d.b.paused, false, `${ending}: playing again`);
+    d.b.currentTime = 0.35;
+    d.tick();
+    assert.strictEqual(d.range.value, '8', `${ending}: the bar follows it`);
+    // A late "changed": nothing more.
+    d.release();
+    assert.deepStrictEqual([d.b.plays, d.b.currentTime], [1, 0.35]);
+  }
+  // A browser that says only "changed", with no dragging before it: the frame let go on, playing or not as it was.
+  const d = dom(OK);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.range.value = '6';
+  d.release();
+  assert.deepStrictEqual([d.visible(), d.b.currentTime, d.b.paused], [d.b, 0.15, false], 'playing, as it was');
+  d.els['tl-play'].click();
+  d.range.value = '2';
+  d.release();
+  assert.deepStrictEqual([d.visible(), d.a.currentTime, d.a.paused], [d.a, 0.25, true], 'paused, as it was');
+});
+
+test('a start cut short by dragging again at once: the button still says Pause while it plays', async () => {
+  const d = dom(OK, { slowPlay: true });
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.drag(6); d.tick(); d.release();
+  d.drag(7); d.tick(); d.release();
+  await d.settle();
+  assert.strictEqual(d.b.paused, false);
+  assert.strictEqual(d.els['tl-play'].getAttribute('aria-label'), 'Pause');
+  d.tick();
+  assert.strictEqual(d.range.value, '7', 'and the bar follows it');
+});
+
+/** Plays the video in front on for `ms`, 100 ms a frame of the page, showing a new picture each time when `pictures`. */
+async function playOn(d, ms, pictures) {
+  for (let i = 0; i < ms / 100; i++) {
+    const v = d.visible();
+    v.playTo(v.currentTime + 0.1);
+    if (pictures) v.present();
+    await d.advance(100);
+    d.tick();
+  }
+}
+
+test('a picture stuck while the clock runs on (as Safari has done): moved to where it is, so it draws again - twice a chunk at most', async () => {
+  const d = dom(OK);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  // Playing as it should: never moved.
+  await playOn(d, 3000, true);
+  assert.deepStrictEqual(d.a.seeks, [], 'new pictures all along');
+  // Stuck: moved once it has played on 1.5 s with nothing new...
+  await playOn(d, 1400, false);
+  assert.deepStrictEqual(d.a.seeks, [], 'not yet');
+  await playOn(d, 300, false);
+  assert.strictEqual(d.a.seeks.length, 1, 'moved');
+  assert.ok(Math.abs(d.a.seeks[0].t - d.a.currentTime) < 0.25, 'to where it was');
+  // ...again 3 s later if still stuck, and then no more for this chunk.
+  await playOn(d, 2500, false);
+  assert.strictEqual(d.a.seeks.length, 1, 'not again so soon');
+  await playOn(d, 1000, false);
+  assert.strictEqual(d.a.seeks.length, 2);
+  await playOn(d, 10000, false);
+  assert.strictEqual(d.a.seeks.length, 2, 'twice a chunk at most');
+});
+
+test('not taken for stuck: paused, just let go after a long drag, loading, scrolled away, or a browser that cannot say', async () => {
+  // Paused a long time on a frame dragged to, then playing again: the watch starts afresh.
+  let d = dom(OK);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.els['tl-play'].click();
+  d.drag(3); d.tick(); d.release();
+  await d.advance(10000);
+  d.els['tl-play'].click();
+  const before = d.a.seeks.length;
+  await playOn(d, 1000, false);
+  await playOn(d, 1000, true);
+  assert.strictEqual(d.a.seeks.length, before, 'playing again: no picture yet is not stuck');
+  // Still loading the chunk in front.
+  d = dom({ status: 200, body: THREE });
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.drag(9); d.tick(); d.release();
+  await playOn(d, 5000, false);
+  assert.deepStrictEqual(d.visible().seeks, [], 'loading: left alone');
+  // Scrolled away from it (a browser may not draw it there).
+  d = dom(OK);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.els.stage.rect = { top: -900, bottom: -600 };
+  await playOn(d, 5000, false);
+  assert.deepStrictEqual(d.a.seeks, []);
+  // Its clock not moving either (waiting for more of the video): not stuck, only slow.
+  d = dom(OK);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  for (let i = 0; i < 50; i++) { await d.advance(100); d.tick(); }
+  assert.deepStrictEqual(d.a.seeks, []);
+  // A browser that does not say when it shows a picture.
+  d = dom(OK, { noFrameCallbacks: true });
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  await playOn(d, 5000, false);
+  assert.deepStrictEqual(d.a.seeks, []);
 });
 
 test('a browser that will not start a video by itself: shown paused, the button says Play', async () => {
@@ -413,8 +674,11 @@ test('reduced motion asked for, or a link to a day (the email\'s): nothing plays
   d = dom(OK, { hash: '#2026-11-10' });
   await d.startPage();
   assert.strictEqual(d.a.plays, 0);
+  assert.strictEqual(d.a.src, `${src('2026-11-01')}#t=0.350`, 'starting at the 10th\'s first frame');
+  assert.strictEqual(d.a.getAttribute('poster'), `${WORKER}/timelapse/posters/2026-11-10-0123456789ab.jpg`, 'the 10th\'s picture meanwhile');
   d.a.ready();
   assert.strictEqual(d.a.currentTime, 0.35, 'the 10th\'s first frame');
+  assert.deepStrictEqual(d.a.seeks, []);
   assert.strictEqual(d.els['tl-when'].textContent, 'Tue, Nov 10, 2026 · 8:00 AM');
   assert.strictEqual(d.els['day-title'].textContent, 'Tuesday, November 10, 2026');
   assert.strictEqual(d.els['day-player'].src, `${WORKER}/timelapse/videos/2026-11-10-0123456789ab.mp4`);
@@ -506,7 +770,7 @@ test('a page left open: on the way back to the first day it reads the list again
   assert.strictEqual(d.fetched.length, 2);
   assert.strictEqual(d.range.max, '10', 'the drag bar now spans the new day too');
   assert.strictEqual(d.els['whole-title'].textContent, 'Nov 9, 2026 to Nov 21, 2026');
-  assert.strictEqual(d.visible().src, src('2026-11-01'), 'from the first day again');
+  assert.strictEqual(base(d.visible()), src('2026-11-01'), 'from the first day again');
   assert.strictEqual(d.range.value, '0');
   assert.strictEqual(d.visible().paused, false);
 });
@@ -526,14 +790,14 @@ test('a chunk made again while the page is open (its old video deleted): it read
   await d.settle();
   assert.strictEqual(d.fetched.length, 2);
   const v = d.visible();
-  assert.strictEqual(v.src, `${WORKER}/timelapse/whole/2026-11-11-abcdefabcdef.mp4`, 'the new video');
+  assert.strictEqual(base(v), `${WORKER}/timelapse/whole/2026-11-11-abcdefabcdef.mp4`, 'the new video');
   v.ready();
   assert.strictEqual(v.currentTime, 0.15, 'the same frame: the 11th at 7:15');
   assert.strictEqual(d.els['tl-when'].textContent, 'Wed, Nov 11, 2026 · 7:15 AM');
   assert.strictEqual(d.els['tl-message'].hidden, true, 'nothing to say');
   assert.strictEqual(v.paused, false, 'and playing, as it was');
   // The first chunk was not made again: its video is not loaded anew.
-  assert.strictEqual(d.a.loads.filter((x) => x === src('2026-11-01')).length, 1);
+  assert.strictEqual(d.a.loads.filter((x) => x.startsWith(src('2026-11-01'))).length, 1);
 });
 
 test('the next chunk, made again while it waited behind (its old video deleted): only it is loaded anew - the one on screen plays on', async () => {
@@ -544,13 +808,13 @@ test('the next chunk, made again while it waited behind (its old video deleted):
   await d.startPage();
   d.a.ready(); d.b.ready();
   d.drag(6); d.tick(); d.release();
-  assert.deepStrictEqual([d.visible(), d.a.src], [d.b, src('2026-11-21')], 'the 11th on screen, the 21st behind it');
+  assert.deepStrictEqual([d.visible(), base(d.a)], [d.b, src('2026-11-21')], 'the 11th on screen, the 21st behind it');
   const shownLoads = d.b.loads.length;
   await d.advance(31000);
   w.state.list = renamed;
   d.a.fire('error');
   await d.settle();
-  assert.strictEqual(d.a.src, `${WORKER}/timelapse/whole/2026-11-21-abcdefabcdef.mp4`, 'the new one behind');
+  assert.strictEqual(base(d.a), `${WORKER}/timelapse/whole/2026-11-21-abcdefabcdef.mp4`, 'the new one behind');
   assert.strictEqual(d.b.loads.length, shownLoads, 'the one on screen not loaded again');
   assert.strictEqual(d.visible(), d.b);
   assert.strictEqual(d.els['tl-message'].hidden, true);
@@ -583,9 +847,21 @@ test('the speed chosen stays when the next chunk loads - even in a browser that 
   d.speeds[2].click();
   d.drag(10); d.tick();
   const v = d.visible();
-  assert.strictEqual(v.src, src('2026-11-21'));
+  assert.strictEqual(base(v), src('2026-11-21'));
   v.ready();
   assert.deepStrictEqual([v.playbackRate, v.defaultPlaybackRate], [2, 2]);
+});
+
+test('a speed the browser will not play: the one it had stays, and stays marked - nothing breaks', async () => {
+  const d = dom(OK, { maxRate: 4 });
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.speeds[2].click();
+  d.speeds[4].click();
+  assert.deepStrictEqual([d.a.playbackRate, d.b.playbackRate], [2, 2]);
+  assert.deepStrictEqual(d.speeds.map((b) => b.getAttribute('aria-pressed')), ['false', 'false', 'true', 'false', 'false']);
+  d.speeds[3].click();
+  assert.deepStrictEqual([d.a.playbackRate, d.b.playbackRate], [4, 4], 'the others still work');
 });
 
 test('light and dark: the switch changes the page and remembers it for roworno.com too', async () => {
@@ -617,6 +893,21 @@ test('the Content-Security-Policy comes first, allows only this page\'s own two 
   assert.deepStrictEqual(rules['img-src'], ["'self'", WORKER]);
   assert.deepStrictEqual([rules['base-uri'], rules['form-action']], [["'none'"], ["'none'"]]);
   assert.ok(!/unsafe-inline|unsafe-eval|\*/.test(rules['script-src'].join(' ')));
+});
+
+test('the video behind is see-through and under the one in front - never display:none, in the markup or the script', () => {
+  const css = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  assert.ok(/#stage video\{z-index:1;\}/.test(css), 'the one in front on top');
+  assert.ok(/#stage video\[aria-hidden="true"\]\{z-index:0;opacity:0;pointer-events:none;\}/.test(css), 'the one behind see-through, under it');
+  assert.ok(/<video id="tl-b" playsinline muted preload="auto" aria-hidden="true"><\/video>/.test(html), 'behind from the start, not hidden');
+  assert.ok(/<video id="tl-a" playsinline muted preload="auto" aria-label="[^"]+"><\/video>/.test(html), 'in front from the start');
+  assert.ok(!/\.hidden\s*=/.test(pageScript.slice(pageScript.indexOf('// ── The continuous timelapse'), pageScript.indexOf('// ── Each whole day'))),
+    'the continuous player never hides a video');
+});
+
+test('on a phone the five speeds share one row (checked in a real browser at 320 and 375 wide)', () => {
+  const css = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  assert.ok(/@media \(max-width:420px\)\{\s*\.speeds\{gap:6px;flex-wrap:nowrap;\}\s*\.speeds button\{flex:1 1 0;min-width:0;padding:6px 4px;\}\s*\}/.test(css));
 });
 
 test('no script from elsewhere, no inline event handlers, and no HTML made from data', () => {

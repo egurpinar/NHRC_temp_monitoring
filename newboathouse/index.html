@@ -6,7 +6,7 @@
 <!-- Only what this page needs, from where it needs it: its own two scripts
      (by their hashes - scripts/test_newboathouse.js checks them), and the
      timelapse from the club's Worker. Nothing else can run or load here. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rrqDV8A+5BVbukieSciXebfrs7j0k/Zju4UwfagvbkU=' 'sha256-+dAzQxQEsGd3Qd/UnGtCEtjeTAqGrwM58H72UiHYM7o='; style-src 'unsafe-inline'; img-src 'self' https://nhrc-camera.gurpinar-emre.workers.dev; media-src https://nhrc-camera.gurpinar-emre.workers.dev; connect-src https://nhrc-camera.gurpinar-emre.workers.dev; base-uri 'none'; form-action 'none'"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rrqDV8A+5BVbukieSciXebfrs7j0k/Zju4UwfagvbkU=' 'sha256-zcPYBsoPXzxtZKxC9IrZhPPfkrZZECSoeRZZKCS7nac='; style-src 'unsafe-inline'; img-src 'self' https://nhrc-camera.gurpinar-emre.workers.dev; media-src https://nhrc-camera.gurpinar-emre.workers.dev; connect-src https://nhrc-camera.gurpinar-emre.workers.dev; base-uri 'none'; form-action 'none'"/>
 <meta name="referrer" content="strict-origin-when-cross-origin"/>
 <title>New Boathouse Timelapse - New Haven Rowing Club</title>
 <meta name="description" content="The new boathouse going up: a timelapse of every day so far, and each whole day on its own."/>
@@ -70,6 +70,11 @@ h2{font-size:1.15rem;font-weight:700;margin-bottom:12px;line-height:1.3;}
 .video-wrap{position:relative;border-radius:10px;overflow:hidden;border:1px solid rgba(var(--ink),.08);background:#000;line-height:0;aspect-ratio:16/9;}
 .video-wrap video{position:absolute;inset:0;width:100%;height:100%;display:block;background:#000;}
 .video-wrap:fullscreen{border-radius:0;border:0;}
+/* The continuous timelapse's two videos, one over the other. The one behind is
+   see-through, never display:none, so bringing it to the front leaves the
+   browser nothing to rebuild. */
+#stage video{z-index:1;}
+#stage video[aria-hidden="true"]{z-index:0;opacity:0;pointer-events:none;}
 
 /* The drag bar under the continuous timelapse. */
 .scrub{display:flex;align-items:center;gap:10px;margin-top:12px;}
@@ -88,6 +93,11 @@ h2{font-size:1.15rem;font-weight:700;margin-bottom:12px;line-height:1.3;}
 .speeds button{min-width:52px;min-height:36px;padding:6px 12px;border-radius:8px;border:1px solid rgba(var(--ink),.25);background:transparent;
   color:var(--white);font:inherit;font-size:.8rem;cursor:pointer;}
 .speeds button[aria-pressed="true"]{background:var(--gold);border-color:var(--gold);color:var(--navy);font-weight:700;}
+/* A phone: the five speeds share one row. */
+@media (max-width:420px){
+  .speeds{gap:6px;flex-wrap:nowrap;}
+  .speeds button{flex:1 1 0;min-width:0;padding:6px 4px;}
+}
 .note{font-size:.8rem;color:var(--muted);margin-top:10px;line-height:1.6;}
 .message{font-size:.9rem;line-height:1.6;color:var(--white);margin-top:8px;}
 .message.problem{color:var(--bad);}
@@ -122,7 +132,7 @@ h2{font-size:1.15rem;font-weight:700;margin-bottom:12px;line-height:1.3;}
       <h2 id="whole-title">Loading the timelapse&hellip;</h2>
       <div class="video-wrap" id="stage" hidden>
         <video id="tl-a" playsinline muted preload="auto" aria-label="The timelapse of every day so far"></video>
-        <video id="tl-b" playsinline muted preload="auto" aria-hidden="true" hidden></video>
+        <video id="tl-b" playsinline muted preload="auto" aria-hidden="true"></video>
       </div>
       <div id="tl-controls" hidden>
         <div class="scrub">
@@ -142,6 +152,7 @@ h2{font-size:1.15rem;font-weight:700;margin-bottom:12px;line-height:1.3;}
           <button type="button" data-rate="1" aria-pressed="true">1&times;</button>
           <button type="button" data-rate="2" aria-pressed="false">2&times;</button>
           <button type="button" data-rate="4" aria-pressed="false">4&times;</button>
+          <button type="button" data-rate="8" aria-pressed="false">8&times;</button>
         </div>
       </div>
       <p class="message" id="tl-message" hidden></p>
@@ -175,6 +186,12 @@ const LOOP_PAUSE_MS = 1500;     // on the last frame, before it starts again fro
 // first day (at most this often), and when a video will not play.
 const REREAD_MS = 10 * 60 * 1000;
 const REREAD_ON_ERROR_MS = 30 * 1000;
+// Safari has kept one picture on screen while the video's clock ran on. Playing
+// this long with nothing new shown, the video is moved to where it is, which
+// makes it draw again - not more often than this, nor more than twice a chunk.
+const STUCK_MS = 1500;
+const NUDGE_EVERY_MS = 3000;
+const NUDGES_PER_CHUNK = 2;
 const THEME_KEY = 'nhrc-theme';
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -358,27 +375,67 @@ function say(id, text, problem) {
   el.hidden = !text;
 }
 
-// ── The continuous timelapse: two videos, one showing a chunk, the other
-//    ready with the next, so one day runs into the next across chunks. ──
+// ── The continuous timelapse: two videos, one in front showing a chunk, the
+//    other behind it with the next, so one day runs into the next across
+//    chunks. ──
 
-const P = { tl: null, vis: null, hid: null, playing: false, dragging: false, wasPlaying: false, rate: 1, raf: 0, loop: 0, pending: null };
+const P = { tl: null, vis: null, hid: null, playing: false, dragging: false, wasPlaying: false, rate: 1, raf: 0, loop: 0, pending: null,
+  drawPending: false, playId: 0 };
 // The list as read: when, and a reading under way (one at a time).
 const L = { readAt: 0, reading: null };
+// Each video's chunk: whether it has a picture yet, and the time it is to show
+// once it has. Nothing is moved while a video loads (Safari has had bugs with
+// seeks made then): it starts where its address says (#t=).
+const V = { pictured: new Set(), want: new Map() };
 
 function chunkOf(video) { return video && video.getAttribute('data-chunk') !== null ? Number(video.getAttribute('data-chunk')) : -1; }
 
+/** The middle of frame `local` of a chunk, in seconds. */
+function timeOf(local) { return (Math.max(0, local) + 0.5) / P.tl.fps; }
+
 /** The speed for a video - kept when it loads another chunk (some browsers reset playbackRate to the default then). */
 function setRate(video) {
-  video.defaultPlaybackRate = P.rate;
-  video.playbackRate = P.rate;
+  try {
+    video.defaultPlaybackRate = P.rate;
+    video.playbackRate = P.rate;
+  } catch (e) { /* a speed this browser cannot play: it keeps the one it has */ }
 }
 
-/** Puts chunk ci into a video, unless it is there already. */
-function load(video, ci) {
+/** Puts chunk ci into a video, to start at its frame `local`, unless the chunk is there already. */
+function load(video, ci, local) {
   if (ci < 0 || ci >= P.tl.chunks.length || chunkOf(video) === ci) return;
+  const t = timeOf(local || 0);
   video.setAttribute('data-chunk', String(ci));
-  video.src = TIMELAPSE_BASE + P.tl.chunks[ci].video;
+  V.pictured.delete(video);
+  V.want.set(video, t);
+  video.src = `${TIMELAPSE_BASE}${P.tl.chunks[ci].video}#t=${t.toFixed(3)}`;
   setRate(video);
+}
+
+/** A video to time t, unless it is there already. */
+function goTo(video, t) {
+  if (Math.abs((Number(video.currentTime) || 0) - t) > 0.001) video.currentTime = t;
+}
+
+/** Shows frame `local` of a video's chunk: now, or once the chunk has a picture. */
+function seek(video, local) {
+  const t = timeOf(local);
+  if (!V.pictured.has(video)) { V.want.set(video, t); return; }
+  V.want.delete(video);
+  goTo(video, t);
+}
+
+/** A video's chunk has its first picture: the frame wanted meanwhile, if that is not the one there - and no poster from now on. */
+function onPicture(video) {
+  // From the chunk before (the new one still loading), or said already.
+  if (!(video.readyState >= 2) || V.pictured.has(video)) return;
+  V.pictured.add(video);
+  video.removeAttribute('poster');
+  if (V.want.has(video)) {
+    const t = V.want.get(video);
+    V.want.delete(video);
+    goTo(video, t);
+  }
 }
 
 /** The list again (one reading at a time): the index, or null when it cannot be had. */
@@ -410,33 +467,27 @@ async function takeNewer() {
   return true;
 }
 
-/** Shows frame `local` of a video's chunk: now, or as soon as it can. */
-function seek(video, local) {
-  const t = (local + 0.5) / P.tl.fps;
-  if (video.readyState >= 1) { video.currentTime = t; return; }
-  const go = () => { video.removeEventListener('loadedmetadata', go); video.currentTime = t; };
-  video.addEventListener('loadedmetadata', go);
-}
-
+/** The video behind to the front; the one in front behind it, paused (see-through: #stage's style). */
 function swap() {
   const was = P.vis;
   P.vis = P.hid;
   P.hid = was;
-  P.vis.hidden = false;
   P.vis.removeAttribute('aria-hidden');
-  P.hid.hidden = true;
   P.hid.setAttribute('aria-hidden', 'true');
   try { P.hid.pause(); } catch (e) { /* not playing */ }
 }
 
-/** Frame g of the whole timelapse on screen, the next chunk made ready behind it. */
+/** Frame g of the whole timelapse in front, the next chunk made ready behind it. */
 function showFrame(g) {
   const at = frameAt(P.tl, g);
   if (chunkOf(P.vis) !== at.chunk) {
-    if (chunkOf(P.hid) === at.chunk) swap(); else load(P.vis, at.chunk);
+    // Nothing in front yet: there. Otherwise behind (if not there already), then to the
+    // front - the chunk in front going behind, where it is often the next one.
+    if (chunkOf(P.vis) < 0 && chunkOf(P.hid) !== at.chunk) load(P.vis, at.chunk, at.local);
+    else { load(P.hid, at.chunk, at.local); swap(); }
   }
   seek(P.vis, at.local);
-  load(P.hid, at.chunk + 1);
+  load(P.hid, at.chunk + 1, 0);
   mark(g);
 }
 
@@ -450,12 +501,59 @@ function mark(g) {
   range.setAttribute('aria-valuetext', text);
 }
 
-/** The frame on screen now, by the playing video's clock. */
+/** The frame in front now: by the playing video's clock - or, while its chunk loads, the frame it is to show. */
 function currentFrame() {
   const ci = chunkOf(P.vis);
   if (ci < 0) return 0;
   const c = P.tl.chunks[ci];
-  return c.offset + Math.max(0, Math.min(c.frames - 1, Math.floor((P.vis.currentTime || 0) * P.tl.fps + 1e-6)));
+  const t = V.want.has(P.vis) ? V.want.get(P.vis) : (Number(P.vis.currentTime) || 0);
+  return c.offset + Math.max(0, Math.min(c.frames - 1, Math.floor(t * P.tl.fps + 1e-6)));
+}
+
+// Each video's pictures shown so far (counted where the browser says when it
+// shows one), and the watch on the one in front: since when it has played on
+// with no new picture, from where, and its nudges.
+const F = { shown: new Map(), watch: null, nudges: new Map() };
+
+/** Counts the pictures a video shows, where the browser can say (requestVideoFrameCallback). */
+function countPictures(video) {
+  if (typeof video.requestVideoFrameCallback !== 'function') return;
+  F.shown.set(video, 0);
+  const seen = () => { F.shown.set(video, F.shown.get(video) + 1); video.requestVideoFrameCallback(seen); };
+  video.requestVideoFrameCallback(seen);
+}
+
+/** The stage at least partly on the screen (off it, a browser may well not draw). */
+function stageInView() {
+  const stage = $('stage');
+  if (!stage || typeof stage.getBoundingClientRect !== 'function') return false;
+  const r = stage.getBoundingClientRect();
+  return r.bottom > 0 && r.top < (Number(window.innerHeight) || 0);
+}
+
+/**
+ * The video in front playing on, its clock a second or more past the picture
+ * on screen, with no new picture for STUCK_MS: moved to where it is, so it
+ * draws again.
+ */
+function unstick() {
+  const v = P.vis;
+  if (!F.shown.has(v)) return;
+  const now = Date.now(), t = Number(v.currentTime) || 0, shown = F.shown.get(v);
+  const w = F.watch;
+  // Not playing on (paused, moving, loading, out of sight), or a new picture since: the watch starts again.
+  if (v.paused || v.seeking || !(v.readyState >= 3) || !stageInView() || !w || w.video !== v || w.shown !== shown || t < w.from) {
+    F.watch = { video: v, shown, since: now, from: t };
+    return;
+  }
+  if (now - w.since < STUCK_MS || t - w.from < 1) return;
+  const n = F.nudges.get(v) || { chunk: -1, count: 0, at: 0 };
+  if (n.chunk !== chunkOf(v)) Object.assign(n, { chunk: chunkOf(v), count: 0 });
+  if (n.count >= NUDGES_PER_CHUNK || now - n.at < NUDGE_EVERY_MS) return;
+  Object.assign(n, { count: n.count + 1, at: now });
+  F.nudges.set(v, n);
+  F.watch = { video: v, shown, since: now, from: t };
+  try { v.currentTime = t; } catch (e) { /* it plays on as it was */ }
 }
 
 function setPlaying(on) {
@@ -467,6 +565,7 @@ function setPlaying(on) {
   const tick = () => {
     if (!P.playing) return;
     mark(currentFrame());
+    unstick();
     P.raf = requestAnimationFrame(tick);
   };
   cancelAnimationFrame(P.raf);
@@ -475,11 +574,23 @@ function setPlaying(on) {
 
 function play() {
   clearTimeout(P.loop);
+  // On the last frame of a chunk its video counts as over: playing it would start
+  // that chunk again from its first day. On into the next chunk instead - or, on
+  // the last frame of all, as when the timelapse gets there by itself.
+  const g = currentFrame();
+  const at = frameAt(P.tl, g);
+  const c = P.tl.chunks[at.chunk];
+  if (c.frames > 1 && at.local === c.frames - 1) {
+    if (at.chunk + 1 >= P.tl.chunks.length) { setPlaying(true); theEnd(); return; }
+    showFrame(g + 1);
+  }
   setPlaying(true);
+  const id = ++P.playId;
+  const v = P.vis;
   let r;
-  try { r = P.vis.play(); } catch (e) { r = null; }
+  try { r = v.play(); } catch (e) { r = null; }
   // A browser that will not start a video by itself (data saving, say): the button says Play.
-  if (r && typeof r.catch === 'function') r.catch(() => { setPlaying(false); });
+  if (r && typeof r.catch === 'function') r.catch(() => { if (id === P.playId && v === P.vis && v.paused) setPlaying(false); });
 }
 
 function pause() {
@@ -488,20 +599,11 @@ function pause() {
   try { P.vis.pause(); } catch (e) { /* not playing */ }
 }
 
-/** The playing chunk has ended: the next one at once - or, after the last, a moment on today, then the first day again. */
-function onEnded(e) {
-  if (e && e.target !== P.vis) return;
-  const ci = chunkOf(P.vis);
-  if (ci + 1 < P.tl.chunks.length) {
-    if (chunkOf(P.hid) !== ci + 1) load(P.hid, ci + 1);
-    swap();
-    seek(P.vis, 0);
-    if (P.playing) play();
-    load(P.hid, ci + 2);
-    return;
-  }
+/** Today's last frame: a moment on it, then the first day again. */
+function theEnd() {
   mark(P.tl.total - 1);
   if (!P.playing) return;
+  clearTimeout(P.loop);
   P.loop = setTimeout(async () => {
     // A page left open: the list again before starting over - a new day joins in.
     if (Date.now() - L.readAt >= REREAD_MS) {
@@ -511,6 +613,18 @@ function onEnded(e) {
     showFrame(0);
     play();
   }, LOOP_PAUSE_MS);
+}
+
+/** The playing chunk has ended: the next one at once - or, after the last, the end. */
+function onEnded(e) {
+  if (e && e.target !== P.vis) return;
+  const ci = chunkOf(P.vis);
+  if (ci >= 0 && ci + 1 < P.tl.chunks.length) {
+    showFrame(P.tl.chunks[ci + 1].offset);
+    if (P.playing) play();
+    return;
+  }
+  theEnd();
 }
 
 /**
@@ -545,7 +659,6 @@ function initTimeline(tl, autoplay, startAt, poster) {
   P.tl = tl;
   P.vis = $('tl-a');
   P.hid = $('tl-b');
-  if (poster) P.vis.setAttribute('poster', TIMELAPSE_BASE + poster);
   const range = $('tl-range');
   describe(tl);
   show('stage', true);
@@ -553,6 +666,8 @@ function initTimeline(tl, autoplay, startAt, poster) {
   for (const v of [P.vis, P.hid]) {
     v.addEventListener('ended', onEnded);
     v.addEventListener('error', () => { onVideoError(v); });
+    for (const type of ['loadeddata', 'canplay', 'seeked']) v.addEventListener(type, () => { onPicture(v); });
+    countPictures(v);
   }
   $('tl-play').addEventListener('click', () => {
     if (P.playing) { pause(); return; }
@@ -568,27 +683,46 @@ function initTimeline(tl, autoplay, startAt, poster) {
       requestAnimationFrame(() => { P.drawPending = false; if (P.pending !== null) { showFrame(P.pending); P.pending = null; } });
     }
   });
-  range.addEventListener('change', () => {
+  // Letting go: "change" - or the finger or button coming up, should a browser
+  // not say "change" (a touch taken over by scrolling, say).
+  const letGo = (e) => {
+    if (!P.dragging) {
+      // "Changed" with no dragging before it, from a browser that says only that: the frame let go on.
+      if (e && e.type === 'change' && Number(range.value) !== currentFrame()) {
+        showFrame(Number(range.value));
+        if (P.playing) play();
+      }
+      return;
+    }
     if (P.pending !== null) { showFrame(P.pending); P.pending = null; }
     P.dragging = false;
     if (P.wasPlaying) play();
-  });
-  for (const b of document.querySelectorAll('#tl-speeds button')) {
+  };
+  for (const type of ['change', 'pointerup', 'pointercancel', 'touchend', 'touchcancel', 'mouseup']) range.addEventListener(type, letGo);
+  const speeds = [...document.querySelectorAll('#tl-speeds button')];
+  for (const b of speeds) {
     b.addEventListener('click', () => {
-      for (const o of document.querySelectorAll('#tl-speeds button')) o.setAttribute('aria-pressed', o === b ? 'true' : 'false');
+      const was = P.rate;
       P.rate = Number(b.getAttribute('data-rate')) || 1;
       setRate(P.vis);
+      // A speed the browser would not take: the one it had stays, and stays marked.
+      if (P.vis.playbackRate !== P.rate) P.rate = was;
+      setRate(P.vis);
       setRate(P.hid);
+      for (const o of speeds) o.setAttribute('aria-pressed', Number(o.getAttribute('data-rate')) === P.rate ? 'true' : 'false');
     });
   }
   $('tl-full').addEventListener('click', () => {
     const stage = $('stage');
     try {
-      const r = stage.requestFullscreen ? stage.requestFullscreen() : P.vis.webkitEnterFullscreen ? P.vis.webkitEnterFullscreen() : null;
+      const r = stage.requestFullscreen ? stage.requestFullscreen() : stage.webkitRequestFullscreen ? stage.webkitRequestFullscreen()
+        : P.vis.webkitEnterFullscreen ? P.vis.webkitEnterFullscreen() : null;
       if (r && typeof r.catch === 'function') r.catch(() => {});
     } catch (e) { /* not on this browser */ }
   });
   showFrame(startAt);
+  // A picture until the first chunk has one (the day it starts on): gone then.
+  if (poster) P.vis.setAttribute('poster', TIMELAPSE_BASE + poster);
   if (autoplay) play(); else setPlaying(false);
 }
 
@@ -685,8 +819,8 @@ async function start() {
       const at = tl.chunks.flatMap((c) => c.days).find((d) => d.date === asked.date);
       if (at) startAt = at.offset;
     }
-    const firstDay = days.find((d) => d.date === tl.chunks[0].days[0].date);
-    initTimeline(tl, !asked && !reducedMotion(), startAt, firstDay && firstDay.poster);
+    const startDay = days.find((d) => d.date === frameAt(tl, startAt).date);
+    initTimeline(tl, !asked && !reducedMotion(), startAt, startDay && startDay.poster);
   }
   if (days.length) {
     show('day-card', true);
