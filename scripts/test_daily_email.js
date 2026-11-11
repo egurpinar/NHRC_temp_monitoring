@@ -4891,6 +4891,9 @@ test('phone: the chart library loads once, in order, when a chart is near - then
   assert.deepStrictEqual(els.__scripts.map(s => [s.src.replace(/^.*\/ajax\/libs\//, ''), s.async]),
     [['Chart.js/4.4.1/chart.umd.min.js', false], ['moment.js/2.29.4/moment.min.js', false], ['chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js', false]],
     'all three, run in order');
+  assert.ok(els.__scripts.every(s => /^sha512-[A-Za-z0-9+/]{86}==$/.test(s.integrity) && s.crossOrigin === 'anonymous'),
+    'each with its fingerprint (Subresource Integrity): a file the CDN changed is refused, never run');
+  assert.strictEqual(new Set(els.__scripts.map(s => s.integrity)).size, 3, 'its own, each');
   const drawn = arriveChartLibs(els);
   await settle();
   assert.strictEqual(drawn.length, 2, 'the temperature chart and the river chart');
@@ -4898,6 +4901,25 @@ test('phone: the chart library loads once, in order, when a chart is near - then
   assert.strictEqual(els['chart-single-msg'].style.display, 'none');
   site.loadChartLibs();
   assert.strictEqual(els.__scripts.length, 3, 'never loaded twice');
+});
+
+test('SECURITY: every script and style from another server is pinned by its hash, and a link that opens a new tab gets no hold on this one', () => {
+  const html = fsT.readFileSync(INDEX_PATH, 'utf8').replace(/<!--[\s\S]*?-->/g, '');
+  const loads = (html.match(/<(script|link)\b[^>]*\b(src|href)="https?:\/\/[^"]*"[^>]*>/g) || [])
+    .filter(t => /^<script/.test(t) || /\brel="stylesheet"/.test(t));
+  assert.ok(loads.length >= 2, 'the map\'s script and styles at least');
+  for (const t of loads) {
+    assert.ok(/\bintegrity="sha(256|384|512)-[A-Za-z0-9+/]{43,86}=*"/.test(t) && /\bcrossorigin=/.test(t), `not pinned: ${t}`);
+  }
+  // The chart libraries, added later by the page's script: each has its own.
+  const libs = [...html.match(/const CHART_LIBS = \[([\s\S]*?)\];/)[1].matchAll(/'(https:[^']+)'/g)].map(m => m[1]);
+  const sri = html.match(/const CHART_LIBS_SRI = \{([\s\S]*?)\};/)[1];
+  assert.strictEqual(libs.length, 3);
+  for (const u of libs) assert.ok(new RegExp(`'${u.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}':\\s*'sha512-`).test(sri), `no fingerprint for ${u}`);
+  // A tab opened by a link gets no hold on this page (window.opener), in older browsers too.
+  const blank = html.match(/<a\b[^>]*\btarget="_blank"[^>]*>/g) || [];
+  assert.ok(blank.length >= 10, `${blank.length} links`);
+  for (const l of blank) assert.ok(/\brel="[^"]*\bnoopener\b/.test(l), `no rel="noopener": ${l.slice(0, 100)}`);
 });
 
 test('phone: the chart library cannot load - each chart says so, the rest of the page is untouched, and it is tried again after 5 minutes', async () => {

@@ -15,10 +15,18 @@
  *     name, what a click does, remembering, following the device, the charts,
  *     and that a problem with it can never stop the readings loading.
  *
+ *  7. roworno.com/8bit, the page's third look (the club's navy and gold,
+ *     a pixel font): its contrast where its styles put each colour, only
+ *     from the address and never remembered, statuses told apart by more
+ *     than colour, its charts, the font (the site's own, renamed as its
+ *     licence asks) and the small page at /8bit.
+ *
  * Before release (October 2026) the page was also checked in a real browser
  * engine, both themes, at widths from 320 to 900px: every element's real
  * text-on-background contrast, every status colour, the switch's place, size
  * and focus ring, and dark mode element by element against the old page.
+ * The 8-bit look likewise in November 2026, on the live data: all 218 pieces of
+ * text at least 5.6:1, nothing wider than a 320px screen.
  *
  * Run: node scripts/test_site_theme.js
  */
@@ -69,6 +77,9 @@ function block(selector) {
 const DARK = block(':root');
 const LIGHT = Object.assign({}, DARK, block(':root[data-theme="light"]'));
 const THEMES = { dark: DARK, light: LIGHT };
+// roworno.com/8bit: a third look, set from the address only (section 7).
+const EIGHT = Object.assign({}, DARK, block(':root[data-theme="8bit"]'));
+const ALL = { dark: DARK, light: LIGHT, '8bit': EIGHT };
 
 const TINT = { green: 'rgba(46,125,79,.18)', green15: 'rgba(46,125,79,.15)', green20: 'rgba(46,125,79,.2)', yellow: 'rgba(255,209,102,.15)',
   gold: 'rgba(240,180,41,.15)', red: 'rgba(224,62,62,.15)', red12: 'rgba(224,62,62,.12)', red10: 'rgba(224,62,62,.1)',
@@ -144,7 +155,8 @@ section('3. No colour outside the palette');
 
 test('no dark-only colour is written into the page outside the palette', () => {
   const style = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
-  const palettes = [style.indexOf(':root{'), style.indexOf('}', style.indexOf(':root[data-theme="light"]{'))];
+  const palettes = [style.indexOf(':root{'), style.indexOf('}', style.indexOf(':root[data-theme="8bit"]{'))];
+  assert.ok(style.indexOf(':root[data-theme="light"]{') < style.indexOf(':root[data-theme="8bit"]{'), 'the three palettes together, at the top');
   const css = style.slice(0, palettes[0]) + style.slice(palettes[1]);
   const body = html.slice(html.indexOf('<body>'));
   // Allowed on purpose: the logo (on its own white disc), the Subscribe button
@@ -241,7 +253,8 @@ function page({ theme = 'dark', stored = null, deviceLight = false, storageThrow
   const gradient = () => ({ stops: [], addColorStop(o, c) { this.stops.push([o, c]); } });
   const el = (id) => els[id] || (els[id] = {
     id, innerHTML: '', textContent: '', style: {}, value: '', className: '', dataset: {},
-    getContext: () => ({ createLinearGradient: gradient }), addEventListener() {}, querySelector: () => null, querySelectorAll: () => [],
+    getContext: () => ({ createLinearGradient: gradient, createPattern: (tile, rep) => ({ pattern: true, tile, rep }), fillRect() {}, fillStyle: '' }),
+    width: 0, height: 0, addEventListener() {}, querySelector: () => null, querySelectorAll: () => [],
     classList: { add() {}, remove() {}, toggle() {} }, setAttribute() {}, appendChild() {}, get parentElement() { return el(id + '__parent'); },
   });
   const charts = [];
@@ -262,7 +275,7 @@ function page({ theme = 'dark', stored = null, deviceLight = false, storageThrow
     },
     window: { addEventListener: (t, fn) => { (listeners.window[t] = listeners.window[t] || []).push(fn); }, matchMedia: () => mq },
     getComputedStyle: () => ({ getPropertyValue: (name) => {
-      const v = THEMES[root.attrs['data-theme'] === 'light' ? 'light' : 'dark'][name.replace(/^--/, '')];
+      const v = (ALL[root.attrs['data-theme']] || DARK)[name.replace(/^--/, '')];
       return v === undefined ? '' : ' ' + v;   // as browsers do: with the space after the colon
     } }),
     localStorage,
@@ -413,6 +426,165 @@ test('44 x 44, a focus ring, the sun in dark and the moon in light, still for pe
   assert.ok(/@media \(prefers-reduced-motion: reduce\)\{\.theme-toggle\{transition:none;\}\}/.test(css));
   assert.ok(/<meta name="color-scheme" content="dark light"\/>/.test(html) && /color-scheme:dark;/.test(css) && /color-scheme:light;/.test(css),
     'the browser draws its own controls (scrollbars, the email box) to match');
+});
+
+section('7. The 8-bit page (roworno.com/8bit)');
+
+// Its own colours, laid as its styles lay them (the 8-BIT styles at the end of the CSS).
+const PX = (v, b) => b.startsWith('ink:') ? `rgba(${v.ink},${b.slice(4)})` : v[b];
+const PAIRS_8BIT = [
+  ['text on the page', 'white', ['px-screen'], 4.5], ['grey text', 'muted', ['px-screen'], 4.5], ['grey text on the info bar', 'muted', ['px-screen', 'ink:.04'], 4.5],
+  ['gold headings and links', 'gold', ['px-screen'], 4.5], ['no restriction (plain)', 'ok', ['px-screen'], 4.5],
+  ['caution (shaded)', 'caution', ['px-shade'], 4.5], ['a warning (shaded)', 'warn-text', ['px-shade'], 4.5], ['caution text in a card', 'caution', ['px-screen'], 4.5],
+  ['restricted / danger (solid)', 'px-bad-ink', ['px-bad-bg'], 4.5], ['red text in a card', 'bad', ['px-screen'], 4.5],
+  ['an active button', 'px-screen', ['px-line'], 4.5], ['chart axis labels', 'chart-tick', ['px-screen'], 4.5],
+  ['chart tooltip title', 'chart-tip-title', ['chart-tip-bg'], 4.5], ['chart tooltip text', 'chart-tip-body', ['chart-tip-bg'], 4.5],
+  ['the boxes\' lines', 'px-line', ['px-screen'], 3.0], ['the tiles\' lines', 'px-tile-line', ['px-screen'], 3.0], ['the focus ring', 'focus', ['px-screen'], 3.0],
+  ['temperature line', 'chart-line', ['px-screen'], 3.0], ['forecast line', 'chart-forecast', ['px-screen'], 3.0],
+  ['8 ft line', 'flood-8', ['px-screen'], 3.0], ['10 ft line', 'flood-10', ['px-screen'], 3.0], ['12 ft line', 'flood-12', ['px-screen'], 3.0],
+  ['allowed square', 'ok-dot', ['px-screen'], 3.0], ['caution square', 'caution-dot', ['px-screen'], 3.0], ['no square', 'bad-dot', ['px-screen'], 3.0],
+];
+
+test('8-bit: every text and status colour is readable where it is used', () => {
+  const short = [];
+  for (const [what, fg, bgs, min] of PAIRS_8BIT) {
+    assert.ok(EIGHT[fg] !== undefined, `--${fg} is not defined`);
+    const r = ratio(EIGHT[fg], bgs.map(b => PX(EIGHT, b)));
+    if (r < min) short.push(`${what}: ${EIGHT[fg]} = ${r.toFixed(2)}:1, needs ${min}:1`);
+  }
+  assert.deepStrictEqual(short, []);
+});
+
+test('8-bit: a value for every colour the dark theme has, in the club\'s navy and gold', () => {
+  const own = block(':root[data-theme="8bit"]');
+  const themed = Object.keys(DARK).filter(k => !/^f(serif|sans)$/.test(k) && !['green', 'blue', 'chart-fill'].includes(k));
+  assert.deepStrictEqual(themed.filter(k => !(k in own)), []);
+  assert.deepStrictEqual([own.navy, own.gold, own['px-line']], ['#0d1f3c', '#f0b429', '#f0b429'], 'the club\'s colours');
+});
+
+test('8-bit: only with ?8bit in the address - whatever was chosen before - and never remembered', () => {
+  const withAddress = (search, opts) => {
+    const attrs = {}, writes = [];
+    const sandbox = {
+      location: { search },
+      localStorage: { getItem: (k) => (k === 'nhrc-theme' ? opts.stored : null), setItem: (k, v) => writes.push([k, v]) },
+      window: { matchMedia: (q) => ({ matches: q === '(prefers-color-scheme: light)' && !!opts.light }) },
+      document: { documentElement: { setAttribute: (n, val) => { attrs[n] = val; } } },
+    };
+    vm.runInNewContext(initSrc, sandbox);
+    return [attrs['data-theme'], writes.length];
+  };
+  for (const s of ['?8bit', '?8bit=1', '?x=1&8bit', '?8bit&x=1']) {
+    assert.deepStrictEqual(withAddress(s, { stored: 'light', light: true }), ['8bit', 0], s);
+  }
+  for (const s of ['', '?', '?8bits', '?no8bit', '?x=8bit']) {
+    assert.deepStrictEqual(withAddress(s, { stored: 'light', light: false }), ['light', 0], s || '(none)');
+  }
+});
+
+test('8-bit: the light/dark switch is hidden, the device cannot switch the page away, and "Normal view" goes to the usual page', () => {
+  const x = page({ theme: '8bit' });
+  x.fire('window', 'DOMContentLoaded');
+  assert.strictEqual(x.p.currentTheme(), '8bit');
+  x.mq.handlers[0]({ matches: true });
+  x.mq.handlers[0]({ matches: false });
+  assert.strictEqual(x.root.attrs['data-theme'], '8bit', 'still 8-bit');
+  assert.ok(!x.store.has('nhrc-theme'), 'nothing remembered');
+  assert.strictEqual(x.meta.attrs.content, EIGHT.navy, 'the phone\'s bar in the page colour');
+  const css = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  assert.ok(/:root\[data-theme="8bit"\] \.theme-toggle\{display:none;\}/.test(css));
+  assert.ok(/\.exit-8bit\{display:none;\}/.test(css) && /:root\[data-theme="8bit"\] \.exit-8bit\{display:inline-flex;/.test(css));
+  assert.ok(/<a class="exit-8bit" href="\.\/">Normal view<\/a>/.test(html));
+});
+
+test('8-bit charts: straight lines, square points, a chequered fill, typewriter letters, flood lines told apart by their dashes - the usual page unchanged', () => {
+  const t0 = Date.now();
+  const obs = [{ ts: t0 - 3600e3, ft: 3 }, { ts: t0, ft: 3.1 }], fc = [{ ts: t0 + 3600e3, ft: 3.2 }];
+  const x = page({ theme: '8bit' });
+  x.p.initChart();
+  const temp = x.p.getChart().data.datasets[0];
+  assert.deepStrictEqual([temp.tension, temp.pointStyle, !!temp.backgroundColor.pattern], [0, 'rect', true]);
+  assert.strictEqual(x.p.getChart().options.scales.x.ticks.font.family, EIGHT.fsans);
+  x.p.initRiverChart(obs, fc, 3.1);
+  const river = x.p.getRiverChart();
+  assert.deepStrictEqual([river.data.datasets[0].tension, river.data.datasets[1].tension, river.data.datasets[1].pointStyle], [0, 0, 'rect']);
+  assert.deepStrictEqual([...river.data.datasets.slice(2)].map(d => JSON.stringify([...d.borderDash]) + '/' + d.borderWidth),
+    ['[2,4]/1.5', '[2,4]/1.5', '[6,4]/1.5', '[6,4]/1.5', '[]/2']);
+  // The usual page: as it was.
+  const y = page({ theme: 'dark' });
+  y.p.initChart();
+  const dt = y.p.getChart().data.datasets[0];
+  assert.deepStrictEqual([dt.tension, dt.pointStyle, Array.isArray(dt.backgroundColor.stops)], [0.3, 'circle', true]);
+  assert.strictEqual(y.p.getChart().options.scales.x.ticks.font.family, "'Helvetica Neue',Helvetica,Arial,sans-serif");
+  y.p.initRiverChart(obs, fc, 3.1);
+  assert.deepStrictEqual([...y.p.getRiverChart().data.datasets.slice(2)].map(d => JSON.stringify([...d.borderDash])), Array(5).fill('[4,3]'));
+});
+
+test('8-bit statuses differ in more than colour: plain, shaded with a dashed edge, solid; the flood squares empty, chequered, full', () => {
+  const css = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  const X = ':root[data-theme="8bit"] ';
+  const ruleFor = (sel) => { const i = css.indexOf(X + sel); assert.ok(i > -1, sel); return css.slice(css.indexOf('{', i), css.indexOf('}', i)); };
+  assert.ok(/border:2px solid var\(--ok\)/.test(ruleFor('.pill-ok')) && /border:2px solid var\(--ok\)/.test(ruleFor('.bs-go')), 'plain');
+  assert.ok(/background:var\(--px-shade\);color:var\(--caution\);border:2px dashed/.test(ruleFor('.bs-caution')), 'caution: shaded, dashed');
+  assert.ok(/background:var\(--px-shade\);color:var\(--warn-text\);border:2px dashed/.test(ruleFor('.pill-warn')), 'a warning: shaded, dashed');
+  assert.ok(/background:var\(--px-bad-bg\);color:var\(--px-bad-ink\)/.test(ruleFor('.bs-no')), 'restricted: solid');
+  for (const sel of ['.rp-normal', '.rule-banner.green', '.rp-caution', '.rule-banner.yellow', '.rp-danger', '.rule-banner.red', '.warn-banner.level-danger', '.weather-alert.danger'])
+    assert.ok(css.includes(X + sel), sel);
+  assert.ok(!new RegExp(':root\\[data-theme="8bit"\\] \\.fog-pill\\.likely[^{]*\\{[^}]*px-bad-bg').test(css), 'fog never looks like a restriction');
+  assert.ok(/background:transparent;border:2px solid var\(--ok-dot\)/.test(ruleFor('.fc-go')));
+  assert.ok(/repeating-conic-gradient/.test(ruleFor('.fc-caution')));
+  assert.ok(/background:var\(--bad-dot\)/.test(ruleFor('.fc-no')));
+});
+
+/** A WOFF font's name records (platform 3): { nameID: text }. */
+function woffNames(file) {
+  const zlib = require('zlib');
+  const b = fs.readFileSync(file);
+  assert.strictEqual(b.toString('latin1', 0, 4), 'wOFF');
+  const n = b.readUInt16BE(12);
+  for (let i = 0; i < n; i++) {
+    const e = 44 + i * 20;
+    if (b.toString('latin1', e, e + 4) !== 'name') continue;
+    const off = b.readUInt32BE(e + 4), comp = b.readUInt32BE(e + 8), orig = b.readUInt32BE(e + 12);
+    const t = comp < orig ? zlib.inflateSync(b.subarray(off, off + comp)) : b.subarray(off, off + orig);
+    const count = t.readUInt16BE(2), strings = t.readUInt16BE(4), out = {};
+    for (let r = 0; r < count; r++) {
+      const p = 6 + r * 12;
+      if (t.readUInt16BE(p) !== 3) continue;
+      const len = t.readUInt16BE(p + 8), so = t.readUInt16BE(p + 10), raw = t.subarray(strings + so, strings + so + len);
+      let s = ''; for (let k = 0; k + 1 < raw.length; k += 2) s += String.fromCharCode(raw.readUInt16BE(k));
+      out[t.readUInt16BE(p + 6)] = s;
+    }
+    return out;
+  }
+  throw new Error('no name table');
+}
+
+test('the pixel font: from the site itself, only for the 8-bit page, renamed as its licence asks, the licence beside it', () => {
+  const css = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+  assert.ok(/@font-face\{font-family:'Roworno Pixel';src:url\('fonts\/roworno-pixel\.woff'\) format\('woff'\);font-display:swap;\}/.test(css));
+  assert.ok(!/fonts\.googleapis|fonts\.gstatic/.test(html), 'never from Google: no visitor\'s address goes there');
+  // Used only through the 8-bit palette's --fpixel (and --fserif there): a browser fetches a font only for text that uses it.
+  const outside = css.replace(/:root\[data-theme="8bit"\]\{[^}]*\}/, '').replace(/@font-face\{[^}]*\}/, '');
+  assert.ok(!/Roworno Pixel/.test(outside), 'named nowhere else');
+  assert.ok(!/--fpixel:/.test(outside), '--fpixel only in the 8-bit palette');
+  const file = path.join(__dirname, '..', 'fonts', 'roworno-pixel.woff');
+  assert.ok(fs.statSync(file).size < 20000, 'small');
+  const names = woffNames(file);
+  assert.strictEqual(names[1], 'Roworno Pixel');
+  for (const id of [1, 3, 4, 6, 16]) assert.ok(!/Press Start 2P/i.test(names[id] || ''), `name ${id} is not the reserved name: ${names[id]}`);
+  assert.ok(/^Copyright 2012 The Press Start 2P Project Authors/.test(names[0]), 'the copyright kept');
+  const ofl = fs.readFileSync(path.join(__dirname, '..', 'fonts', 'OFL.txt'), 'utf8');
+  assert.ok(/SIL OPEN FONT LICENSE Version 1\.1/.test(ofl) && /Copyright 2012 The Press Start 2P Project Authors/.test(ofl));
+});
+
+test('roworno.com/8bit: a small page that sends the visitor to /?8bit - replace(), so Back does not bounce - and nothing else', () => {
+  const stub = fs.readFileSync(path.join(__dirname, '..', '8bit', 'index.html'), 'utf8');
+  assert.ok(/<script>location\.replace\('\.\.\/\?8bit' \+ location\.hash\);<\/script>/.test(stub));
+  assert.ok(/<meta http-equiv="refresh" content="0; url=\.\.\/\?8bit"\/>/.test(stub), 'without scripts too');
+  assert.ok(/<link rel="canonical" href="https:\/\/roworno\.com\/\?8bit"\/>/.test(stub));
+  assert.strictEqual((stub.match(/<script/g) || []).length, 1);
+  assert.ok(!/<link rel="stylesheet"|<img|<iframe|src=/.test(stub), 'nothing loaded from anywhere');
 });
 
 // ── run ──

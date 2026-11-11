@@ -158,12 +158,12 @@ test('the words: the day, the time under the drag bar, the hours and the lengths
   const [d] = P.daysFrom({ days: [day('2026-11-09')] });
   assert.strictEqual(P.dayNote(d), '112 photos, 6:35 AM to 4:15 PM - 11 seconds');
   // The continuous timelapse's title: the days it spans, as they are.
-  assert.strictEqual(P.spanTitle(raw.timelineFrom(INDEX)), 'Nov 9, 2026 to Nov 11, 2026');
+  assert.strictEqual(P.spanTitle(raw.timelineFrom(INDEX)), 'Nov 9, 2026 to Nov 11, 2026 Timelapse');
   const quarters = Array.from({ length: 96 }, (_, i) => `${String(Math.floor(i / 4)).padStart(2, '0')}${String((i % 4) * 15).padStart(2, '0')}`).join(',');
   const one = raw.timelineFrom({ timeline: { fps: 10, chunks: [chunk('2026-11-01', [['2026-11-09', quarters]])] } });
-  assert.strictEqual(P.spanTitle(one), 'Nov 9, 2026');
+  assert.strictEqual(P.spanTitle(one), 'Nov 9, 2026 Timelapse');
   const across = raw.timelineFrom({ timeline: { fps: 10, chunks: [chunk('2026-09-01', [['2026-09-06', '0700']]), chunk('2026-12-01', [['2026-12-09', '0700']])] } });
-  assert.strictEqual(P.spanTitle(across), 'Sep 6, 2026 to Dec 9, 2026');
+  assert.strictEqual(P.spanTitle(across), 'Sep 6, 2026 to Dec 9, 2026 Timelapse');
   // Over the days below.
   assert.deepStrictEqual([1, 2, 28].map(P.lastDays), ['Last 1 day', 'Last 2 days', 'Last 28 days']);
 });
@@ -337,7 +337,7 @@ test('it plays from the first day at once: the first chunk on screen, the next m
   const d = dom(OK);
   await d.startPage();
   assert.deepStrictEqual(d.fetched, [`${WORKER}/timelapse/index.json`]);
-  assert.strictEqual(d.els['whole-title'].textContent, 'Nov 9, 2026 to Nov 11, 2026', 'the days it spans');
+  assert.strictEqual(d.els['whole-title'].textContent, 'Nov 9, 2026 to Nov 11, 2026 Timelapse', 'the days it spans');
   assert.strictEqual(d.els['tl-ends'].textContent, 'Nov 9, 2026 → Nov 11, 2026');
   assert.deepStrictEqual([d.els.stage.hidden, d.els['tl-controls'].hidden], [false, false]);
   assert.strictEqual(d.a.src, `${src('2026-11-01')}#t=0.050`, 'from its first frame');
@@ -353,6 +353,7 @@ test('it plays from the first day at once: the first chunk on screen, the next m
   assert.strictEqual(d.els['tl-when'].textContent, 'Mon, Nov 9, 2026 · 7:00 AM');
   assert.strictEqual(d.range.getAttribute('aria-valuetext'), 'Mon, Nov 9, 2026 · 7:00 AM');
   assert.ok(!/so far|quarter hour/.test(Object.values(d.els).map((e) => e.textContent).join(' ')), 'no count of days and frames under it');
+  assert.ok(!/The building going up|every day so far in one timelapse/.test(html), 'no line under the heading saying what the page is');
   // The bar follows the video, frame by frame; the poster goes once the video has a picture.
   d.a.ready();
   assert.strictEqual(d.a.getAttribute('poster'), null);
@@ -473,6 +474,11 @@ test('speed for both videos; the button pauses and plays; at the end it starts a
   await d.startPage();
   d.a.ready(); d.b.ready();
   assert.deepStrictEqual(d.speeds.map((b) => b.getAttribute('data-rate')), ['0.5', '1', '2', '4', '8']);
+  // It starts at twice the speed, and says so.
+  assert.deepStrictEqual([d.a.playbackRate, d.b.playbackRate, d.a.defaultPlaybackRate], [2, 2, 2], 'starts at 2x');
+  assert.deepStrictEqual(d.speeds.map((b) => b.getAttribute('aria-pressed')), ['false', 'false', 'true', 'false', 'false']);
+  d.speeds[1].click();
+  assert.deepStrictEqual([d.a.playbackRate, d.b.playbackRate], [1, 1], '1x when asked');
   d.speeds[4].click();
   assert.deepStrictEqual([d.a.playbackRate, d.b.playbackRate, d.a.defaultPlaybackRate], [8, 8, 8], '8x');
   d.speeds[3].click();
@@ -485,6 +491,23 @@ test('speed for both videos; the button pauses and plays; at the end it starts a
   assert.strictEqual(d.visible(), d.a, 'from the first chunk');
   assert.strictEqual(d.a.currentTime, 0.05);
   assert.strictEqual(d.a.paused, false);
+});
+
+test('paused: the time under the video and the bar are the frame it stopped on - not the last ones drawn while it played', async () => {
+  const d = dom(OK);
+  await d.startPage();
+  d.a.ready(); d.b.ready();
+  d.a.playTo(0.25); d.tick();
+  assert.strictEqual(d.els['tl-when'].textContent, 'Mon, Nov 9, 2026 · 12:00 PM');
+  // On a frame with nothing drawn since (at 8x, or a page the browser draws less often), then paused.
+  d.a.playTo(0.35);
+  d.els['tl-play'].click();
+  assert.strictEqual(d.a.paused, true);
+  assert.strictEqual(d.els['tl-when'].textContent, 'Tue, Nov 10, 2026 · 8:00 AM', 'the picture it stopped on');
+  assert.strictEqual(d.range.value, '3');
+  assert.strictEqual(d.range.getAttribute('aria-valuetext'), 'Tue, Nov 10, 2026 · 8:00 AM');
+  d.tick();
+  assert.strictEqual(d.els['tl-when'].textContent, 'Tue, Nov 10, 2026 · 8:00 AM', 'and stays');
 });
 
 test('let go on the last frame of a chunk: on into the next chunk - not that chunk again from its first day, as browsers would play it', async () => {
@@ -769,7 +792,7 @@ test('a page left open: on the way back to the first day it reads the list again
   await d.advance(1600);
   assert.strictEqual(d.fetched.length, 2);
   assert.strictEqual(d.range.max, '10', 'the drag bar now spans the new day too');
-  assert.strictEqual(d.els['whole-title'].textContent, 'Nov 9, 2026 to Nov 21, 2026');
+  assert.strictEqual(d.els['whole-title'].textContent, 'Nov 9, 2026 to Nov 21, 2026 Timelapse');
   assert.strictEqual(base(d.visible()), src('2026-11-01'), 'from the first day again');
   assert.strictEqual(d.range.value, '0');
   assert.strictEqual(d.visible().paused, false);
@@ -844,12 +867,12 @@ test('the speed chosen stays when the next chunk loads - even in a browser that 
   const d = dom({ status: 200, body: THREE });
   await d.startPage();
   d.a.ready(); d.b.ready();
-  d.speeds[2].click();
+  d.speeds[3].click();
   d.drag(10); d.tick();
   const v = d.visible();
   assert.strictEqual(base(v), src('2026-11-21'));
   v.ready();
-  assert.deepStrictEqual([v.playbackRate, v.defaultPlaybackRate], [2, 2]);
+  assert.deepStrictEqual([v.playbackRate, v.defaultPlaybackRate], [4, 4]);
 });
 
 test('a speed the browser will not play: the one it had stays, and stays marked - nothing breaks', async () => {

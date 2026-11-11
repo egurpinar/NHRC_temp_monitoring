@@ -6,10 +6,10 @@
 <!-- Only what this page needs, from where it needs it: its own two scripts
      (by their hashes - scripts/test_newboathouse.js checks them), and the
      timelapse from the club's Worker. Nothing else can run or load here. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rrqDV8A+5BVbukieSciXebfrs7j0k/Zju4UwfagvbkU=' 'sha256-zcPYBsoPXzxtZKxC9IrZhPPfkrZZECSoeRZZKCS7nac='; style-src 'unsafe-inline'; img-src 'self' https://nhrc-camera.gurpinar-emre.workers.dev; media-src https://nhrc-camera.gurpinar-emre.workers.dev; connect-src https://nhrc-camera.gurpinar-emre.workers.dev; base-uri 'none'; form-action 'none'"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-rrqDV8A+5BVbukieSciXebfrs7j0k/Zju4UwfagvbkU=' 'sha256-Q24pgg+6hMMU4B9nyhseXW2ZYrytIgNDNwwFK7AIOVQ='; style-src 'unsafe-inline'; img-src 'self' https://nhrc-camera.gurpinar-emre.workers.dev; media-src https://nhrc-camera.gurpinar-emre.workers.dev; connect-src https://nhrc-camera.gurpinar-emre.workers.dev; base-uri 'none'; form-action 'none'"/>
 <meta name="referrer" content="strict-origin-when-cross-origin"/>
 <title>New Boathouse Timelapse - New Haven Rowing Club</title>
-<meta name="description" content="The new boathouse going up: a timelapse of every day so far, and each whole day on its own."/>
+<meta name="description" content="Timelapse of the new boathouse at the New Haven Rowing Club, from the first day, and each whole day."/>
 <link rel="icon" type="image/png" sizes="32x32" href="../favicon-32.png"/>
 <link rel="icon" type="image/png" sizes="16x16" href="../favicon-16.png"/>
 <link rel="apple-touch-icon" sizes="180x180" href="../apple-touch-icon.png"/>
@@ -118,7 +118,6 @@ h2{font-size:1.15rem;font-weight:700;margin-bottom:12px;line-height:1.3;}
     <div class="header-logo-wrap"><img src="../nhrc-logo-header.png" width="240" height="200" alt="NHRC Logo"/></div>
     <div>
       <h1>The New Boathouse</h1>
-      <p>The building going up, day by day: every day so far in one timelapse, and each whole day on its own.</p>
       <a class="back" href="../">&larr; Rowing conditions on roworno.com</a>
     </div>
     <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to light mode" title="Switch to light mode">
@@ -149,8 +148,8 @@ h2{font-size:1.15rem;font-weight:700;margin-bottom:12px;line-height:1.3;}
         <div class="speeds" id="tl-speeds" role="group" aria-label="Playback speed">
           <span>Speed</span>
           <button type="button" data-rate="0.5" aria-pressed="false">0.5&times;</button>
-          <button type="button" data-rate="1" aria-pressed="true">1&times;</button>
-          <button type="button" data-rate="2" aria-pressed="false">2&times;</button>
+          <button type="button" data-rate="1" aria-pressed="false">1&times;</button>
+          <button type="button" data-rate="2" aria-pressed="true">2&times;</button>
           <button type="button" data-rate="4" aria-pressed="false">4&times;</button>
           <button type="button" data-rate="8" aria-pressed="false">8&times;</button>
         </div>
@@ -186,6 +185,7 @@ const LOOP_PAUSE_MS = 1500;     // on the last frame, before it starts again fro
 // first day (at most this often), and when a video will not play.
 const REREAD_MS = 10 * 60 * 1000;
 const REREAD_ON_ERROR_MS = 30 * 1000;
+const DEFAULT_RATE = 2;
 // Safari has kept one picture on screen while the video's clock ran on. Playing
 // this long with nothing new shown, the video is moved to where it is, which
 // makes it draw again - not more often than this, nor more than twice a chunk.
@@ -340,12 +340,12 @@ function dayNote(d) {
   return s;
 }
 
-/** The continuous timelapse's title: "Oct 14, 2026 to Nov 10, 2026" - or the one day. */
+/** The continuous timelapse's title: "Oct 14, 2026 to Nov 10, 2026 Timelapse" - or the one day's. */
 function spanTitle(tl) {
   const first = tl.chunks[0].days[0].date;
   const lastChunk = tl.chunks[tl.chunks.length - 1];
   const last = lastChunk.days[lastChunk.days.length - 1].date;
-  return first === last ? mediumDay(first) : `${mediumDay(first)} to ${mediumDay(last)}`;
+  return `${first === last ? mediumDay(first) : `${mediumDay(first)} to ${mediumDay(last)}`} Timelapse`;
 }
 
 /** Over the days below: "Last 2 days". */
@@ -379,7 +379,8 @@ function say(id, text, problem) {
 //    other behind it with the next, so one day runs into the next across
 //    chunks. ──
 
-const P = { tl: null, vis: null, hid: null, playing: false, dragging: false, wasPlaying: false, rate: 1, raf: 0, loop: 0, pending: null,
+// It plays at twice the speed to start with (DEFAULT_RATE; the 2x button is marked in the page).
+const P = { tl: null, vis: null, hid: null, playing: false, dragging: false, wasPlaying: false, rate: DEFAULT_RATE, raf: 0, loop: 0, pending: null,
   drawPending: false, playId: 0 };
 // The list as read: when, and a reading under way (one at a time).
 const L = { readAt: 0, reading: null };
@@ -597,6 +598,9 @@ function pause() {
   clearTimeout(P.loop);
   setPlaying(false);
   try { P.vis.pause(); } catch (e) { /* not playing */ }
+  // The words and the bar at the frame it stopped on: the last ones drawn while it
+  // played can be a frame or more behind (at 8x, or a page the browser draws less often).
+  mark(currentFrame());
 }
 
 /** Today's last frame: a moment on it, then the first day again. */

@@ -19,6 +19,14 @@
 // device's setting. A separate script on purpose: the daily email reuses the
 // main script below and must not run this.
 (function () {
+  // roworno.com/8bit (it comes here as /?8bit): the 8-bit look, for as long
+  // as the address says so - never remembered, so the next visit is as before.
+  try {
+    if (/(^|&)8bit(=|&|$)/.test(String(location.search).replace(/^\?/, ''))) {
+      document.documentElement.setAttribute('data-theme', '8bit');
+      return;
+    }
+  } catch (e) { /* no address to read */ }
   var t = null;
   try { t = localStorage.getItem('nhrc-theme'); } catch (e) { /* storage blocked */ }
   if (t !== 'light' && t !== 'dark') {
@@ -89,6 +97,37 @@
   --chart-tip-title:#1a5c96;--chart-tip-body:#0d1f3c;
   --flood-8:#a87400;--flood-9:#c05a00;--flood-10:#b8430b;--flood-11:#c42b2b;--flood-12:#8b1010;
   color-scheme:light;
+}
+/* 8-BIT (roworno.com/8bit): the club's navy and gold in a few flat colours, as
+   an old games console draws them, with the pixel font and square outlined
+   boxes (the 8-BIT styles at the end). Statuses differ in more than colour
+   there too: plain, shaded with a dashed edge, or solid with light letters.
+   --px-*: the 8-bit layer's own colours - the column, the boxes' lines and
+   hard shadows, the chequer either side of the column on a wide screen. */
+:root[data-theme="8bit"]{
+  --px-screen:#0d1f3c;--px-line:#f0b429;--px-shadow:#030810;--px-margin-a:#081428;--px-margin-b:#0d1f3c;
+  --px-shade:#1e3d6e;--px-tile-line:#5a7fb5;--px-bad-bg:#c42b2b;--px-bad-ink:#ffffff;--px-logo-bg:#ffffff;
+  --navy:#0d1f3c;--navy2:#0d1f3c;--navy3:#0d1f3c;
+  --gold:#f0b429;--gold2:#ffd166;
+  --white:#fcfcfc;--muted:#a9bdd8;
+  --border:#f0b429;
+  --danger:#ff8a80;--warn:#f0a450;
+  --ok:#5cc98a;--caution:#ffd166;--bad:#ff8a80;--warn-text:#f0a450;
+  --ok-dot:#5cc98a;--caution-dot:#ffd166;--bad-dot:#ff6b5a;--warn-dot:#f0a450;
+  --ink:255,255,255;
+  --rb-border:#f0b429;--input-border:#f0b429;--code-bg:rgba(255,255,255,.08);
+  --glow-blue:transparent;--glow-green:transparent;
+  --focus:#ffd166;
+  --chart-line:#f0b429;--chart-fill:240,180,41;--chart-tick:#c9d6e8;--chart-grid:rgba(255,255,255,0.08);
+  --chart-observed-fill:rgba(240,180,41,0.14);--chart-forecast:#5ba4e0;--chart-forecast-fill:rgba(91,164,224,0.06);
+  --chart-point-border:#0d1f3c;--chart-tip-bg:#030810;--chart-tip-border:#f0b429;
+  --chart-tip-title:#ffd166;--chart-tip-body:#fcfcfc;
+  --flood-8:#ffd166;--flood-9:#f0a450;--flood-10:#f0782a;--flood-11:#ff8080;--flood-12:#ff4d4d;
+  color-scheme:dark;
+  /* Headings and numbers in the pixel font; the rest in a typewriter font, easier to read small. */
+  --fserif:'Roworno Pixel',ui-monospace,Menlo,Consolas,'Courier New',monospace;
+  --fsans:ui-monospace,Menlo,Consolas,'Courier New',monospace;
+  --fpixel:'Roworno Pixel',ui-monospace,Menlo,Consolas,'Courier New',monospace;
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--navy);color:var(--white);font-family:var(--fsans);min-height:100vh;font-size:16px;}
@@ -391,6 +430,98 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 /* TOAST */
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:var(--navy2);border:1px solid var(--border);border-radius:10px;padding:10px 18px;font-family:var(--fsans);font-size:.8rem;color:var(--white);transition:transform .3s ease;z-index:100;white-space:nowrap;}
 #toast.show{transform:translateX(-50%) translateY(0);}
+
+/* ── 8-BIT (roworno.com/8bit) ──
+   Square, outlined boxes with a hard shadow; headings, labels and numbers in
+   the pixel font. Only with data-theme="8bit"; browsers fetch the font only
+   then (fonts/README.md). Statuses: plain = no restriction; shaded with a
+   dashed edge = caution or a warning; solid with light letters = restricted or
+   danger. Fog stays a warning: it never changes which boats are allowed. The
+   camera's photo keeps its colours: members judge fog by it. */
+@font-face{font-family:'Roworno Pixel';src:url('fonts/roworno-pixel.woff') format('woff');font-display:swap;}
+.exit-8bit{display:none;}
+:root[data-theme="8bit"] *,:root[data-theme="8bit"] *::before,:root[data-theme="8bit"] *::after{border-radius:0 !important;}
+:root[data-theme="8bit"] body{background-color:var(--px-margin-a);
+  background-image:conic-gradient(var(--px-margin-b) 25%,var(--px-margin-a) 0 50%,var(--px-margin-b) 0 75%,var(--px-margin-a) 0);background-size:4px 4px;}
+:root[data-theme="8bit"] body::before,:root[data-theme="8bit"] .summary-water::after{display:none;}
+:root[data-theme="8bit"] #app{background:var(--px-screen);}
+@media(min-width:908px){:root[data-theme="8bit"] #app{border-left:4px solid var(--px-line);border-right:4px solid var(--px-line);}}
+:root[data-theme="8bit"] a{color:var(--gold);}
+/* Header: the way back in place of the light/dark switch. */
+:root[data-theme="8bit"] .header{border-bottom:4px solid var(--px-line);}
+@media(min-width:600px){:root[data-theme="8bit"] .header{padding-right:136px;}}
+:root[data-theme="8bit"] .header-logo-wrap{background:var(--px-logo-bg);border:4px solid var(--px-line);outline:none;}
+:root[data-theme="8bit"] .header-logo-wrap img{image-rendering:pixelated;}
+:root[data-theme="8bit"] .header-text h1{font-family:var(--fpixel);font-size:16px;line-height:1.5;font-weight:400;}
+:root[data-theme="8bit"] .theme-toggle{display:none;}
+:root[data-theme="8bit"] .exit-8bit{display:inline-flex;align-items:center;position:absolute;top:0;right:0;min-height:44px;padding:0 12px;
+  font-family:var(--fpixel);font-size:8px;line-height:1.5;color:var(--white);background:var(--px-screen);border:2px solid var(--px-line);
+  box-shadow:4px 4px 0 var(--px-shadow);text-decoration:none;}
+:root[data-theme="8bit"] .exit-8bit:hover{background:var(--px-line);color:var(--px-screen);}
+:root[data-theme="8bit"] .exit-8bit:focus-visible{outline:3px solid var(--focus);outline-offset:6px;}
+/* Boxes. */
+:root[data-theme="8bit"] .summary-tile,:root[data-theme="8bit"] .rowing-status-card,:root[data-theme="8bit"] .river-card,:root[data-theme="8bit"] .mini-card,:root[data-theme="8bit"] .chart-card,:root[data-theme="8bit"] .weather-card,
+:root[data-theme="8bit"] #error-view{border:4px solid var(--px-line);box-shadow:4px 4px 0 var(--px-shadow);}
+:root[data-theme="8bit"] .tier-card,:root[data-theme="8bit"] .flood-cell,:root[data-theme="8bit"] .wstat,:root[data-theme="8bit"] .w24,:root[data-theme="8bit"] .data-info-bar{border:2px solid var(--px-tile-line);}
+:root[data-theme="8bit"] .boat-row{border-bottom:2px dotted var(--px-tile-line);}
+:root[data-theme="8bit"] #camera-img{border:4px solid var(--px-line);}
+:root[data-theme="8bit"] .map-wrap{border:4px solid var(--px-line);}
+/* Lettering: headings, labels and numbers in the pixel font, on its 8-pixel grid. */
+:root[data-theme="8bit"] .section-label,:root[data-theme="8bit"] .tier-card h4,:root[data-theme="8bit"] .temp-stat label,:root[data-theme="8bit"] .mini-card label,:root[data-theme="8bit"] .wstat .wk,:root[data-theme="8bit"] .w24-head .wk,
+:root[data-theme="8bit"] .fc-name,:root[data-theme="8bit"] .camera-badge,:root[data-theme="8bit"] #toast,:root[data-theme="8bit"] .pill,:root[data-theme="8bit"] .boat-status,:root[data-theme="8bit"] .river-status-pill,:root[data-theme="8bit"] .fog-pill,
+:root[data-theme="8bit"] .rb,:root[data-theme="8bit"] .header-motto{font-family:var(--fpixel);font-size:8px;line-height:1.6;letter-spacing:0;font-weight:400;}
+:root[data-theme="8bit"] .header-motto span{font-size:8px !important;}
+:root[data-theme="8bit"] .dash-top h2,:root[data-theme="8bit"] .chart-card-header h3,:root[data-theme="8bit"] #error-view h2{font-family:var(--fpixel);font-size:8px;line-height:1.6;font-weight:400;}
+:root[data-theme="8bit"] .temp-value,:root[data-theme="8bit"] .temp-value .unit{font-size:32px;font-weight:400;letter-spacing:0;}
+@media(min-width:600px){:root[data-theme="8bit"] .temp-value,:root[data-theme="8bit"] .temp-value .unit{font-size:48px;}}
+:root[data-theme="8bit"] .summary-big{font-size:16px;line-height:1.5;font-weight:400;}
+:root[data-theme="8bit"] .river-level-val,:root[data-theme="8bit"] .air-temp-val{font-size:24px;font-weight:400;}
+:root[data-theme="8bit"] .temp-celsius,:root[data-theme="8bit"] .temp-stat span,:root[data-theme="8bit"] .mini-card span,:root[data-theme="8bit"] .wstat .wv,:root[data-theme="8bit"] #status-text,:root[data-theme="8bit"] #data-age{font-size:16px !important;font-weight:400;}
+/* Statuses. Plain: */
+:root[data-theme="8bit"] .pill-ok,:root[data-theme="8bit"] .bs-go,:root[data-theme="8bit"] .rp-normal,:root[data-theme="8bit"] .rule-banner.green{background:transparent;color:var(--ok);border:2px solid var(--ok);}
+/* Caution (yellow) and warnings (orange): shaded, with a dashed edge. */
+:root[data-theme="8bit"] .bs-caution,:root[data-theme="8bit"] .rp-caution,:root[data-theme="8bit"] .rule-banner.yellow{background:var(--px-shade);color:var(--caution);border:2px dashed var(--caution);}
+:root[data-theme="8bit"] .pill-warn,:root[data-theme="8bit"] .fog-pill.likely,:root[data-theme="8bit"] .warn-banner.level-warn,:root[data-theme="8bit"] .weather-alert.warn,
+:root[data-theme="8bit"] .summary-alert.warn{background:var(--px-shade);color:var(--warn-text);border:2px dashed var(--warn-text);}
+:root[data-theme="8bit"] .fog-pill.possible{background:transparent;color:var(--caution);border:2px dashed var(--caution);}
+/* Restricted, danger: solid, light letters. */
+:root[data-theme="8bit"] .bs-no,:root[data-theme="8bit"] .rp-danger,:root[data-theme="8bit"] .rule-banner.red,:root[data-theme="8bit"] .warn-banner.level-danger,:root[data-theme="8bit"] .weather-alert.danger,
+:root[data-theme="8bit"] .summary-alert.danger{background:var(--px-bad-bg);color:var(--px-bad-ink);border:2px solid var(--px-bad-bg);}
+:root[data-theme="8bit"] .rule-banner.neutral,:root[data-theme="8bit"] .fog-pill.low,:root[data-theme="8bit"] .fog-pill.unknown{background:transparent;color:var(--muted);border:2px dotted var(--muted);}
+:root[data-theme="8bit"] .summary-alert{display:inline-block;padding:2px 6px;}
+:root[data-theme="8bit"] .warn-banner > span:first-child{background:var(--warn-text) !important;}
+:root[data-theme="8bit"] .warn-banner.level-danger > span:first-child{background:var(--px-bad-ink) !important;}
+/* The flood grid's squares: empty = allowed, chequered = caution, full = no. */
+:root[data-theme="8bit"] .flood-cell .fc-dot{width:16px;height:16px;}
+:root[data-theme="8bit"] .fc-go{background:transparent;border:2px solid var(--ok-dot);}
+:root[data-theme="8bit"] .fc-caution{background:repeating-conic-gradient(var(--caution-dot) 0 25%,transparent 0 50%) 0 0/4px 4px;border:2px solid var(--caution-dot);}
+:root[data-theme="8bit"] .fc-no{background:var(--bad-dot);border:2px solid var(--bad-dot);}
+/* The typewriter letters are wider: on a phone, the six boats in two rows of three. */
+@media(max-width:420px){:root[data-theme="8bit"] .flood-grid{grid-template-columns:repeat(3,1fr);}}
+/* Buttons and the email box. */
+:root[data-theme="8bit"] .rb{padding:8px 10px;color:var(--white);background:var(--px-screen);border:2px solid var(--px-line);box-shadow:2px 2px 0 var(--px-shadow);}
+:root[data-theme="8bit"] .rb:hover,:root[data-theme="8bit"] .rb.active{background:var(--px-line);color:var(--px-screen);border-color:var(--px-line);}
+:root[data-theme="8bit"] .rb-csv{background:var(--px-screen) !important;color:var(--white) !important;border-color:var(--px-line) !important;}
+:root[data-theme="8bit"] .rb-csv:hover{background:var(--px-line) !important;color:var(--px-screen) !important;}
+:root[data-theme="8bit"] #bd-email{border:2px solid var(--px-line) !important;}
+:root[data-theme="8bit"] .embeddable-buttondown-form input[type=submit]{background:var(--px-line) !important;color:var(--px-screen) !important;
+  font-family:var(--fpixel) !important;font-size:8px !important;font-weight:400 !important;box-shadow:2px 2px 0 var(--px-shadow);}
+:root[data-theme="8bit"] .slider-row input[type=range]{accent-color:var(--px-line);}
+/* The map: its photos in the page's few colours; the lanes, the hazards and the wind keep theirs. */
+:root[data-theme="8bit"] .leaflet-tile{filter:url(#px-tones);}
+:root[data-theme="8bit"] .wind-badge{background:var(--px-screen);color:var(--white);border:2px solid var(--px-line);box-shadow:2px 2px 0 var(--px-shadow);font-family:var(--fsans);font-size:.72rem;}
+:root[data-theme="8bit"] .wind-badge span{color:var(--muted);}
+:root[data-theme="8bit"] .map-popup .popup-wind{color:var(--gold);}
+:root[data-theme="8bit"] .wind-badge .arrow-ring{stroke:var(--muted);}
+:root[data-theme="8bit"] .wind-badge .arrow-head{fill:var(--gold);}
+:root[data-theme="8bit"] .wind-badge .arrow-shaft{stroke:var(--gold);}
+:root[data-theme="8bit"] .leaflet-popup-content-wrapper,:root[data-theme="8bit"] .leaflet-popup-tip{background:var(--px-screen);color:var(--white);border:2px solid var(--px-line);box-shadow:none;}
+:root[data-theme="8bit"] .leaflet-bar a{background:var(--px-screen);color:var(--white);border-color:var(--px-line);}
+:root[data-theme="8bit"] .leaflet-control-attribution{background:var(--px-screen) !important;color:var(--muted);}
+/* The camera's backup label, the wind line, the toast. */
+:root[data-theme="8bit"] .camera-badge{background:var(--px-screen);color:var(--gold);border:2px solid var(--gold);}
+:root[data-theme="8bit"] .w24-plot svg path{shape-rendering:crispEdges;}
+:root[data-theme="8bit"] #toast{background:var(--px-line);color:var(--px-screen);border:2px solid var(--px-line);}
 </style>
 </head>
 <body>
@@ -405,11 +536,11 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       <div style="font-size:0.75rem;color:var(--muted);margin-top:4px;letter-spacing:.04em;text-transform:uppercase;">Lake Housatonic Rowing Conditions &amp; Safety</div>
       <div style="font-size:0.7rem;color:var(--muted);margin-top:3px;font-style:italic;">407 Roosevelt Drive, Oxford, CT 06478</div>
       <div style="display:flex;align-items:center;gap:10px;margin-top:3px;flex-wrap:wrap;">
-        <a href="https://www.newhavenrowingclub.org" target="_blank" style="font-size:0.7rem;color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:4px;">
+        <a href="https://www.newhavenrowingclub.org" target="_blank" rel="noopener" style="font-size:0.7rem;color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:4px;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
           newhavenrowingclub.org
         </a>
-        <a href="https://www.instagram.com/newhavenrc" target="_blank" style="font-size:0.7rem;color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:4px;">
+        <a href="https://www.instagram.com/newhavenrc" target="_blank" rel="noopener" style="font-size:0.7rem;color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:4px;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
           @newhavenrc
         </a>
@@ -424,7 +555,25 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M4.93 4.93l1.77 1.77M17.3 17.3l1.77 1.77M2 12h2.5M19.5 12H22M4.93 19.07l1.77-1.77M17.3 6.7l1.77-1.77"/></svg>
       <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
     </button>
+    <!-- On roworno.com/8bit only (the 8-BIT styles show it): back to the usual page. -->
+    <a class="exit-8bit" href="./">Normal view</a>
   </div>
+  <!-- The map's photos on roworno.com/8bit: their brightness in four steps of
+       the club's navy, from the darkest to a pale blue, so the lanes, the
+       hazards and the wind stand out. Unused otherwise. -->
+  <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute;width:0;height:0;overflow:hidden;">
+    <filter id="px-tones" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0 0 0 1 0"/>
+      <feComponentTransfer>
+        <feFuncR type="gamma" exponent="0.7"/><feFuncG type="gamma" exponent="0.7"/><feFuncB type="gamma" exponent="0.7"/>
+      </feComponentTransfer>
+      <feComponentTransfer>
+        <feFuncR type="discrete" tableValues="0.0314 0.0510 0.1176 0.4353"/>
+        <feFuncG type="discrete" tableValues="0.0784 0.1216 0.2392 0.5255"/>
+        <feFuncB type="discrete" tableValues="0.1569 0.2353 0.4314 0.6588"/>
+      </feComponentTransfer>
+    </filter>
+  </svg>
 
   <div id="loading">
     <div class="spinner"></div>
@@ -699,7 +848,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
       </form>
       <div class="note-text">
         One email each morning, March 15 – November 15. Unsubscribe anytime from any email.
-        Prefer a hosted page? <a href="https://buttondown.com/gurpinar" target="_blank" style="color:var(--muted);text-decoration:underline;">Sign up on Buttondown</a>.
+        Prefer a hosted page? <a href="https://buttondown.com/gurpinar" target="_blank" rel="noopener" style="color:var(--muted);text-decoration:underline;">Sign up on Buttondown</a>.
       </div>
     </div>
 
@@ -727,7 +876,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 
   <div style="margin-top:40px;padding-top:20px;border-top:1px solid rgba(255,209,102,0.15);">
     <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:16px;">
-      <a href="https://github.com/egurpinar/NHRC_temp_monitoring" target="_blank" style="display:inline-flex;align-items:center;gap:8px;text-decoration:none;color:var(--muted);font-size:0.72rem;">
+      <a href="https://github.com/egurpinar/NHRC_temp_monitoring" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:8px;text-decoration:none;color:var(--muted);font-size:0.72rem;">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
         This website is open source — github.com/egurpinar/NHRC_temp_monitoring
       </a>
@@ -1054,6 +1203,18 @@ const CHART_LIBS = [
   'https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js',
 ];
+// Each library's fingerprint (Subresource Integrity): a file the CDN serves
+// that is not exactly this one is refused, never run. Chart.js and its adapter
+// match cdnjs's published values; moment.js's was taken from cdnjs's own file
+// (Nov 2026). A new version needs its new fingerprint here.
+const CHART_LIBS_SRI = {
+  'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js':
+    'sha512-CQBWl4fJHWbryGE+Pc7UAxWMUMNMWzWxF4SQo9CgkJIN1kx6djDQZjh3Y8SZ1d+6I+1zze6Z7kHXO7q3UyZAWw==',
+  'https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.29.4/moment.min.js':
+    'sha512-+H4iLjY3JsKiF2V6N366in5IQHj2uEsGV7Pp/GRcm0fn76aPAk5V8xB6n8fQhhSonTqTXs/klFz4D0GIn6Br9g==',
+  'https://cdnjs.cloudflare.com/ajax/libs/chartjs-adapter-moment/1.0.1/chartjs-adapter-moment.min.js':
+    'sha512-hVy4KxCKgnXi2ok7rlnlPma4JHXI1VPQeempoaclV1GwRHrDeaiuS1pI6DVldaj5oh6Opy2XJ2CTljQLPkaMrQ==',
+};
 const CHART_LIBS_TIMEOUT_MS = 30000;
 const CHART_LIBS_RETRY_MS = 5 * 60000;
 const CHART_NEAR_MARGIN = '800px 0px';
@@ -1078,6 +1239,8 @@ function loadChartLibs() {
     try {
       for (const src of CHART_LIBS) {
         const s = document.createElement('script');
+        s.integrity = CHART_LIBS_SRI[src];
+        s.crossOrigin = 'anonymous';
         s.src = src;
         s.async = false;          // run in this order: the adapter needs the other two
         s.onload = () => { left -= 1; if (left === 0) done(chartLibsLoaded()); };
@@ -1142,8 +1305,21 @@ const THEME_KEY = 'nhrc-theme';
 
 function currentTheme() {
   const root = document.documentElement;
-  return root && root.getAttribute && root.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+  const t = root && root.getAttribute ? root.getAttribute('data-theme') : null;
+  // '8bit': roworno.com/8bit, set from the address only (the script in <head>).
+  return t === 'light' || t === '8bit' ? t : 'dark';
 }
+
+/** On roworno.com/8bit. */
+function eightBit() { return currentTheme() === '8bit'; }
+
+/** The charts' lettering: the page's own font (a typewriter one on the 8-bit page). */
+function chartFont(size) {
+  return { family: cssVar('--fsans', "'Helvetica Neue',Helvetica,Arial,sans-serif"), size };
+}
+
+/** How rounded the charts' lines are: straight on the 8-bit page. */
+function chartTension(t) { return eightBit() ? 0 : t; }
 
 /** A CSS custom property of the current theme; the fallback is the dark theme's. */
 function cssVar(name, fallback) {
@@ -1224,6 +1400,7 @@ function initThemeToggle() {
   try {
     const mq = window.matchMedia('(prefers-color-scheme: light)');
     const follow = (e) => {
+      if (eightBit()) return;       // the 8-bit page stays 8-bit
       let chosen = null;
       try { chosen = localStorage.getItem(THEME_KEY); } catch (err) { /* storage blocked */ }
       if (chosen !== 'light' && chosen !== 'dark') applyTheme(e.matches ? 'light' : 'dark', false);
@@ -1870,6 +2047,19 @@ function getSubset() {
 
 /** The fill under the temperature line: the theme's colour fading to nothing. */
 function tempChartFill(ctx, c) {
+  // The 8-bit page: a chequered fill, as old games consoles shaded.
+  if (eightBit()) {
+    try {
+      const tile = document.createElement('canvas');
+      tile.width = tile.height = 4;
+      const t = tile.getContext('2d');
+      t.fillStyle = `rgba(${c.fill},0.35)`;
+      t.fillRect(0, 0, 2, 2);
+      t.fillRect(2, 2, 2, 2);
+      const pattern = ctx.createPattern(tile, 'repeat');
+      if (pattern) return pattern;
+    } catch (e) { /* the usual fill below */ }
+  }
   const grad = ctx.createLinearGradient(0,0,0,230);
   grad.addColorStop(0,`rgba(${c.fill},0.2)`);
   grad.addColorStop(1,`rgba(${c.fill},0.0)`);
@@ -1884,7 +2074,7 @@ function initChart() {
     type:'line',
     data:{ datasets:[{
       data:[], borderColor:c.line, backgroundColor:grad,
-      borderWidth:1.5, fill:true, tension:0.3,
+      borderWidth:1.5, fill:true, tension:chartTension(0.3), pointStyle: eightBit() ? 'rect' : 'circle',
       // Explicit, though it is also the Chart.js default: a null reading must
       // leave a blank, never a line bridging data we do not have.
       spanGaps:false,
@@ -1898,9 +2088,9 @@ function initChart() {
       responsive:true, maintainAspectRatio:false, animation:false,
       scales:{
         x:{ type:'time', time:{displayFormats:{hour:'ha',day:'MMM D',week:'MMM D',month:'MMM YY'}},
-            ticks:{color:c.tick,maxTicksLimit:7,font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
+            ticks:{color:c.tick,maxTicksLimit:7,font:chartFont(11)},
             grid:{color:c.grid}},
-        y:{ ticks:{color:c.tick,callback:v=>Number.isInteger(v)?v+'°F':v.toFixed(1)+'°F',font:{family:"'Helvetica Neue',Helvetica,Arial,sans-serif",size:11}},
+        y:{ ticks:{color:c.tick,callback:v=>Number.isInteger(v)?v+'°F':v.toFixed(1)+'°F',font:chartFont(11)},
             grid:{color:c.grid}}
       },
       plugins:{
@@ -2542,7 +2732,7 @@ function renderRowingStatus(tempF) {
          River level: <strong style="color:var(--white);">${state.riverLevel.toFixed(1)} ft</strong>${state.riverLevelIsEstimate
            ? ' (forecast estimate)' : state.riverObservedStale ? ' (last gauge reading, not current)' : ''}
          &nbsp;·&nbsp; Flood restrictions applied above where more restrictive than temperature rules.
-         &nbsp;·&nbsp; <a href="https://water.noaa.gov/gauges/stvc3" target="_blank"
+         &nbsp;·&nbsp; <a href="https://water.noaa.gov/gauges/stvc3" target="_blank" rel="noopener"
             style="color:var(--muted);text-decoration:underline;">NOAA gauge STVC3</a>
        </div>`
     : '';
@@ -3949,7 +4139,7 @@ function renderRiverCard() {
   const staleBanner = state.riverObservedStale ? `<div class="warn-banner level-danger" style="margin-bottom:14px;">
       <span style="width:10px;height:10px;border-radius:50%;background:var(--bad-dot);flex-shrink:0;margin-top:3px;display:inline-block;"></span>
       <div><strong>River gauge data is stale</strong> ${riverStaleNote(state.riverObservedAgeMs,
-        obs.length ? obs[obs.length - 1].ts : null, state.riverLevelIsEstimate)} Verify at <a href="https://water.noaa.gov/gauges/stvc3" target="_blank" style="color:var(--bad);text-decoration:underline;">water.noaa.gov/gauges/stvc3</a> before relying on it.</div>
+        obs.length ? obs[obs.length - 1].ts : null, state.riverLevelIsEstimate)} Verify at <a href="https://water.noaa.gov/gauges/stvc3" target="_blank" rel="noopener" style="color:var(--bad);text-decoration:underline;">water.noaa.gov/gauges/stvc3</a> before relying on it.</div>
     </div>` : '';
 
   el.innerHTML = `
@@ -3967,7 +4157,7 @@ function renderRiverCard() {
     </div>
     <div class="flood-grid" id="flood-grid"></div>
     <div style="text-align:right;margin-top:10px;">
-      <a href="https://water.noaa.gov/gauges/stvc3" target="_blank"
+      <a href="https://water.noaa.gov/gauges/stvc3" target="_blank" rel="noopener"
          style="font-size:.7rem;color:var(--muted);text-decoration:none;display:inline-flex;align-items:center;gap:4px;">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
         Full forecast — NOAA water.noaa.gov
@@ -4064,8 +4254,9 @@ function drawRiverChart(obs, fc, currentLevel) {
       { x: xMax, y: t.ft },
     ],
     borderColor: t.color,
-    borderWidth: 1.5,
-    borderDash: [4, 3],
+    // On the 8-bit page the lines differ in their dashes too: dotted at 8 and 9 ft, dashed at 10 and 11, solid at 12.
+    borderWidth: eightBit() && t.ft >= 12 ? 2 : 1.5,
+    borderDash: !eightBit() ? [4, 3] : t.ft <= 9 ? [2, 4] : t.ft <= 11 ? [6, 4] : [],
     pointRadius: 0,
     fill: false,
     tension: 0,
@@ -4084,7 +4275,7 @@ function drawRiverChart(obs, fc, currentLevel) {
           borderWidth: 2,
           pointRadius: 0,
           fill: true,
-          tension: 0.3,
+          tension: chartTension(0.3),
           order: 1,
         },
         {
@@ -4102,8 +4293,9 @@ function drawRiverChart(obs, fc, currentLevel) {
           pointBackgroundColor: c.forecast,
           pointBorderColor: c.pointBorder,
           pointBorderWidth: 1,
+          pointStyle: eightBit() ? 'rect' : 'circle',
           fill: true,
-          tension: 0.3,
+          tension: chartTension(0.3),
           order: 2,
         },
         ...thresholdDatasets,
@@ -4128,12 +4320,12 @@ function drawRiverChart(obs, fc, currentLevel) {
           min: xMin,
           max: xMax,
           ticks: { color: c.tick, maxTicksLimit: 6,
-                   font: { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 12 } },
+                   font: chartFont(12) },
           grid: { color: c.grid },
         },
         y: {
           ticks: { color: c.tick, callback: v => v.toFixed(1) + ' ft',
-                   font: { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 12 } },
+                   font: chartFont(12) },
           grid: { color: c.grid },
           title: { display: false },
         }
@@ -4143,7 +4335,7 @@ function drawRiverChart(obs, fc, currentLevel) {
           display: true,
           labels: {
             color: c.tick,
-            font: { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 12 },
+            font: chartFont(12),
             filter: item => !item.text.includes('ft'), // hide threshold line legend entries
             usePointStyle: true,
             boxWidth: 20,
@@ -4155,8 +4347,8 @@ function drawRiverChart(obs, fc, currentLevel) {
           borderWidth: 1,
           titleColor: c.tipTitle,
           bodyColor: c.tipBody,
-          titleFont: { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 13 },
-          bodyFont:  { family:"'Helvetica Neue',Helvetica,Arial,sans-serif", size: 13 },
+          titleFont: chartFont(13),
+          bodyFont:  chartFont(13),
           callbacks: {
             title: items => {
               const ts = items[0].parsed.x;
