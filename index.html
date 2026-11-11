@@ -28,10 +28,11 @@
     return [Math.floor(n / 31), n % 31 + 1];
   }
   /**
-   * The 8-bit page's season on the club's calendar (the date in New York):
-   * Halloween Oct 15-31, Christmas Dec 1-25, the New Year Dec 26 - Jan 1,
-   * Easter the ten days up to Easter Monday, the Fourth of July Jun 28 - Jul 5;
-   * '' the rest of the year.
+   * The season on the club's calendar (the date in New York): Halloween Oct
+   * 15-31, Thanksgiving Nov 15 to the Sunday after Thanksgiving (the fourth
+   * Thursday), Christmas Dec 1-25, the New Year Dec 26 - Jan 1, Easter the ten
+   * days up to Easter Monday, the Fourth of July Jun 28 - Jul 5; '' the rest
+   * of the year.
    */
   function seasonOn(now) {
     var y, mo, d;
@@ -49,6 +50,8 @@
     if (md >= 1201 && md <= 1225) return 'christmas';
     if (md >= 1226 || md === 101) return 'newyear';
     if (md >= 628 && md <= 705) return 'july4';
+    // The fourth Thursday of November, and its weekend - Christmas has Dec 1.
+    if (mo === 11 && d >= 15 && d <= 22 + (11 - new Date(Date.UTC(y, 10, 1)).getUTCDay()) % 7 + 3) return 'thanksgiving';
     var es = easter(y), day = Date.UTC(y, mo - 1, d), sunday = Date.UTC(y, es[0] - 1, es[1]);
     if (day >= sunday - 8 * 864e5 && day <= sunday + 864e5) return 'easter';
     return '';
@@ -63,7 +66,7 @@
     try {
       var m = /(^|&)season=([a-z0-9]*)(&|$)/.exec(q);
       var s = m ? m[2] : seasonOn(new Date());
-      if (/^(halloween|christmas|newyear|easter|july4)$/.test(s)) {
+      if (/^(halloween|thanksgiving|christmas|newyear|easter|july4)$/.test(s)) {
         var art = document.createElement('script');
         art.src = '8bit/seasons.js';
         art.async = true;
@@ -186,8 +189,8 @@
   --fsans:ui-monospace,Menlo,Consolas,'Courier New',monospace;
   --fpixel:'Roworno Pixel',ui-monospace,Menlo,Consolas,'Courier New',monospace;
 }
-/* 8-BIT SEASONS: the 8-bit page's colours at Halloween, Christmas and the New
-   Year, Easter and the Fourth of July (the <head> script sets data-season;
+/* 8-BIT SEASONS: the 8-bit page's colours at Halloween, Thanksgiving,
+   Christmas and the New Year, Easter and the Fourth of July (the <head> script sets data-season;
    8bit/seasons.js draws the pixel art). Statuses keep their colours' meaning
    and shapes: green no restriction, yellow caution, orange a warning, solid red
    restricted. Red is never a frame or a heading. Each pair checked for contrast
@@ -252,8 +255,18 @@
   --px-line:#f2f4f8;--px-tile-line:#86a6d4;
   --border:#f2f4f8;--rb-border:#f2f4f8;--input-border:#f2f4f8;--chart-tip-border:#f2f4f8;
 }
-/* SEASONS: the main page's colours at Halloween, Christmas and the New Year,
-   Easter and the Fourth of July (the <head> script sets data-season; the
+:root[data-theme="8bit"][data-season="thanksgiving"]{
+  --px-screen:#22160e;--px-line:#e8a33c;--px-shadow:#0a0603;--px-margin-a:#1a110a;--px-margin-b:#2c1d10;--px-shade:#3a2616;
+  --px-tile-line:#a8804f;--navy:#22160e;--navy2:#22160e;--navy3:#22160e;--gold:#f2b65a;--gold2:#ffd58a;--white:#fbf5ec;--muted:#d2bfa6;
+  --border:#e8a33c;--danger:#ff8a80;--warn:#f5a85a;--ok:#8be0a4;--caution:#ffe066;--bad:#ff9a90;--warn-text:#ffb35c;--ok-dot:#8be0a4;
+  --caution-dot:#ffe066;--bad-dot:#ff6b5a;--warn-dot:#ffb35c;--rb-border:#e8a33c;--input-border:#e8a33c;--focus:#ffe066;--chart-line:#f2b65a;
+  --chart-fill:242,182,90;--chart-tick:#e6d6c0;--chart-observed-fill:rgba(242,182,90,0.14);--chart-forecast:#9fd0ff;
+  --chart-forecast-fill:rgba(159,208,255,0.08);--chart-point-border:#22160e;--chart-tip-bg:#0a0603;--chart-tip-border:#e8a33c;
+  --chart-tip-title:#ffd58a;--chart-tip-body:#fbf5ec;--flood-8:#ffe066;--flood-9:#ffb35c;--flood-10:#ff8c42;--flood-11:#ff8a80;
+  --flood-12:#ff5c5c;
+}
+/* SEASONS: the main page's colours at Halloween, Thanksgiving, Christmas and
+   the New Year, Easter and the Fourth of July (the <head> script sets data-season; the
    pixel art is 8bit/seasons.js), dark and light alike, in its usual design.
    Statuses keep their colours; red is never a frame or a heading. Each pair
    checked as the year-round ones are (scripts/test_site_theme.js, section 8). */
@@ -317,6 +330,24 @@
 :root[data-theme="light"][data-season="july4"]{
   --gold:#1d3f7a;--gold2:#163261;--border:rgba(29,63,122,.25);--focus:#1d3f7a;--glow-blue:rgba(29,63,122,.08);
   --glow-green:rgba(214,51,58,.06);--chart-forecast:#1d3f7a;--chart-tip-title:#1d3f7a;--chart-tip-border:rgba(29,63,122,0.45);
+  color-scheme:light;
+}
+:root[data-theme="dark"][data-season="thanksgiving"]{
+  --navy:#1f150d;--navy2:#2a1d12;--navy3:#36261a;--gold:#f2b65a;--gold2:#ffd58a;--white:#fbf5ec;--muted:#d3c0a7;
+  --border:rgba(242,182,90,0.24);--danger:#ff6b6b;--warn:#f5a85a;--ok:#8be0a4;--caution:#ffe066;--bad:#ffaaaa;--warn-text:#f7ae62;
+  --ok-dot:#8be0a4;--caution-dot:#ffe066;--bad-dot:#ff7a7a;--warn-dot:#f7ae62;--rb-border:rgba(211,192,167,.3);
+  --glow-blue:rgba(232,140,60,.14);--glow-green:rgba(170,120,40,.10);--focus:#ffe066;--chart-line:#f2b65a;--chart-fill:242,182,90;
+  --chart-tick:#e6d6c0;--chart-observed-fill:rgba(242,182,90,0.10);--chart-forecast:#9fd0ff;--chart-forecast-fill:rgba(159,208,255,0.05);
+  --chart-point-border:#2a1d12;--chart-tip-bg:#2a1d12;--chart-tip-border:rgba(159,208,255,0.45);--chart-tip-title:#9fd0ff;
+  --chart-tip-body:#fbf5ec;--flood-8:#ffd166;--flood-9:#f7ae62;--flood-10:#f5873a;--flood-11:#ff8a8a;--flood-12:#ff5c5c;
+}
+:root[data-theme="light"][data-season="thanksgiving"]{
+  --navy:#fbf6ee;--navy2:#ffffff;--navy3:#f4eadb;--gold:#8a4512;--gold2:#6e370e;--white:#2a1c12;--muted:#5f4c3c;--border:rgba(138,69,18,.24);
+  --ink:42,28,18;--rb-border:rgba(95,76,60,.45);--input-border:#8c7a68;--code-bg:rgba(42,28,18,.07);--glow-blue:rgba(232,140,60,.08);
+  --glow-green:rgba(170,120,40,.07);--focus:#8a4512;--chart-line:#b8650f;--chart-fill:200,120,30;--chart-tick:#5f4c3c;
+  --chart-grid:rgba(42,28,18,0.08);--chart-observed-fill:rgba(200,120,30,0.14);--chart-forecast:#1a6fb5;
+  --chart-forecast-fill:rgba(26,111,181,0.06);--chart-point-border:#ffffff;--chart-tip-bg:#ffffff;--chart-tip-border:rgba(138,69,18,0.45);
+  --chart-tip-title:#8a4512;--chart-tip-body:#2a1c12;
   color-scheme:light;
 }
 *{box-sizing:border-box;margin:0;padding:0;}

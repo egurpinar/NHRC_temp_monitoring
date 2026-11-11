@@ -23,7 +23,8 @@
  *  8. The seasons, on the main page (dark and light) and the 8-bit one: each
  *     season's colours (contrast, the statuses' meaning, red never a frame or
  *     a heading), its dates on New York's calendar (every day of six years,
- *     the midnights, Easter by two methods and a third source), the season
+ *     the midnights, Easter by two methods and a third source, Thanksgiving by
+ *     counting Thursdays), the season
  *     named in the address, the pixel art (8bit/seasons.js) fetched only
  *     then, and drawn: where, more on a wide screen, hidden from screen
  *     readers, never in the way of a tap, still when motion is turned down,
@@ -603,7 +604,7 @@ test('roworno.com/8bit: a small page that sends the visitor to /?8bit - replace(
 
 section('8. The seasons, on the main page and the 8-bit one (8bit/seasons.js)');
 
-const SEASON_NAMES = ['halloween', 'christmas', 'newyear', 'easter', 'july4'];
+const SEASON_NAMES = ['halloween', 'christmas', 'newyear', 'easter', 'july4', 'thanksgiving'];
 const CSS_ALL = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
 /** A season's own colours in a theme (8bit, dark or light), as its rule sets them (the New Year shares Christmas's). */
 function seasonBlock(name, theme) {
@@ -718,14 +719,27 @@ test('Easter Sunday: the page\'s formula against dateutil\'s dates (2025-2060) a
   for (let y = 1900; y < 2300; y++) assert.deepStrictEqual([...easter(y)], gaussEaster(y), `${y}`);
 });
 
+/** Thanksgiving: the fourth Thursday of November, found by counting them. */
+function thanksgivingDay(y) {
+  let n = 0;
+  for (let d = 1; d <= 30; d++) if (new Date(Date.UTC(y, 10, d)).getUTCDay() === 4 && ++n === 4) return d;
+  throw new Error('no fourth Thursday');
+}
+
+test('Thanksgiving: the fourth Thursday of November, 2026-2031 as the calendar has it', () => {
+  assert.deepStrictEqual([2026, 2027, 2028, 2029, 2030, 2031].map(thanksgivingDay), [26, 25, 23, 22, 28, 27]);
+});
+
 test('seasons on the club\'s calendar: every day of 2026-2031 at noon in New York, as the dates say - on both pages', () => {
   const ymd = (ms) => new Date(ms).toISOString().slice(0, 10);
   const wrong = [];
   for (let ms = Date.UTC(2026, 0, 1); ms < Date.UTC(2032, 0, 1); ms += 864e5) {
     const [y, m, d] = ymd(ms).split('-').map(Number), md = m * 100 + d;
     const e = EASTER_REF[y - 2025], sunday = Date.UTC(y, +e.slice(0, 2) - 1, +e.slice(2));
+    // Thanksgiving: Nov 15 to the Sunday after it - but December is Christmas's.
+    const thanks = m === 11 && d >= 15 && d <= thanksgivingDay(y) + 3;
     const want = md >= 1015 && md <= 1031 ? 'halloween' : md >= 1201 && md <= 1225 ? 'christmas' : md >= 1226 || md === 101 ? 'newyear'
-      : md >= 628 && md <= 705 ? 'july4' : ms >= sunday - 8 * 864e5 && ms <= sunday + 864e5 ? 'easter' : undefined;
+      : md >= 628 && md <= 705 ? 'july4' : thanks ? 'thanksgiving' : ms >= sunday - 8 * 864e5 && ms <= sunday + 864e5 ? 'easter' : undefined;
     const noon = new Date(ms + 17 * 3600e3).toISOString();   // noon in New York is 16:00 or 17:00 UTC
     const got = [headAt(noon).season, headAt(noon, '').season];
     if (got[0] !== want || got[1] !== want) wrong.push(`${ymd(ms)}: ${got} (should be ${want})`);
@@ -734,6 +748,10 @@ test('seasons on the club\'s calendar: every day of 2026-2031 at noon in New Yor
   // The ten days up to Easter Monday, 2027 (Easter Sunday March 28): March 20 to 29.
   assert.deepStrictEqual(['2027-03-19', '2027-03-20', '2027-03-28', '2027-03-29', '2027-03-30'].map(d => headAt(`${d}T16:00:00Z`).season),
     [undefined, 'easter', 'easter', 'easter', undefined]);
+  // Thanksgiving 2026 (Thursday Nov 26): Nov 15 to Sunday Nov 29. 2030 (Thursday Nov 28): its Sunday is Dec 1, Christmas's first day.
+  assert.deepStrictEqual(['2026-11-14', '2026-11-15', '2026-11-26', '2026-11-29', '2026-11-30'].map(d => headAt(`${d}T17:00:00Z`, '').season),
+    [undefined, 'thanksgiving', 'thanksgiving', 'thanksgiving', undefined]);
+  assert.deepStrictEqual(['2030-11-30', '2030-12-01'].map(d => headAt(`${d}T17:00:00Z`, '').season), ['thanksgiving', 'christmas']);
 });
 
 test('seasons begin and end at midnight in New York, not in the visitor\'s or the server\'s time zone', () => {
@@ -745,6 +763,9 @@ test('seasons begin and end at midnight in New York, not in the visitor\'s or th
   assert.deepStrictEqual([at('2026-12-01T04:59:00Z'), at('2026-12-01T05:00:00Z')], [undefined, 'christmas']);
   assert.deepStrictEqual([at('2026-12-26T04:59:00Z'), at('2026-12-26T05:00:00Z')], ['christmas', 'newyear']);
   assert.deepStrictEqual([at('2027-01-02T04:59:00Z'), at('2027-01-02T05:00:00Z')], ['newyear', undefined]);
+  // Thanksgiving 2026, EST: Nov 15 to the end of Sunday Nov 29.
+  assert.deepStrictEqual([at('2026-11-15T04:59:00Z'), at('2026-11-15T05:00:00Z')], [undefined, 'thanksgiving']);
+  assert.deepStrictEqual([at('2026-11-30T04:59:00Z'), at('2026-11-30T05:00:00Z')], ['thanksgiving', undefined]);
   // July: EDT.
   assert.deepStrictEqual([at('2027-06-28T03:59:00Z'), at('2027-06-28T04:00:00Z')], [undefined, 'july4']);
   assert.deepStrictEqual([at('2027-07-06T03:59:00Z'), at('2027-07-06T04:00:00Z')], ['july4', undefined]);
@@ -758,6 +779,7 @@ test('every visitor gets the season, in their own light or dark - or on the 8-bi
   assert.deepStrictEqual(['theme', 'season'].map(k => headAt(halloween, '', { stored: 'light' })[k]), ['light', 'halloween']);
   assert.deepStrictEqual(['theme', 'season'].map(k => headAt(halloween, '?8bit')[k]), ['8bit', 'halloween']);
   assert.deepStrictEqual(['theme', 'season'].map(k => headAt(summer, '')[k]), ['dark', undefined], 'none out of season');
+  assert.deepStrictEqual(['theme', 'season'].map(k => headAt('2026-11-20T17:00:00Z', '', { light: true })[k]), ['light', 'thanksgiving']);
   // Named in the address, on either page.
   for (const s of SEASON_NAMES) {
     assert.strictEqual(headAt(summer, `?season=${s}`).season, s, s);
@@ -867,6 +889,7 @@ test('8bit/seasons.js: every picture well formed, every season\'s things there, 
       }
     }
     for (const it of plan.flyers || []) { thingOk(season, 'flyers', it); assert.ok(it.t >= 0 && it.t <= 90 && ['fly', 'flutter'].includes(it.move), `${season}: ${it.s} crosses the page`); }
+    assert.ok(plan.fall === undefined || ['snow', 'leaves'].includes(plan.fall), `${season}: ${plan.fall} falls`);
   }
   // The pictures as images: SVG, crisp, the colours as given.
   const uri = ART.svgUri('pumpkin');
@@ -924,10 +947,10 @@ test('on a page: a scene above the header and one after the disclaimer, things o
     assert.strictEqual(!!p.body.children.find(e => e.className === 'px-flyers'), !!ART.SCENES[season].flyers, `${season}: flyers`);
     for (const el of added.filter(e => e.tagName !== 'STYLE')) assert.strictEqual(el.getAttribute('aria-hidden'), 'true', `${season}: ${el.className}`);
     const css = p.head.children.find(e => e.id === 'px-season-css').textContent;
-    for (const c of ['px-scene', 'px-ground', 'px-margins', 'px-flyers', 'px-snow']) assert.ok(new RegExp(`\\.${c}\\{[^}]*pointer-events:none`).test(css), `${c} takes no taps`);
-    assert.ok(/\.px-scene i,\.px-scene b,\.px-ground i,\.px-ground b,\.px-margins i,\.px-margins b,\.px-flyers i,\.px-flyers b,\.px-snow i\{[^}]*pointer-events:none/.test(css));
-    // Crossing behind the page's boxes and words (the column is z-index 1); only the snow falls in front.
-    assert.ok(/\.px-flyers\{[^}]*z-index:0;/.test(css) && /\.px-margins\{[^}]*z-index:0;/.test(css) && /\.px-snow\{[^}]*z-index:5;/.test(css));
+    for (const c of ['px-scene', 'px-ground', 'px-margins', 'px-flyers', 'px-fall']) assert.ok(new RegExp(`\\.${c}\\{[^}]*pointer-events:none`).test(css), `${c} takes no taps`);
+    assert.ok(/\.px-scene i,\.px-scene b,\.px-ground i,\.px-ground b,\.px-margins i,\.px-margins b,\.px-flyers i,\.px-flyers b,\.px-fall i\{[^}]*pointer-events:none/.test(css));
+    // Crossing behind the page's boxes and words (the column is z-index 1); only snow or leaves fall in front.
+    assert.ok(/\.px-flyers\{[^}]*z-index:0;/.test(css) && /\.px-margins\{[^}]*z-index:0;/.test(css) && /\.px-fall\{[^}]*z-index:5;/.test(css));
     // Framed as each page frames its boxes.
     assert.ok(css.includes(':root:not([data-theme="8bit"]) .px-scene{border:1px solid var(--border);border-radius:14px;box-shadow:none;}'));
     assert.ok(/\.px-scene\{[^}]*border:4px solid var\(--px-line\);box-shadow:4px 4px 0 var\(--px-shadow\)/.test(css));
@@ -972,11 +995,11 @@ test('more on a wide screen: every thing on a page 600px wide or more, a phone t
   }
 });
 
-test('motion turned down: nothing moves, nothing crosses, no snow, the fireworks shown at their widest - and the styles stop motion too', () => {
+test('motion turned down: nothing moves, nothing crosses, nothing falls, the fireworks shown at their widest - and the styles stop motion too', () => {
   for (const season of SEASON_NAMES) {
     const p = artPage();
     const added = ART.build(p.doc, season, { width: 1024, still: true });
-    assert.ok(!added.some(e => e.className === 'px-snow' || e.className === 'px-flyers'), `${season}: no snow, nothing crossing`);
+    assert.ok(!added.some(e => e.className === 'px-fall' || e.className === 'px-flyers'), `${season}: nothing falling, nothing crossing`);
     for (const el of added.flatMap(flat)) assert.ok(!el.style.animation, `${season}: ${el.className || el.tagName} moves`);
   }
   const p = artPage();
@@ -984,24 +1007,30 @@ test('motion turned down: nothing moves, nothing crosses, no snow, the fireworks
   const bursts = p.all().filter(e => /%23ff4d4d|%236cb6ff/.test(e.style.backgroundImage || ''));
   assert.ok(bursts.length >= 4 && bursts.every(b => b.style.backgroundPosition === '-90px 0'), 'the third picture of five, at 3 pixels a pixel');
   const css = p.head.children[0].textContent;
-  assert.ok(/@media \(prefers-reduced-motion: reduce\)\{\.px-scene \*,\.px-ground \*,\.px-margins \*\{animation:none !important;\}\.px-snow,\.px-flyers\{display:none;\}\}/.test(css));
-  assert.ok(/@media print\{\.px-scene,\.px-ground,\.px-margins,\.px-flyers,\.px-snow\{display:none;\}\}/.test(css), 'and none on paper');
+  assert.ok(/@media \(prefers-reduced-motion: reduce\)\{\.px-scene \*,\.px-ground \*,\.px-margins \*\{animation:none !important;\}\.px-fall,\.px-flyers\{display:none;\}\}/.test(css));
+  assert.ok(/@media print\{\.px-scene,\.px-ground,\.px-margins,\.px-flyers,\.px-fall\{display:none;\}\}/.test(css), 'and none on paper');
 });
 
-test('snow at Christmas and the New Year only: 18 flakes on a phone, 36 wider, spread across the page; the scenes at 2 pixels a pixel on a phone, 3 wider', () => {
+test('snow at Christmas and the New Year, leaves at Thanksgiving, nothing falling otherwise: fewer on a phone, spread across the page; the scenes at 2 pixels a pixel on a phone, 3 wider', () => {
   const flakes = (season, width) => {
     const p = artPage();
     let i = 0;
     const added = ART.build(p.doc, season, { width, random: () => ((i++ * 0.37) % 1) });
-    const snow = added.find(e => e.className === 'px-snow');
-    return snow ? snow.children : [];
+    const fall = added.find(e => e.className === 'px-fall');
+    return fall ? fall.children : [];
   };
   assert.strictEqual(flakes('christmas', 375).length, 18);
   assert.strictEqual(flakes('newyear', 1280).length, 36);
+  assert.deepStrictEqual([flakes('thanksgiving', 375).length, flakes('thanksgiving', 1280).length], [10, 18], 'leaves are bigger: fewer');
   for (const s of ['halloween', 'easter', 'july4']) assert.strictEqual(flakes(s, 1280).length, 0, s);
   const lefts = flakes('christmas', 1280).map(f => parseFloat(f.style.left));
   assert.ok(lefts.every(l => l >= 0 && l <= 100) && Math.max(...lefts) - Math.min(...lefts) > 60, 'across the page');
   assert.ok(flakes('christmas', 1280).every(f => /^px-fall [\d.]+s linear -[\d.]+s infinite$/.test(f.style.animation)), 'already falling when the page opens');
+  // Leaves: the leaf in four colours, turning as they fall.
+  const leaves = flakes('thanksgiving', 1280);
+  assert.ok(leaves.every(f => /^px-leaf [\d.]+s linear -[\d.]+s infinite$/.test(f.style.animation)));
+  const colours = new Set(leaves.map(f => (decodeURIComponent(f.style.backgroundImage).match(/fill="(#[0-9a-f]{6})"/) || [])[1]));
+  assert.ok(colours.size >= 3, `leaves in several colours: ${[...colours]}`);
   const moonAt = (width) => { const p = artPage(); ART.build(p.doc, 'halloween', { width }); return p.app.children[0].children.find(e => /%23fff1b8/.test(e.style.backgroundImage || '')).style.width; };
   assert.deepStrictEqual([moonAt(375), moonAt(599), moonAt(600), moonAt(1280)], ['24px', '24px', '36px', '36px']);
 });

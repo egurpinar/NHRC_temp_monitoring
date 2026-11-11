@@ -2,17 +2,18 @@
  * on the 8-bit one (roworno.com/8bit).
  *
  * The <head> script of index.html sets data-season on <html> by the date in
- * New York - halloween (Oct 15-31), christmas (Dec 1-25), newyear (Dec 26 -
- * Jan 1), easter (the ten days up to Easter Monday), july4 (Jun 28 - Jul 5) -
- * and loads this file only then. The season's colours are in index.html
+ * New York - halloween (Oct 15-31), thanksgiving (Nov 15 to the Sunday after
+ * Thanksgiving), christmas (Dec 1-25), newyear (Dec 26 - Jan 1), easter (the
+ * ten days up to Easter Monday), july4 (Jun 28 - Jul 5) - and loads this file
+ * only then. The season's colours are in index.html
  * (SEASONS, and 8-BIT SEASONS), so they are there from the first moment. This
  * draws:
  *   - a scene above the header, in the space index.html keeps for it (nothing
  *     moves when it arrives), and another at the end of the page;
  *   - a few things standing on the header's bottom line;
  *   - on a wide screen, three in each margin;
- *   - now and then, things crossing the page (bats, butterflies, a sleigh),
- *     and at Christmas and the New Year, snow falling over it.
+ *   - now and then, things crossing the page (bats, butterflies, a sleigh,
+ *     leaves), and snow falling over it in winter, leaves at Thanksgiving.
  * Framed as the page frames its boxes: square with a hard shadow on the 8-bit
  * page, rounded on the main one. All of it is hidden from screen readers,
  * never takes a tap or a click, keeps still for visitors who ask for less
@@ -681,6 +682,129 @@
       '..G....',
       '..G....',
       '..G....']] },
+    // Thanksgiving: a turkey, pie, a horn of plenty, leaves, acorns, hay, a scarecrow, apples, sunflowers, wheat, a field.
+    turkey: { c: { R: '#b8442a', O: '#e67e22', Y: '#f1c40f', N: '#8b5a2b', B: '#6e4520', b: '#4e3016', K: '#1b1b1b', y: '#f2b33d', W: '#d93b3b', L: '#e0a000' }, f: [[
+      '..R.O.Y.O.R..',
+      '.RROOYYYOORR.',
+      'RROOYYNYYOORR',
+      'ROOYYNNNYYOOR',
+      'ROYNNBBBNNYOR',
+      '.OYNBKBKBNYO.',
+      '..YNBByBBNY..',
+      '...NBBWBBN...',
+      '....BbWbB....',
+      '....BBBBB....',
+      '.....L.L.....',
+      '....LL.LL....'], [
+      '..R.O.Y.O.R..',
+      '.RROOYYYOORR.',
+      'RROOYYNYYOORR',
+      'ROOYYNNNYYOOR',
+      'ROYNNNNNNNYOR',
+      '.OYNNBBBNNYO.',
+      '..YNBKBKBNY..',
+      '...NBByBBN...',
+      '....BbWbB....',
+      '....BBWBB....',
+      '.....L.L.....',
+      '....LL.LL....']] },
+    pie: { c: { C: '#d9a25f', c: '#a8743c', P: '#c8601e', W: '#fffaf0' }, f: [[
+      '....WWW.....',
+      '..CCCCCCCC..',
+      '.CPPPPPPPPC.',
+      'CPPPPPPPPPPC',
+      'cCCCCCCCCCCc',
+      '.cccccccccc.']] },
+    cornucopia: { c: { N: '#b9813f', n: '#7a5028', R: '#d93b3b', P: '#7d3c98', G: '#9acd32', O: '#e67e22', Y: '#f1c40f' }, f: [[
+      '...........GG...',
+      '..........RRGG..',
+      '.......NNNRRROO.',
+      '.....NNnNNPPROOO',
+      '...NNnNNnNPPPOOY',
+      '..NnNNnNNnNPPYY.',
+      '.NNNNNNNNNNNY...',
+      'nN.nNNNNNNn.....',
+      'n...nnnnnn......',
+      '.n..............']] },
+    leaf: { c: { L: '#e67e22', l: '#b5591a', N: '#6e4520' }, f: [[
+      '...L...',
+      '.L.L.L.',
+      'LLLLLLL',
+      '.LLlLL.',
+      'LLLlLLL',
+      '..LlL..',
+      '...N...']] },
+    acorn: { c: { N: '#7a5028', n: '#5a3a1c', B: '#c08a4a', b: '#9a6a36' }, f: [[
+      '..N..',
+      'NNNNN',
+      'NnNnN',
+      'BBBBB',
+      'BBBbB',
+      '.BBb.',
+      '..B..']] },
+    haybale: { c: { Y: '#e6c35c', y: '#c9a23a', N: '#8b5a2b' }, f: [[
+      '.YYYYYYYYYY.',
+      'YyYYyYYyYYyY',
+      'YNNNNNNNNNNY',
+      'YYyYYyYYyYYY',
+      'YyYYyYYyYYyY',
+      'YNNNNNNNNNNY',
+      'YYyYYyYYyYYY',
+      '.yyyyyyyyyy.']] },
+    scarecrow: { c: { H: '#6e4a24', S: '#f2d29b', K: '#2b1a10', R: '#c0392b', r: '#f1c40f', Y: '#e6c35c', N: '#8b5a2b' }, f: [[
+      '....HHH....',
+      '..HHHHHHH..',
+      '....SSS....',
+      '....KSK....',
+      '....SSS....',
+      'YRRRRRRRRRY',
+      'Y.RrRrRrR.Y',
+      '..RRRRRRR..',
+      '..RrRrRrR..',
+      '...YY.YY...',
+      '.....N.....',
+      '.....N.....',
+      '.....N.....',
+      '.....N.....']] },
+    apple: { c: { R: '#d93b3b', r: '#a82a2a', W: '#ff9a9a', G: '#3f9a4a', N: '#6e4520' }, f: [[
+      '..NG..',
+      '.RRRR.',
+      'RRWRRR',
+      'RRRRRr',
+      'RRRRrr',
+      '.rrrr.']] },
+    sunflower: { c: { Y: '#f5c518', N: '#6e4a24', G: '#3f9a4a', g: '#2e7a45' }, f: [[
+      '..YYY..',
+      '.YYYYY.',
+      'YYNNNYY',
+      'YYNNNYY',
+      'YYNNNYY',
+      '.YYYYY.',
+      '..YGY..',
+      '...G...',
+      '.gGG...',
+      '...Gg..',
+      '...G...',
+      '...G...']] },
+    wheat: { c: { Y: '#e6c35c', y: '#c9a23a' }, f: [[
+      '.Y.Y.Y.',
+      'YyYyYyY',
+      '.YyYyY.',
+      'YyYyYyY',
+      '.YyYyY.',
+      '..yyy..',
+      '..yyy..',
+      '...y...',
+      '..yyy..',
+      '.y.y.y.',
+      '...y...',
+      '...y...']] },
+    field: { c: { B: '#8b5a2b', b: '#6e4520', Y: '#d9b24c' }, f: [[
+      'Y..Y...Y..Y...Y.',
+      'YbYYbYYbYYbYYbYY',
+      'BBBBBBBBBBBBBBBB',
+      'bBBbBBbBBbBBbBBb',
+      'BBBBBBBBBBBBBBBB']] },
   };
 
   // Fireworks in more than one colour: the same burst, its two colours swapped.
@@ -697,6 +821,10 @@
     brownBunny: { W: '#c8a27a', P: '#f2b8a0' },
     blueScarf: { R: '#3b7bd9' },
     yellowTulip: { R: '#ffd23f', r: '#e0a000' },
+    sun: { M: '#ffcf6b', m: '#f5a83c' },
+    leafRed: { L: '#c0392b', l: '#8e2a1f' },
+    leafYellow: { L: '#f1c40f', l: '#c49a0b' },
+    leafBrown: { L: '#a0522d', l: '#6e3a1f' },
   };
 
   /**
@@ -704,14 +832,14 @@
    * top and bottom: the scenes above the header and at the end of the page (20
    * picture pixels high inside their frames): sky, floor and lights, and their
    * things. line: on the header's line (10 rows fit there). margins: on a wide
-   * screen, left and right. flyers: across the whole page, now and then. snow.
+   * screen, left and right. flyers: across the whole page, now and then.
    * A thing: s, its picture; x from the left (% of the width) or r from the
    * right, t from the top or b from the bottom (picture pixels, so it keeps its
    * place at 2 or 3 screen pixels a picture pixel); k, its size; tint, other
    * colours; flip, facing the other way; wide, only where the scene is 600px or
    * more; v, in a margin: top, middle or bottom; frames, seconds for its
-   * pictures to run once; move: how it moves. Nothing moves when motion is
-   * turned down.
+   * pictures to run once; move: how it moves. fall: snow or leaves, over the
+   * page. Nothing moves when motion is turned down.
    */
   const HALLOWEEN_LINE = [
     { s: 'pumpkin', r: 4, move: 'flicker' }, { s: 'candycorn', r: 18 }, { s: 'pumpkin', r: 25, move: 'flicker', delay: -2.1 },
@@ -725,7 +853,7 @@
       right: [{ s: 'snowman2', k: 6, v: 'bottom' }, { s: 'gingerbread', k: 6, v: 'middle' }, { s: 'xtree', k: 4, v: 'top' }],
     },
     flyers: [{ s: 'sleigh', move: 'fly', t: 10, dur: 40, delay: -12 }],
-    snow: true,
+    fall: 'snow',
   };
   const CHRISTMAS_BOTTOM = {
     sky: 'stars', floor: 'snowfloor',
@@ -904,6 +1032,48 @@
         right: [{ s: 'melon', k: 6, v: 'bottom' }, { s: 'icecream', k: 5, v: 'middle' }, { s: 'burger', k: 5, v: 'top' }],
       },
     },
+    thanksgiving: {
+      top: {
+        floor: 'field',
+        things: [
+          { s: 'moon', x: 4, t: 1, tint: 'sun' }, { s: 'cloud', x: 30, t: 2, wide: true }, { s: 'cloud', x: 66, t: 1 },
+          { s: 'haybale', x: 3, b: 3 }, { s: 'turkey', x: 12, b: 3, frames: 1.2 }, { s: 'pumpkin', x: 21, b: 3 },
+          { s: 'sunflower', x: 27, b: 3, wide: true }, { s: 'scarecrow', x: 33, b: 3, wide: true }, { s: 'pie', x: 41, b: 3 },
+          { s: 'apple', x: 47, b: 3, wide: true }, { s: 'cornucopia', x: 52, b: 3, wide: true }, { s: 'wheat', x: 61, b: 3 },
+          { s: 'turkey', x: 67, b: 3, frames: 1.2, delay: -0.5, wide: true }, { s: 'pumpkin', x: 76, b: 3, tint: 'whitePumpkin', wide: true },
+          { s: 'acorn', x: 82, b: 3 }, { s: 'haybale', x: 87, b: 3, wide: true }, { s: 'sunflower', x: 94, b: 3 },
+          { s: 'leaf', move: 'flutter', t: 1, dur: 15, delay: -3 },
+          { s: 'leaf', move: 'flutter', t: 5, dur: 19, delay: -11, reverse: true, tint: 'leafRed' },
+          { s: 'leaf', move: 'flutter', t: 3, dur: 17, delay: -7, tint: 'leafYellow', wide: true },
+        ],
+      },
+      bottom: {
+        floor: 'field',
+        things: [
+          { s: 'cloud', x: 46, t: 1, wide: true },
+          { s: 'leaf', move: 'flutter', t: 2, dur: 18, delay: -5, tint: 'leafBrown' },
+          { s: 'scarecrow', x: 4, b: 3 }, { s: 'haybale', x: 12, b: 3 }, { s: 'turkey', x: 21, b: 3, frames: 1.2 },
+          { s: 'wheat', x: 29, b: 3, wide: true }, { s: 'pumpkin', x: 34, b: 3 }, { s: 'pie', x: 41, b: 3, wide: true },
+          { s: 'cornucopia', x: 47, b: 3 }, { s: 'apple', x: 56, b: 3, wide: true }, { s: 'sunflower', x: 61, b: 3 },
+          { s: 'turkey', x: 68, b: 3, frames: 1.2, delay: -0.6, wide: true }, { s: 'acorn', x: 76, b: 3 },
+          { s: 'pumpkin', x: 81, b: 3, tint: 'whitePumpkin', wide: true }, { s: 'haybale', x: 88, b: 3 }, { s: 'wheat', x: 95, b: 3, wide: true },
+        ],
+      },
+      line: [
+        { s: 'pie', r: 4 }, { s: 'apple', r: 17 }, { s: 'acorn', r: 25 }, { s: 'leaf', r: 32, tint: 'leafRed' },
+        { s: 'pumpkin', r: 41 }, { s: 'leaf', r: 55, tint: 'leafYellow' }, { s: 'acorn', r: 63 },
+      ],
+      margins: {
+        left: [{ s: 'turkey', k: 5, v: 'bottom', frames: 1.2 }, { s: 'cornucopia', k: 4, v: 'middle' }, { s: 'leaf', k: 6, v: 'top', tint: 'leafRed' }],
+        right: [{ s: 'scarecrow', k: 5, v: 'bottom' }, { s: 'pie', k: 6, v: 'middle' }, { s: 'sunflower', k: 5, v: 'top' }],
+      },
+      flyers: [
+        { s: 'leaf', move: 'flutter', t: 20, dur: 26, delay: -6 },
+        { s: 'leaf', move: 'flutter', t: 48, dur: 33, delay: -19, reverse: true, tint: 'leafRed' },
+        { s: 'leaf', move: 'flutter', t: 72, dur: 29, delay: -12, tint: 'leafYellow', wide: true },
+      ],
+      fall: 'leaves',
+    },
   };
 
   const SEASONS = Object.keys(SCENES);
@@ -952,7 +1122,7 @@
     `@media(max-width:599px){.px-scene{height:${SCENE_SIZE.narrow.height}px;}}`,
     ':root:not([data-theme="8bit"]) .px-scene{border:1px solid var(--border);border-radius:14px;box-shadow:none;}',
     '.px-scene.px-bottom{position:relative;top:auto;left:auto;right:auto;margin:0 0 16px;}',
-    '.px-scene i,.px-scene b,.px-ground i,.px-ground b,.px-margins i,.px-margins b,.px-flyers i,.px-flyers b,.px-snow i{position:absolute;display:block;background-repeat:no-repeat;pointer-events:none;}',
+    '.px-scene i,.px-scene b,.px-ground i,.px-ground b,.px-margins i,.px-margins b,.px-flyers i,.px-flyers b,.px-fall i{position:absolute;display:block;background-repeat:no-repeat;pointer-events:none;}',
     '.px-tile{left:0;right:0;background-repeat:repeat-x !important;}',
     '.px-sky{left:0;top:0;right:0;bottom:0;background-repeat:repeat !important;}',
     `.px-ground{position:absolute;right:0;bottom:0;width:50%;height:${GROUND.height}px;pointer-events:none;}`,
@@ -960,12 +1130,14 @@
     '@media(min-width:1100px){.px-margins{display:block;}}',
     // Behind the page's boxes and words (the column is above it), so nothing crossing hides a word.
     '.px-flyers{position:fixed;left:0;top:0;right:0;bottom:0;pointer-events:none;z-index:0;overflow:hidden;}',
-    '.px-snow{position:fixed;left:0;top:0;right:0;bottom:0;pointer-events:none;z-index:5;overflow:hidden;}',
+    // Snow or leaves falling: in front, few and small.
+    '.px-fall{position:fixed;left:0;top:0;right:0;bottom:0;pointer-events:none;z-index:5;overflow:hidden;}',
     // Skies. Halloween's last band is the ground the silhouettes stand on (3 picture pixels).
     '.px-halloween{background:linear-gradient(#1d0f33 0 30%,#33154c 30% 48%,#561c54 48% 62%,#8a2a4b 62% 74%,#cc5a2c 74% calc(100% - var(--px-g)),#0c0614 calc(100% - var(--px-g)));}',
     '.px-christmas,.px-newyear{background:linear-gradient(#081629 0 45%,#0d2140 45% 75%,#12294d 75%);}',
     '.px-easter{background:linear-gradient(#bfe3ff 0 40%,#d6eeff 40% 72%,#e9f7ff 72%);}',
     '.px-july4{background:linear-gradient(#050f22 0 45%,#0a1a36 45% 75%,#0f2347 75%);}',
+    '.px-thanksgiving{background:linear-gradient(#fce9c2 0 40%,#f8d69a 40% 72%,#f2c27a 72%);}',
     '.px-thread{background:#b9aed0;}',
     '@keyframes px-fly{from{transform:translateX(-96px);}to{transform:translateX(100%);}}',
     '@keyframes px-flutter{0%{transform:translate(-24px,6px);}20%{transform:translate(20%,0);}40%{transform:translate(40%,9px);}60%{transform:translate(60%,2px);}80%{transform:translate(80%,8px);}100%{transform:translate(100%,3px);}}',
@@ -975,8 +1147,9 @@
     '@keyframes px-rise{0%{transform:translateY(0);opacity:.9;}100%{transform:translateY(-18px);opacity:0;}}',
     '@keyframes px-face{0%,50%{transform:scaleX(-1);}50.01%,100%{transform:scaleX(1);}}',
     '@keyframes px-fall{0%{transform:translate(0,-16px);}25%{transform:translate(6px,25vh);}50%{transform:translate(0,50vh);}75%{transform:translate(-6px,75vh);}100%{transform:translate(0,104vh);}}',
-    '@media (prefers-reduced-motion: reduce){.px-scene *,.px-ground *,.px-margins *{animation:none !important;}.px-snow,.px-flyers{display:none;}}',
-    '@media print{.px-scene,.px-ground,.px-margins,.px-flyers,.px-snow{display:none;}}',
+    '@keyframes px-leaf{0%{transform:translate(0,-16px) rotate(0);}25%{transform:translate(14px,25vh) rotate(90deg);}50%{transform:translate(0,50vh) rotate(180deg);}75%{transform:translate(-14px,75vh) rotate(270deg);}100%{transform:translate(0,104vh) rotate(360deg);}}',
+    '@media (prefers-reduced-motion: reduce){.px-scene *,.px-ground *,.px-margins *{animation:none !important;}.px-fall,.px-flyers{display:none;}}',
+    '@media print{.px-scene,.px-ground,.px-margins,.px-flyers,.px-fall{display:none;}}',
   ].join('\n');
 
   /** The keyframes for a sprite's frames at k screen pixels a pixel. */
@@ -1223,23 +1396,30 @@
       added.push(flyers);
     }
 
-    // Snow over everything at Christmas and the New Year - none for visitors who turn motion down.
-    if (body && plan.snow && !still) {
-      const snow = make('div', 'px-snow');
-      snow.setAttribute('aria-hidden', 'true');
-      const count = wide ? 36 : 18;
+    // Falling over everything: snow at Christmas and the New Year, leaves at Thanksgiving - none for visitors who turn motion down.
+    if (body && plan.fall && !still) {
+      const fall = make('div', 'px-fall');
+      fall.setAttribute('aria-hidden', 'true');
+      const leaves = plan.fall === 'leaves';
+      // Leaves are bigger than flakes: fewer of them.
+      const count = leaves ? (wide ? 18 : 10) : (wide ? 36 : 18);
       for (let i = 0; i < count; i++) {
-        const kind = ['flake1', 'flake2', 'flake3'][Math.floor(random() * 3)];
-        const flake = sprite(kind, kind === 'flake1' ? 2 : 1);
-        const dur = 9 + random() * 9;
-        flake.style.left = `${(random() * 100).toFixed(1)}%`;
-        flake.style.top = '0';
-        flake.style.opacity = (0.55 + random() * 0.45).toFixed(2);
-        flake.style.animation = `px-fall ${dur.toFixed(1)}s linear ${(-random() * dur).toFixed(1)}s infinite`;
-        snow.appendChild(flake);
+        let bit;
+        if (leaves) {
+          bit = sprite('leaf', 2, TINTS[[null, 'leafRed', 'leafYellow', 'leafBrown'][Math.floor(random() * 4)]]);
+        } else {
+          const kind = ['flake1', 'flake2', 'flake3'][Math.floor(random() * 3)];
+          bit = sprite(kind, kind === 'flake1' ? 2 : 1);
+        }
+        const dur = (leaves ? 11 : 9) + random() * 9;
+        bit.style.left = `${(random() * 100).toFixed(1)}%`;
+        bit.style.top = '0';
+        bit.style.opacity = (0.55 + random() * 0.45).toFixed(2);
+        bit.style.animation = `${leaves ? 'px-leaf' : 'px-fall'} ${dur.toFixed(1)}s linear ${(-random() * dur).toFixed(1)}s infinite`;
+        fall.appendChild(bit);
       }
-      body.appendChild(snow);
-      added.push(snow);
+      body.appendChild(fall);
+      added.push(fall);
     }
 
     (doc.head || body).appendChild(style);
@@ -1249,7 +1429,7 @@
 
   /** Takes a season's drawing out of the page again. */
   function clear(doc) {
-    const all = doc.querySelectorAll ? doc.querySelectorAll('.px-scene,.px-ground,.px-margins,.px-flyers,.px-snow,#px-season-css') : [];
+    const all = doc.querySelectorAll ? doc.querySelectorAll('.px-scene,.px-ground,.px-margins,.px-flyers,.px-fall,#px-season-css') : [];
     for (const el of Array.from(all)) if (el.parentNode) el.parentNode.removeChild(el);
   }
 
