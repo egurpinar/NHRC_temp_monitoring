@@ -19,11 +19,63 @@
 // device's setting. A separate script on purpose: the daily email reuses the
 // main script below and must not run this.
 (function () {
+  /** Easter Sunday in year y, [month, day] (the Gregorian calendar's rule, as computed by Meeus, Jones and Butcher). */
+  function easter(y) {
+    var a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4,
+        f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30,
+        i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451),
+        n = h + l - 7 * m + 114;
+    return [Math.floor(n / 31), n % 31 + 1];
+  }
+  /**
+   * The 8-bit page's season on the club's calendar (the date in New York):
+   * Halloween Oct 15-31, Christmas Dec 1-25, the New Year Dec 26 - Jan 1,
+   * Easter the ten days up to Easter Monday, the Fourth of July Jun 28 - Jul 5;
+   * '' the rest of the year.
+   */
+  function seasonOn(now) {
+    var y, mo, d;
+    try {
+      var p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(now);
+      for (var j = 0; j < p.length; j++) {
+        if (p[j].type === 'year') y = +p[j].value;
+        else if (p[j].type === 'month') mo = +p[j].value;
+        else if (p[j].type === 'day') d = +p[j].value;
+      }
+    } catch (e) { /* no time zones here: the device's own date */ }
+    if (!(y && mo && d)) { y = now.getFullYear(); mo = now.getMonth() + 1; d = now.getDate(); }
+    var md = mo * 100 + d;
+    if (md >= 1015 && md <= 1031) return 'halloween';
+    if (md >= 1201 && md <= 1225) return 'christmas';
+    if (md >= 1226 || md === 101) return 'newyear';
+    if (md >= 628 && md <= 705) return 'july4';
+    var es = easter(y), day = Date.UTC(y, mo - 1, d), sunday = Date.UTC(y, es[0] - 1, es[1]);
+    if (day >= sunday - 8 * 864e5 && day <= sunday + 864e5) return 'easter';
+    return '';
+  }
   // roworno.com/8bit (it comes here as /?8bit): the 8-bit look, for as long
   // as the address says so - never remembered, so the next visit is as before.
   try {
-    if (/(^|&)8bit(=|&|$)/.test(String(location.search).replace(/^\?/, ''))) {
-      document.documentElement.setAttribute('data-theme', '8bit');
+    var q = String(location.search).replace(/^\?/, '');
+    if (/(^|&)8bit(=|&|$)/.test(q)) {
+      var root = document.documentElement;
+      root.setAttribute('data-theme', '8bit');
+      // Its season, with its colours (8-BIT SEASONS below) and its pixel art
+      // (8bit/seasons.js, fetched only then). A season named in the address
+      // shows it on any day (?8bit&season=halloween; season=none: none).
+      try {
+        var m = /(^|&)season=([a-z0-9]*)(&|$)/.exec(q);
+        var s = m ? m[2] : seasonOn(new Date());
+        if (/^(halloween|christmas|newyear|easter|july4)$/.test(s)) {
+          var art = document.createElement('script');
+          art.src = '8bit/seasons.js';
+          art.async = true;
+          // Not there (no signal, say): the year-round look, not an empty space above the header.
+          art.onerror = function () { root.removeAttribute('data-season'); };
+          document.head.appendChild(art);
+          root.setAttribute('data-season', s);
+        }
+      } catch (e) { /* the year-round 8-bit look */ }
       return;
     }
   } catch (e) { /* no address to read */ }
@@ -128,6 +180,72 @@
   --fserif:'Roworno Pixel',ui-monospace,Menlo,Consolas,'Courier New',monospace;
   --fsans:ui-monospace,Menlo,Consolas,'Courier New',monospace;
   --fpixel:'Roworno Pixel',ui-monospace,Menlo,Consolas,'Courier New',monospace;
+}
+/* 8-BIT SEASONS: the 8-bit page's colours at Halloween, Christmas and the New
+   Year, Easter and the Fourth of July (the <head> script sets data-season;
+   8bit/seasons.js draws the pixel art). Statuses keep their colours' meaning
+   and shapes: green no restriction, yellow caution, orange a warning, solid red
+   restricted. Red is never a frame or a heading. Each pair checked for contrast
+   as the 8-bit one is (scripts/test_site_theme.js, section 8). */
+:root[data-theme="8bit"][data-season="halloween"]{
+  --px-screen:#170e24;--px-line:#a37ae0;--px-shadow:#050208;--px-margin-a:#120a1d;--px-margin-b:#22123a;
+  --px-shade:#2f1d4a;--px-tile-line:#8466b3;
+  --navy:#170e24;--navy2:#170e24;--navy3:#170e24;
+  --gold:#ff9e45;--gold2:#ffc27a;
+  --white:#f7f2ff;--muted:#c2b3d9;
+  --border:#a37ae0;
+  --danger:#ff8a80;--warn:#ffb35c;
+  --ok:#7fe08e;--caution:#ffe066;--bad:#ff8a80;--warn-text:#ffb35c;
+  --ok-dot:#7fe08e;--caution-dot:#ffe066;--bad-dot:#ff6b5a;--warn-dot:#ffb35c;
+  --rb-border:#a37ae0;--input-border:#a37ae0;
+  --focus:#ffe066;
+  --chart-line:#ff9e45;--chart-fill:255,158,69;--chart-tick:#d9cdeb;
+  --chart-observed-fill:rgba(255,158,69,0.14);--chart-forecast:#b99bff;--chart-forecast-fill:rgba(185,155,255,0.08);
+  --chart-point-border:#170e24;--chart-tip-bg:#050208;--chart-tip-border:#a37ae0;
+  --chart-tip-title:#ffc27a;--chart-tip-body:#f7f2ff;
+  --flood-8:#ffe066;--flood-9:#ffb35c;--flood-10:#ff8c42;--flood-11:#ff8080;--flood-12:#ff4d4d;
+}
+:root[data-theme="8bit"][data-season="christmas"],:root[data-theme="8bit"][data-season="newyear"]{
+  --px-screen:#0e2a1f;--px-line:#f2c55c;--px-shadow:#020a06;--px-margin-a:#0a2018;--px-margin-b:#123626;
+  --px-shade:#1c4734;--px-tile-line:#5f9d7f;--px-bad-bg:#da3838;
+  --navy:#0e2a1f;--navy2:#0e2a1f;--navy3:#0e2a1f;
+  --gold:#f6c75a;--gold2:#ffe08a;
+  --white:#fbfbf6;--muted:#b6d2c3;
+  --border:#f2c55c;
+  --danger:#ff8a80;--warn:#f5a85a;
+  --ok:#8be0a4;--caution:#ffe066;--bad:#ff9a90;--warn-text:#f7ae62;
+  --ok-dot:#8be0a4;--caution-dot:#ffe066;--bad-dot:#ff6b5a;--warn-dot:#f7ae62;
+  --rb-border:#f2c55c;--input-border:#f2c55c;
+  --focus:#ffe066;
+  --chart-line:#f6c75a;--chart-fill:246,199,90;--chart-tick:#cfe4d8;
+  --chart-observed-fill:rgba(246,199,90,0.14);--chart-forecast:#8cc8ff;--chart-forecast-fill:rgba(140,200,255,0.08);
+  --chart-point-border:#0e2a1f;--chart-tip-bg:#020a06;--chart-tip-border:#f2c55c;
+  --chart-tip-title:#ffe08a;--chart-tip-body:#fbfbf6;
+  --flood-8:#ffe066;--flood-9:#f7ae62;--flood-10:#f5873a;--flood-11:#ff8a80;--flood-12:#ff5c5c;
+}
+:root[data-theme="8bit"][data-season="easter"]{
+  --px-screen:#fffcf2;--px-line:#2e7a45;--px-shadow:#cbb6ec;--px-margin-a:#fde4ee;--px-margin-b:#e3f5e8;
+  --px-shade:#fff0b8;--px-tile-line:#5a9670;--px-bad-bg:#b42318;
+  --navy:#fffcf2;--navy2:#fffcf2;--navy3:#fffcf2;
+  --gold:#7a3fa6;--gold2:#5f2c86;
+  --white:#1f2a22;--muted:#4c5e51;
+  --border:#2e7a45;
+  --danger:#b42318;--warn:#93460a;
+  --ok:#1a6539;--caution:#7a5200;--bad:#b42318;--warn-text:#93460a;
+  --ok-dot:#1e7a46;--caution-dot:#a87400;--bad-dot:#c42b2b;--warn-dot:#c05a00;
+  --ink:31,42,34;
+  --rb-border:#2e7a45;--input-border:#2e7a45;--code-bg:rgba(31,42,34,.07);
+  --focus:#7a3fa6;
+  --chart-line:#2e7a45;--chart-fill:46,122,69;--chart-tick:#4c5e51;--chart-grid:rgba(31,42,34,0.08);
+  --chart-observed-fill:rgba(46,122,69,0.14);--chart-forecast:#7a3fa6;--chart-forecast-fill:rgba(122,63,166,0.06);
+  --chart-point-border:#fffcf2;--chart-tip-bg:#ffffff;--chart-tip-border:#2e7a45;
+  --chart-tip-title:#7a3fa6;--chart-tip-body:#1f2a22;
+  --flood-8:#a87400;--flood-9:#c05a00;--flood-10:#b8430b;--flood-11:#c42b2b;--flood-12:#8b1010;
+  color-scheme:light;
+}
+:root[data-theme="8bit"][data-season="july4"]{
+  --px-line:#f2f4f8;--px-tile-line:#86a6d4;
+  --border:#f2f4f8;--rb-border:#f2f4f8;--input-border:#f2f4f8;--chart-tip-border:#f2f4f8;
 }
 *{box-sizing:border-box;margin:0;padding:0;}
 body{background:var(--navy);color:var(--white);font-family:var(--fsans);min-height:100vh;font-size:16px;}
@@ -522,6 +640,16 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 :root[data-theme="8bit"] .camera-badge{background:var(--px-screen);color:var(--gold);border:2px solid var(--gold);}
 :root[data-theme="8bit"] .w24-plot svg path{shape-rendering:crispEdges;}
 :root[data-theme="8bit"] #toast{background:var(--px-line);color:var(--px-screen);border:2px solid var(--px-line);}
+/* The seasons (8-BIT SEASONS above; 8bit/seasons.js): room above the header for
+   the season's scene from the first moment, so nothing moves when it is drawn;
+   a picnic cloth either side at the Fourth of July; the map's photos in the
+   season's colours at Halloween and Easter (the same four brightness steps). */
+:root[data-theme="8bit"][data-season] #app{padding-top:100px;}
+@media(max-width:599px){:root[data-theme="8bit"][data-season] #app{padding-top:76px;}}
+:root[data-theme="8bit"][data-season="july4"] body{background-color:#fff7ef;
+  background-image:linear-gradient(90deg,rgba(214,51,58,.5) 50%,transparent 0),linear-gradient(rgba(214,51,58,.5) 50%,transparent 0);background-size:16px 16px;}
+:root[data-theme="8bit"][data-season="halloween"] .leaflet-tile{filter:url(#px-tones-halloween);}
+:root[data-theme="8bit"][data-season="easter"] .leaflet-tile{filter:url(#px-tones-easter);}
 </style>
 </head>
 <body>
@@ -571,6 +699,29 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         <feFuncR type="discrete" tableValues="0.0314 0.0510 0.1176 0.4353"/>
         <feFuncG type="discrete" tableValues="0.0784 0.1216 0.2392 0.5255"/>
         <feFuncB type="discrete" tableValues="0.1569 0.2353 0.4314 0.6588"/>
+      </feComponentTransfer>
+    </filter>
+    <!-- The same four steps, as bright as the navy ones, at Halloween (purples) and Easter (lilacs). -->
+    <filter id="px-tones-halloween" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0 0 0 1 0"/>
+      <feComponentTransfer>
+        <feFuncR type="gamma" exponent="0.7"/><feFuncG type="gamma" exponent="0.7"/><feFuncB type="gamma" exponent="0.7"/>
+      </feComponentTransfer>
+      <feComponentTransfer>
+        <feFuncR type="discrete" tableValues="0.0941 0.1451 0.2863 0.5843"/>
+        <feFuncG type="discrete" tableValues="0.0549 0.0863 0.1647 0.4667"/>
+        <feFuncB type="discrete" tableValues="0.1765 0.2667 0.5216 0.7490"/>
+      </feComponentTransfer>
+    </filter>
+    <filter id="px-tones-easter" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0.2126 0.7152 0.0722 0 0  0 0 0 1 0"/>
+      <feComponentTransfer>
+        <feFuncR type="gamma" exponent="0.7"/><feFuncG type="gamma" exponent="0.7"/><feFuncB type="gamma" exponent="0.7"/>
+      </feComponentTransfer>
+      <feComponentTransfer>
+        <feFuncR type="discrete" tableValues="0.0824 0.1255 0.2471 0.5176"/>
+        <feFuncG type="discrete" tableValues="0.0706 0.1137 0.2196 0.5059"/>
+        <feFuncB type="discrete" tableValues="0.1333 0.2039 0.3961 0.6471"/>
       </feComponentTransfer>
     </filter>
   </svg>
