@@ -984,14 +984,16 @@ test('the page sits beside the main page: its links and pictures are the site\'s
   assert.ok(/<html lang="en">/.test(html) && /<meta name="viewport" content="width=device-width, initial-scale=1\.0"\/>/.test(html));
 });
 
-test('the main page links here, under the camera\'s photo', () => {
+test('the main page links here once, from its header - nothing under the camera\'s photo since November 2026', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const card = main.slice(main.indexOf('id="camera-card"'), main.indexOf('<!-- WEATHER CARD -->'));
-  assert.ok(/<a href="newboathouse\/">New boathouse: watch each day's timelapse/.test(card), card.slice(-600));
-  assert.ok(card.indexOf('newboathouse/') > card.indexOf('id="camera-img"'), 'under the photo');
+  assert.ok(card.includes('id="camera-img"'), 'the camera card');
+  assert.ok(!/<a\b|newboathouse/.test(card), 'no link under the photo');
+  assert.strictEqual((main.match(/href="newboathouse\/"/g) || []).length, 1, 'one link: the header button');
+  assert.ok(!/camera-timelapse/.test(main), 'no styles left for the old link');
 });
 
-test('and from its header: a "New Boathouse Timelapse" button, under the motto on the right - the same tab, the same site', () => {
+test('the header\'s "New Boathouse Timelapse" button, under the motto on the right - the same tab, the same site', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
   const header = main.slice(main.indexOf('<div class="header">'), main.indexOf('<button type="button" id="theme-toggle"'));
   const links = [...header.matchAll(/<a class="timelapse-btn"([^>]*)>([\s\S]*?)<\/a>/g)];
