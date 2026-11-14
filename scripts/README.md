@@ -21,7 +21,7 @@ status using the site's own functions and compares against the email output.
 | `daily_email.js` | Builds and sends the digest |
 | `send_notice.js` | The "No conditions report today - check roworno.com" notice, sent instead when the job's tests, build or send fail (see Safety behaviour) |
 | `test_send_notice.js` | Its tests (22): the words, the season and the day as `daily_email.js` has them, at most one email a day against a stand-in Buttondown, working with `daily_email.js` broken, and how the job runs it |
-| `test_daily_email.js` | Test suite (307 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, the NWS alerts and thunderstorms, and that every script and style from another server is pinned by its hash (Subresource Integrity), the chart libraries too. It reads no live data: not the network, not the checkout's `data.json`/`history.json` (stand-ins), so what those hold on the morning of a run cannot stop the email |
+| `test_daily_email.js` | Test suite (309 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, the NWS alerts and thunderstorms, and that every script and style from another server is pinned by its hash (Subresource Integrity), the chart libraries too. It reads no live data: not the network, not the checkout's `data.json`/`history.json` (stand-ins), so what those hold on the morning of a run cannot stop the email |
 | `test_time_travel.js` | Runs every test suite with the clock moved (`fakenow.js`, and a stand-in `date`) to the hours the email job really runs them (1-2 AM), the morning window's edges, the next daylight-saving changes, the season's edges and the new year. The 2 Nov 2026 email did not go out because two tests passed in the afternoon and failed at 1:58 AM. GitHub runs it on every push and every evening (`tests.yml`) |
 | `run_suite.js` | Runs one suite for `tests.yml`: output and exit code unchanged, and on GitHub each failing test becomes an annotation - named on the run page and in GitHub's email without signing in. Tests: `test_run_suite.js` (8) |
 | `fakenow.js` | The moved clock for `test_time_travel.js`: node's `Date`, in every process and vm context a run starts |
@@ -42,6 +42,7 @@ status using the site's own functions and compares against the email output.
 | `test_build_timelapse.js` | Its tests (43): the words on the frames, when a day is ready (daylight saving included), sharp frames and each quarter hour's sharpest, the chunks' days (month ends, leap days), real ffmpeg (every size Ring sends, the stamp and the logo where they should be, black, greys and white where they were in every picture made - never full-range video - damaged frames, a video that plays as it loads, pieces joined without re-encoding - or re-encoded when they differ), the real Worker (made once, made again for a late frame or a new logo, a chunk made again only when one of its days is, a chunk too large made smaller until it fits, frames deleted after 3 days, failures said and retried - a refused secret said with what to do), ffmpeg never given the secret, and the workflow's guard rails |
 | `../.github/workflows/timelapse.yml` | Runs `build_timelapse.js` a few times each evening and once the next morning, its tests first; the builder's secret `TIMELAPSE_SECRET`, never for pull requests, read-only |
 | `test_newboathouse.js` | The page `../newboathouse/index.html` (43 tests): only well formed days and chunks of the Worker's own, any frame of the whole timelapse found in its chunk, the page on a stand-in DOM (plays from the first day, one chunk into the next, again from the first after today, the drag bar across chunks and back, a chunk's last frame played on into the next - not that chunk again, letting go with no "change" from the browser, starting at 2x, speeds 0.5x to 8x and one the browser refuses, paused on the frame the time under it says, autoplay refused, reduced motion, a link to a day, each whole day below, nothing yet, Worker down, light/dark; a page left open reading the list again so new days join in, a video replaced meanwhile found again from the same frame, the speed kept across chunks), the two videos one over the other - the one behind see-through, never display:none - each chunk starting where its address says (#t=) and never moved while it loads, a picture stuck while the clock runs on (as in Safari) moved on, and nothing else taken for stuck; its Content-Security-Policy with its scripts' hashes and one file of the site's besides, the season's art (`https://roworno.com/8bit/seasons.js`, and the data: pictures it draws), text only, the phone's bar in the season's colour, and the main page's one link to it: the "New Boathouse Timelapse" button under the motto (nothing under the camera's photo). After changing the page's scripts: `node scripts/test_newboathouse.js --fix-csp` |
+| `import_govee_export.js` | Adds the water readings from a Govee Home app export to `history.json`, only where the record has none - after an outage at the boathouse (see "After an outage at the boathouse"). Tests: `test_import_govee_export.js` (13): the export read however the app writes it (its columns, °F or °C, times in New York's clock across daylight saving, US or day-first dates), one reading a quarter hour and only in empty ones, the readings already in `history.json` kept character for character, nothing written without `--write`, nothing fetched but the Worker's days |
 | `worker_harness.js` | For the tests: the real Worker (`../camera/cloudflare_worker.js`) with an in-memory R2 - ranges, lists and deletes as R2 has them - and served on 127.0.0.1 |
 
 ## Water readings: the Worker first
@@ -66,6 +67,9 @@ is downloaded only when it is needed:
 
 - the Worker's days do not hold a reading in every morning the rules read -
   the Worker is new, missed a morning, or is down (`rulesCoveredBy()`);
+- they have a gap of over an hour between two readings in the last week - the
+  boathouse internet was down, and the archive may have the sensor's readings
+  from then, added later from the Govee app (`recentGap()`, and below);
 - someone picks 30 days, 3 months or all time, or downloads the CSV.
 
 The first time, while that is not yet known, it is asked for alongside the
@@ -88,6 +92,31 @@ Why: GitHub's scheduler skipped or delayed so many runs that, in late October
 Cloudflare's Cron Triggers are a separate scheduler, and the Worker's `/status`
 shows the age of its last reading, so whether it keeps time can be checked at
 any moment.
+
+### After an outage at the boathouse: the readings from the Govee app
+
+When the boathouse internet is down, the sensor cannot report to Govee, and
+Govee says so ("the sensor is offline" on the Worker's `/status`). Nothing is
+recorded then - Govee's last value is not a reading of now. Govee's official
+API, which the Worker reads, gives the current reading only: no history, so
+the readings from the outage cannot be fetched from it afterwards. The Govee
+Home app keeps the sensor's history (20 days on its chart) and exports it to a
+CSV file. Whether the sensor's readings from the outage reach Govee once the
+internet is back is not documented: the app's chart for those hours shows it.
+
+If they are there: export the sensor's data from the Govee Home app, then
+
+```
+node scripts/import_govee_export.js ~/Downloads/the-export.csv
+```
+
+says what it would add - one reading per 15 minutes, only in quarter hours that
+`history.json` and the Worker have none for, never changing one already there,
+28-100 °F only. With `--write` it adds them to `history.json`; commit and push
+it, and the website and the email have them. The file's unit (°F or °C) and its
+times (New York's clock, the hour repeated in November included) are read from
+the file; `--unit F|C` and `--tz` are there if it does not say. Or send the
+file to Claude to do it.
 
 ## On a phone: fast, and with no signal
 

@@ -1458,7 +1458,7 @@ const state = {
   archiveFetchedAt: 0,      // when history.json was last downloaded (ms)
   recent: [],               // the Worker's last 16 days, as the page keeps them
   recentOk: false,          // the Worker's days came with the last history request
-  recentCovers: false,      // ... and held a reading in every morning the rules read (rulesCoveredBy)
+  recentCovers: false,      // ... and held a reading in every morning the rules read (rulesCoveredBy), with no gap in the week (recentGap)
   archiveWanted: false,     // the archive is needed for what someone asked for (a long range, the CSV)
   archiveFailed: false,     // ... and could not be downloaded the last time it was asked for
   riverEstimateTs: null,    // time of the forecast point used when riverLevelIsEstimate
@@ -1981,7 +1981,7 @@ async function loadHistoryNow() {
     const days = normalizeHistory(await fetchJsonOrNull(WATER_RECENT_URL, WORKER_TIMEOUT_MS));
     state.recentOk = days.length > 0;
     if (state.recentOk) state.recent = days;
-    state.recentCovers = state.recentOk && rulesCoveredBy(state.recent, Date.now());
+    state.recentCovers = state.recentOk && rulesCoveredBy(state.recent, Date.now()) && !recentGap(state.recent, Date.now());
     if (needed()) {
       if (!req) req = archiveRequest();
       keepArchive(await req.promise);
@@ -2563,6 +2563,28 @@ document.addEventListener('DOMContentLoaded', () => { setTimeout(initScrubber, 5
 const MORNINGS_NEEDED = 3;
 function morningsNeeded() {
   return MORNINGS_NEEDED;
+}
+
+/**
+ * Whether the Worker's days miss over an hour between two of their readings
+ * in the last week - the boathouse internet down, say. The sensor's readings
+ * from such a time, found later in the Govee app's export, are added to the
+ * archive only (scripts/import_govee_export.js), so the page then fetches the
+ * archive too, and shows them in the 24-hour and 7-day charts. A gap still
+ * open (nothing since the last reading) is not one: the archive cannot hold
+ * what came after the Worker's last reading either.
+ */
+const RECENT_GAP_MS = 60 * 60_000;
+function recentGap(hist, nowMs = Date.now()) {
+  if (!Array.isArray(hist)) return false;
+  const from = nowMs - 7 * 24 * 3600_000;
+  let prev = null;
+  for (const h of hist) {
+    if (!h || !Number.isFinite(h.ts)) continue;
+    if (h.ts >= from && prev !== null && h.ts - prev > RECENT_GAP_MS) return true;
+    prev = h.ts;
+  }
+  return false;
 }
 
 // Helper: get UTC ms for a given NY calendar date at a specific hour:minute

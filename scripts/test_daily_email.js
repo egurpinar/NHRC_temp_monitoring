@@ -2331,7 +2331,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
     ' ARCHIVE_REFRESH_MS, loadNwsAlerts, loadNwsForecast, renderNwsOutlook, nwsOutlook, nwsAlertsUrl, nwsPointsUrl,' +
     ' NWS_ALERTS_KEEP_MS, NWS_FORECAST_KEEP_MS, loadChartLibs, chartsWhenReady, watchChartsNear, chartLibs, CHART_LIBS,' +
     ' CHART_LIBS_RETRY_MS, CHART_NEAR_MARGIN, initRiverChart, get chart() { return chart; }, get riverChart() { return riverChart; },' +
-    ' __rulesCoveredBy: rulesCoveredBy, __MORNING_WINDOW: MORNING_WINDOW, ensureArchive, loadHistory };',
+    ' __rulesCoveredBy: rulesCoveredBy, __recentGap: recentGap, __MORNING_WINDOW: MORNING_WINDOW, ensureArchive, loadHistory };',
     ctx, { timeout: 10000 });
   return { site: ctx.__site, els };
 }
@@ -5104,6 +5104,43 @@ test('phone: with the Worker\'s 16 days, history.json is stopped the first time 
   assert.ok(/No temperature restrictions|COLD|Cold|restriction/i.test(p.els['rule-banner'].innerHTML), 'the rules were applied');
   for (let i = 0; i < 4; i++) { t += 15 * 60000; await p.site.loadData(); }
   assert.strictEqual(p.ctl.calls, 1, 'and never again');
+});
+
+test('outage: over an hour between two of the Worker\'s readings in the last week - the archive is wanted too; a gap still open, an older one, or a short one is not', () => {
+  const now = etDate('2026-11-16', 12).getTime();
+  const { site } = loadSite(now);
+  const gap = (from, to) => quarterHours(now, 16, () => 53, ts => ts > from && ts < to);
+  assert.strictEqual(site.__recentGap(quarterHours(now, 16), now), false, 'every quarter hour');
+  const t = etDate('2026-11-14', 8, 15).getTime();
+  assert.strictEqual(site.__recentGap(gap(t, t + 3 * HOUR), now), true, 'three hours, two days ago (the internet down)');
+  assert.strictEqual(site.__recentGap(gap(t, t + 45 * 60000), now), false, 'two readings missed: 45 minutes between two');
+  assert.strictEqual(site.__recentGap(gap(t, t + 60 * 60000), now), false, 'three missed: an hour - not more than an hour');
+  assert.strictEqual(site.__recentGap(gap(t, t + 75 * 60000), now), true, 'four missed: 75 minutes');
+  const old = now - 10 * 86400000;
+  assert.strictEqual(site.__recentGap(gap(old, old + 5 * HOUR), now), false, 'ten days ago: the 30-day chart fetches the archive anyway');
+  const edge = now - 7 * 86400000;
+  assert.strictEqual(site.__recentGap(gap(edge - 2 * HOUR, edge + 2 * HOUR), now), true, 'one that ends inside the week');
+  assert.strictEqual(site.__recentGap(gap(now - 3 * HOUR, now + 1), now), false, 'still open: nothing since - the archive has nothing either');
+  for (const bad of [null, [], 'x', [{}], [{ ts: NaN }]]) assert.strictEqual(site.__recentGap(bad, now), false);
+});
+
+test('outage: readings added to the archive later (a Govee export) show on opening - the Worker\'s days with a gap are not taken as enough', async () => {
+  const t = etDate('2026-11-16', 12).getTime();
+  const out = [etDate('2026-11-14', 13).getTime(), etDate('2026-11-14', 18).getTime()];   // an afternoon: every morning still there
+  const worker = iso(quarterHours(t, 16, () => 64, ts => ts > out[0] && ts < out[1]));
+  const archive = iso(quarterHours(t - 2 * HOUR, 30, (ts) => (ts > out[0] && ts < out[1] ? 51 : 64)));
+  const p = archivePage(t, { worker, archive });
+  assert.strictEqual(p.site.__rulesCoveredBy(p.site.normalizeHistory(worker), t), true, 'the mornings are all there');
+  await p.site.loadData();
+  assert.deepStrictEqual([p.ctl.calls, p.ctl.aborted], [1, 0], 'the archive is downloaded, not stopped');
+  assert.strictEqual(p.site.state.recentCovers, false);
+  const inGap = p.site.state.allHistory.filter(h => h.ts > out[0] && h.ts < out[1]);
+  assert.ok(inGap.length >= 18 && inGap.every(h => h.tempF === 51), `the afternoon's readings, from the archive: ${inGap.length}`);
+  // Without the gap the archive is stopped, as before (see the first of these tests).
+  const q = archivePage(t, { worker: iso(quarterHours(t, 16, () => 64)), archive });
+  q.ctl.hold = true;
+  await q.site.loadData();
+  assert.deepStrictEqual([q.ctl.calls, q.ctl.aborted], [1, 1]);
 });
 
 test('phone: a new Worker (3 days) - the archive is downloaded and merged, as before', async () => {

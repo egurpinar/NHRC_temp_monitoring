@@ -53,6 +53,7 @@ const SUITES = [
   { name: 'timelapse_web',    cmd: ['node', 'camera/test_timelapse_web.js'], few: true },
   { name: 'build_timelapse',  cmd: ['node', 'scripts/test_build_timelapse.js'], few: true },
   { name: 'newboathouse',     cmd: ['node', 'scripts/test_newboathouse.js'] },
+  { name: 'import_govee',     cmd: ['node', 'scripts/test_import_govee_export.js'] },
   // heavy: real 1080p video through UDP - run with nothing else beside it, as
   // a busy machine drops packets the "clean" tests count.
   { name: 'snapshot_service', cmd: ['node', 'camera/test_snapshot_service.js'], few: true, heavy: true },

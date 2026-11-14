@@ -91,6 +91,7 @@ jobs:
           node scripts/run_suite.js node camera/test_timelapse_web.js || fail=1
           node scripts/run_suite.js node scripts/test_build_timelapse.js || fail=1
           node scripts/run_suite.js node scripts/test_newboathouse.js || fail=1
+          node scripts/run_suite.js node scripts/test_import_govee_export.js || fail=1
           exit $fail
 
       - name: Every suite at 1-2 AM, across daylight saving, the season's edges and the new year - with no network
