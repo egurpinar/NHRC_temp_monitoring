@@ -4,7 +4,9 @@
  * of the Worker's list of days - only well formed days, only the Worker's own
  * videos - and how the page shows them, run against a small stand-in DOM; and
  * the page's guard rails: its Content-Security-Policy (with the hashes of its
- * own scripts), no outside scripts, no HTML built from data. No network.
+ * own scripts, and one file of the site's: the season's art), no outside
+ * scripts, no HTML built from data. No network. (Its seasons themselves:
+ * scripts/test_site_theme.js, section 9.)
  *
  *   node scripts/test_newboathouse.js
  *   node scripts/test_newboathouse.js --fix-csp    after changing the page's scripts: puts their new hashes in the CSP
@@ -18,6 +20,8 @@ const crypto = require('crypto');
 
 const PAGE = path.join(__dirname, '..', 'newboathouse', 'index.html');
 const WORKER = 'https://nhrc-camera.gurpinar-emre.workers.dev';
+// The season's pixel art (8bit/seasons.js, as on the main page): the one script from a file this page may run.
+const ART = 'https://roworno.com/8bit/seasons.js';
 
 /** The page's inline scripts, in order: [{ id, text }]. */
 const scriptsOf = (html) => [...html.matchAll(/<script(?: id="([^"]*)")?>([\s\S]*?)<\/script>/g)].map((m) => ({ id: m[1], text: m[2] }));
@@ -25,7 +29,7 @@ const hashOf = (text) => `'sha256-${crypto.createHash('sha256').update(text, 'ut
 
 if (process.argv.includes('--fix-csp')) {
   const html = fs.readFileSync(PAGE, 'utf8');
-  const fixed = html.replace(/script-src [^;]*;/, `script-src ${scriptsOf(html).map((s) => hashOf(s.text)).join(' ')};`);
+  const fixed = html.replace(/script-src [^;]*;/, `script-src ${scriptsOf(html).map((s) => hashOf(s.text)).join(' ')} ${ART};`);
   fs.writeFileSync(PAGE, fixed);
   console.log(fixed === html ? 'The CSP already has the scripts\' hashes.' : 'The CSP now has the scripts\' new hashes.');
   process.exit(0);
@@ -295,7 +299,9 @@ function dom(responses, opts = {}) {
     cancelAnimationFrame: (n) => { if (frames[n - 1]) frames[n - 1] = null; },
     history: { replaceState: (a, b, h) => { location.hash = h; } },
     localStorage: { getItem: (k) => storage[k] || null, setItem: (k, v) => { storage[k] = v; } },
-    window: { addEventListener: (type, fn) => { listeners[type] = fn; }, matchMedia: (q) => ({ matches: !!(opts.reducedMotion && /reduce/.test(q)) }), innerHeight: 800 },
+    window: Object.assign({ addEventListener: (type, fn) => { listeners[type] = fn; }, matchMedia: (q) => ({ matches: !!(opts.reducedMotion && /reduce/.test(q)) }), innerHeight: 800 },
+      // opts.navy: the page's colour as the browser has drawn it (the season's, in season).
+      opts.navy === undefined ? {} : { getComputedStyle: (el) => ({ getPropertyValue: (n) => (el === docEl && n === '--navy' ? opts.navy : '') }) }),
     fetch: async (url, o) => {
       fetched.push(url);
       fetchOpts.push(o || {});
@@ -897,11 +903,24 @@ test('light and dark: the switch changes the page and remembers it for roworno.c
   assert.strictEqual(d.meta.getAttribute('content'), '#f2f5f9');
 });
 
+test('the phone\'s own bar in the page\'s colour as drawn - the season\'s, in season - or the theme\'s own when the browser cannot say', async () => {
+  const d = dom({ status: 404, body: '' }, { navy: ' #170e24' });
+  await d.startPage();
+  assert.strictEqual(d.meta.getAttribute('content'), '#170e24', 'Halloween\'s dark page');
+  for (const navy of ['', 'red', '#12345', 'url(x)', undefined]) {
+    const e = dom({ status: 404, body: '' }, { navy });
+    await e.startPage();
+    assert.strictEqual(e.meta.getAttribute('content'), '#0d1f3c', String(navy));
+    e.els['theme-toggle'].click();
+    assert.strictEqual(e.meta.getAttribute('content'), '#f2f5f9', `${navy}, light`);
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 section('3. Guard rails');
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('the Content-Security-Policy comes first, allows only this page\'s own two scripts (by hash) and the club\'s Worker', () => {
+test('the Content-Security-Policy comes first, allows only this page\'s own two scripts (by hash), the season\'s art and the club\'s Worker', () => {
   const head = html.slice(0, html.indexOf('</head>'));
   const csp = /<meta http-equiv="Content-Security-Policy" content="([^"]+)"\/>/.exec(head);
   assert.ok(csp, 'a CSP');
@@ -910,12 +929,21 @@ test('the Content-Security-Policy comes first, allows only this page\'s own two 
   assert.deepStrictEqual(rules['default-src'], ["'none'"]);
   const hashes = scriptsOf(html).map((s) => hashOf(s.text));
   assert.strictEqual(hashes.length, 2);
-  assert.deepStrictEqual(rules['script-src'], hashes,
+  assert.deepStrictEqual(rules['script-src'], hashes.concat([ART]),
     'the scripts changed: their hashes in the CSP must too - run: node scripts/test_newboathouse.js --fix-csp');
   for (const k of ['media-src', 'connect-src']) assert.deepStrictEqual(rules[k], [WORKER], k);
-  assert.deepStrictEqual(rules['img-src'], ["'self'", WORKER]);
+  // data: for the season's pictures, which 8bit/seasons.js makes in the page - it fetches nothing.
+  assert.deepStrictEqual(rules['img-src'], ["'self'", WORKER, 'data:']);
   assert.deepStrictEqual([rules['base-uri'], rules['form-action']], [["'none'"], ["'none'"]]);
-  assert.ok(!/unsafe-inline|unsafe-eval|\*/.test(rules['script-src'].join(' ')));
+  assert.ok(!/unsafe-inline|unsafe-eval|\*|'self'|data:|https:\/\/roworno\.com\/?(\s|$)|https:\/\/roworno\.com\/[^ ]*\/(\s|$)/.test(rules['script-src'].join(' ')),
+    'no inline scripts but the two, nothing from a string, no whole site or folder: one file');
+  // The one file: where the page asks for it (from roworno.com/newboathouse/), in the repository, on the site's own address.
+  const asked = /season\(root, q, '([^']+)'\);/.exec(scriptsOf(html)[0].text);
+  assert.ok(asked, 'the <head> script names the art');
+  assert.strictEqual(new URL(asked[1], 'https://roworno.com/newboathouse/').href, ART);
+  assert.strictEqual(new URL(asked[1], 'https://roworno.com/newboathouse').href, ART, 'without the last slash too');
+  assert.ok(fs.existsSync(path.join(__dirname, '..', '8bit', 'seasons.js')));
+  assert.strictEqual(fs.readFileSync(path.join(__dirname, '..', 'CNAME'), 'utf8').trim(), new URL(ART).host);
 });
 
 test('the video behind is see-through and under the one in front - never display:none, in the markup or the script', () => {
@@ -938,8 +966,13 @@ test('no script from elsewhere, no inline event handlers, and no HTML made from 
   assert.ok(!/<link[^>]+stylesheet/i.test(html), 'no outside styles');
   assert.ok(!/\son[a-z]+\s*=/i.test(html.replace(/<script[\s\S]*?<\/script>/g, '')), 'no onclick= and the like');
   assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function/.test(pageScript), 'text only');
-  const urls = [...html.matchAll(/https?:\/\/[^\s"'<>)]+/g)].map((m) => m[0]).filter((u) => !u.startsWith('http://www.w3.org/'));
-  assert.ok(urls.every((u) => u.startsWith(WORKER)), urls.join(', '));
+  // The one script added: the season's art, by the <head> script, only in a season (scripts/test_site_theme.js runs it).
+  const all = scriptsOf(html).map((s) => s.text).join('\n');
+  assert.strictEqual((all.match(/createElement\('script'\)/g) || []).length, 1);
+  assert.ok(scriptsOf(html)[0].text.includes("createElement('script')") && !pageScript.includes('createElement(\'script\')'));
+  const urls = [...html.matchAll(/https?:\/\/[^\s"'<>);]+/g)].map((m) => m[0]).filter((u) => !u.startsWith('http://www.w3.org/'));
+  assert.ok(urls.every((u) => u.startsWith(WORKER) || u === ART), urls.join(', '));
+  assert.strictEqual(urls.filter((u) => u === ART).length, 1, 'the art\'s address in the CSP, nowhere else');
 });
 
 test('the page sits beside the main page: its links and pictures are the site\'s own', () => {
@@ -956,6 +989,19 @@ test('the main page links here, under the camera\'s photo', () => {
   const card = main.slice(main.indexOf('id="camera-card"'), main.indexOf('<!-- WEATHER CARD -->'));
   assert.ok(/<a href="newboathouse\/">New boathouse: watch each day's timelapse/.test(card), card.slice(-600));
   assert.ok(card.indexOf('newboathouse/') > card.indexOf('id="camera-img"'), 'under the photo');
+});
+
+test('and from its header: a "New Boathouse Timelapse" button, under the motto on the right - the same tab, the same site', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const header = main.slice(main.indexOf('<div class="header">'), main.indexOf('<button type="button" id="theme-toggle"'));
+  const links = [...header.matchAll(/<a class="timelapse-btn"([^>]*)>([\s\S]*?)<\/a>/g)];
+  assert.strictEqual(links.length, 1);
+  assert.strictEqual(links[0][1], ' href="newboathouse/"', 'nothing else on it: no new tab');
+  assert.strictEqual(links[0][2].replace(/<svg[\s\S]*?<\/svg>/, ''), 'New Boathouse Timelapse', 'its name, and an icon screen readers skip');
+  assert.ok(/<svg [^>]*aria-hidden="true"/.test(links[0][2]));
+  assert.ok(header.indexOf('The Stroke of the Oar Strengthens the Spirit') < header.indexOf('class="timelapse-btn"'), 'under the motto');
+  assert.strictEqual(new URL('newboathouse/', 'https://roworno.com/').href, 'https://roworno.com/newboathouse/', 'this page');
+  assert.strictEqual(new URL('newboathouse/', 'https://roworno.com/?8bit&season=halloween').href, 'https://roworno.com/newboathouse/', 'from the 8-bit page too');
 });
 
 test('the dock photo carries the club\'s logo, top right, as the timelapse does - in the photo\'s own box, so it goes when the photo does', () => {

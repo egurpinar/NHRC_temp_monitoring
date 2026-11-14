@@ -57,18 +57,19 @@
     return '';
   }
   /**
-   * The season, on every page - its colours (SEASONS and 8-BIT SEASONS below)
-   * and its pixel art (8bit/seasons.js, fetched only then): the one on the
+   * The season, on every page - its colours (the SEASONS styles) and its
+   * pixel art (8bit/seasons.js, at src, fetched only then): the one on the
    * club's calendar, or the one named in the address, to see it on any day
-   * (?season=halloween; season=none: none).
+   * (?season=halloween; season=none: none). Word for word the same in
+   * index.html and newboathouse/index.html (scripts/test_site_theme.js checks).
    */
-  function season(root, q) {
+  function season(root, q, src) {
     try {
       var m = /(^|&)season=([a-z0-9]*)(&|$)/.exec(q);
       var s = m ? m[2] : seasonOn(new Date());
       if (/^(halloween|thanksgiving|christmas|newyear|easter|july4)$/.test(s)) {
         var art = document.createElement('script');
-        art.src = '8bit/seasons.js';
+        art.src = src;
         art.async = true;
         // Not there (no signal, say): the year-round look, not an empty space above the header.
         art.onerror = function () { root.removeAttribute('data-season'); };
@@ -83,7 +84,7 @@
   // as the address says so - never remembered, so the next visit is as before.
   if (/(^|&)8bit(=|&|$)/.test(q)) {
     root.setAttribute('data-theme', '8bit');
-    season(root, q);
+    season(root, q, '8bit/seasons.js');
     return;
   }
   var t = null;
@@ -92,7 +93,7 @@
     t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   }
   root.setAttribute('data-theme', t);
-  season(root, q);
+  season(root, q, '8bit/seasons.js');
 })();
 </script>
 
@@ -365,8 +366,19 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .header-text h1{font-family:var(--fserif);font-size:clamp(1.1rem,3.5vw,1.45rem);font-weight:700;color:var(--gold);}
 .header-text p{font-size:0.75rem;color:var(--muted);margin-top:3px;letter-spacing:.04em;text-transform:uppercase;}
 .header-text .location{font-size:0.73rem;color:var(--muted);margin-top:2px;font-style:italic;}
-.header-motto{margin-left:auto;text-align:right;font-family:var(--fserif);font-style:italic;font-size:.75rem;color:var(--muted);line-height:1.5;display:none;}
+.header-motto{text-align:right;font-family:var(--fserif);font-style:italic;font-size:.75rem;color:var(--muted);line-height:1.5;display:none;}
 @media(min-width:600px){.header-motto{display:block;}}
+/* The right of the header: the motto, and under it the way to the new
+   boathouse's timelapse - on a phone, where there is no motto, the button
+   alone, on the right under the club's name. */
+.header-side{margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;gap:10px;}
+.timelapse-btn{display:inline-flex;align-items:center;gap:7px;min-height:36px;padding:7px 14px;border-radius:999px;
+  background:var(--navy2);color:var(--gold);border:1px solid var(--border);font-family:var(--fsans);font-size:.75rem;font-weight:600;
+  line-height:1.2;text-decoration:none;white-space:nowrap;transition:border-color .15s;}
+.timelapse-btn:hover{border-color:var(--gold);}
+.timelapse-btn:focus-visible{outline:3px solid var(--focus);outline-offset:2px;}
+.timelapse-btn svg{width:12px;height:12px;display:block;flex-shrink:0;}
+@media (prefers-reduced-motion: reduce){.timelapse-btn{transition:none;}}
 /* LIGHT / DARK SWITCH - top right of the header: the sun in dark mode (to
    switch to light), the moon in light mode. 44px: an easy target for a thumb.
    On a phone the club's name always sits below the logo, so the switch has the
@@ -499,6 +511,10 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .rp-caution{background:rgba(240,180,41,.15);color:var(--caution);border:1px solid rgba(240,180,41,.3);}
 .rp-danger{background:rgba(224,62,62,.15);color:var(--bad);border:1px solid rgba(224,62,62,.3);}
 .river-chart-wrap{height:180px;position:relative;}
+/* A chart's canvas is 300px wide until Chart.js sizes it (it loads once the
+   card is near the screen): never wider than its box, so a 320px phone does
+   not scroll sideways in the meantime. */
+.chart-wrap canvas,.river-chart-wrap canvas{max-width:100%;}
 @media(min-width:600px){.river-chart-wrap{height:220px;}}
 .flood-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(var(--ink),.06);}
 .flood-cell{background:var(--navy3);border-radius:8px;padding:8px 4px;text-align:center;}
@@ -680,6 +696,12 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
   box-shadow:4px 4px 0 var(--px-shadow);text-decoration:none;}
 :root[data-theme="8bit"] .exit-8bit:hover{background:var(--px-line);color:var(--px-screen);}
 :root[data-theme="8bit"] .exit-8bit:focus-visible{outline:3px solid var(--focus);outline-offset:6px;}
+/* The timelapse button, as the way back is drawn. */
+:root[data-theme="8bit"] .timelapse-btn{min-height:36px;padding:0 12px;font-family:var(--fpixel);font-size:8px;line-height:1.5;font-weight:400;
+  color:var(--white);background:var(--px-screen);border:2px solid var(--px-line);box-shadow:4px 4px 0 var(--px-shadow);transition:none;}
+:root[data-theme="8bit"] .timelapse-btn:hover{background:var(--px-line);color:var(--px-screen);}
+:root[data-theme="8bit"] .timelapse-btn:focus-visible{outline:3px solid var(--focus);outline-offset:6px;}
+:root[data-theme="8bit"] .timelapse-btn svg{shape-rendering:crispEdges;}
 /* Boxes. */
 :root[data-theme="8bit"] .summary-tile,:root[data-theme="8bit"] .rowing-status-card,:root[data-theme="8bit"] .river-card,:root[data-theme="8bit"] .mini-card,:root[data-theme="8bit"] .chart-card,:root[data-theme="8bit"] .weather-card,
 :root[data-theme="8bit"] #error-view{border:4px solid var(--px-line);box-shadow:4px 4px 0 var(--px-shadow);}
@@ -750,6 +772,9 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
    Halloween and Easter (the same four brightness steps). */
 :root[data-season] #app{padding-top:100px;}
 @media(max-width:599px){:root[data-season] #app{padding-top:76px;}}
+/* And room under the timelapse button for the things on the header's line,
+   where the button is the header's last row (a phone, the 8-bit page). */
+:root[data-season] .header-side{margin-bottom:8px;}
 :root[data-theme="8bit"][data-season="july4"] body{background-color:#fff7ef;
   background-image:linear-gradient(90deg,rgba(214,51,58,.5) 50%,transparent 0),linear-gradient(rgba(214,51,58,.5) 50%,transparent 0);background-size:16px 16px;}
 :root[data-theme="8bit"][data-season="halloween"] .leaflet-tile{filter:url(#px-tones-halloween);}
@@ -778,9 +803,13 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
         </a>
       </div>
     </div>
-    <div class="header-motto">
-      Pulsus Remorum Fit Spiritus Fortis<br/>
-      <span style="font-size:.68rem;color:var(--muted);">The Stroke of the Oar Strengthens the Spirit</span>
+    <div class="header-side">
+      <div class="header-motto">
+        Pulsus Remorum Fit Spiritus Fortis<br/>
+        <span style="font-size:.68rem;color:var(--muted);">The Stroke of the Oar Strengthens the Spirit</span>
+      </div>
+      <!-- The new boathouse's timelapse (newboathouse/index.html). -->
+      <a class="timelapse-btn" href="newboathouse/"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>New Boathouse Timelapse</a>
     </div>
     <!-- Light / dark. Its name says what it does next; the script keeps it so. -->
     <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Switch to light mode" title="Switch to light mode">

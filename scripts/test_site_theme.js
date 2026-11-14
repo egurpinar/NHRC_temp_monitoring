@@ -29,6 +29,13 @@
  *     then, and drawn: where, more on a wide screen, hidden from screen
  *     readers, never in the way of a tap, still when motion is turned down,
  *     snow only in winter.
+ *  9. The New Boathouse page in season: the season code in its <head> word
+ *     for word the main page's, run on the same days; the main page's colours
+ *     for every name it uses, readable where it uses them; the art from the
+ *     same file; the same room above its header.
+ * 10. The header's right side: the motto and, under it, the "New Boathouse
+ *     Timelapse" button - its place, size, focus ring and colours in every
+ *     theme and season; and no chart's canvas wider than its box.
  *
  * Before release (October 2026) the page was also checked in a real browser
  * engine, both themes, at widths from 320 to 900px: every element's real
@@ -38,6 +45,12 @@
  * text at least 5.6:1, nothing wider than a 320px screen. Its seasons too, each
  * on the live page: 199 pieces of text, at least 4.56:1 (Christmas's "No"),
  * nothing wider than 320px, nothing on the header's line over its words.
+ * The New Boathouse page in season too, under its own Content-Security-Policy
+ * (the art loaded, other files of the site refused): 84 pieces of text, at
+ * least 4.76:1 in every season, light and dark; nothing wider than 320px.
+ * And the timelapse button from 320 to 1280px wide, dark, light and 8-bit, in
+ * every season: under the motto, its right edge with the motto's (alone on
+ * the right on a phone), clear of the switch and of the header's line.
  *
  * Run: node scripts/test_site_theme.js
  */
@@ -680,6 +693,7 @@ test('seasons on both pages: statuses keep their colours\' meaning (green, yello
 });
 
 // The <head> script, run on a given moment: what it sets on <html>, and what it fetches.
+// opts.script: another page's (the New Boathouse page's, section 9).
 const INIT = new vm.Script(initSrc);
 function headAt(iso, search = '?8bit', opts = {}) {
   const t = Date.parse(iso);
@@ -689,7 +703,7 @@ function headAt(iso, search = '?8bit', opts = {}) {
   const IntlAway = Object.assign(Object.create(Intl), {
     DateTimeFormat: function (locale, o) { return new Intl.DateTimeFormat(locale, Object.assign({ timeZone: 'Asia/Tokyo' }, o)); },
   });
-  INIT.runInNewContext({
+  (opts.script || INIT).runInNewContext({
     Date: At, Intl: IntlAway, location: { search },
     localStorage: { getItem: (k) => (k === 'nhrc-theme' ? opts.stored || null : null), setItem: (k, v) => writes.push([k, v]) },
     window: { matchMedia: (q) => ({ matches: q === '(prefers-color-scheme: light)' && !!opts.light }) },
@@ -825,7 +839,8 @@ test('the room kept above the header is the scene\'s size in 8bit/seasons.js, on
   assert.strictEqual(uses.length, (CSS_ALL.match(/\[data-season/g) || []).length);
   assert.ok(uses.length >= 20);
   for (const u of uses) assert.ok(/:root\[data-theme="(8bit|dark|light)"\]$/.test(u) || /(^|\n):root$/.test(u), `a season rule without its theme: ${u}`);
-  assert.strictEqual(uses.filter(u => /(^|\n):root$/.test(u)).length, 2, 'only the room, wide and narrow');
+  assert.strictEqual(uses.filter(u => /(^|\n):root$/.test(u)).length, 3, 'only the room above the header, wide and narrow, and under the timelapse button');
+  assert.ok(CSS_ALL.includes('\n:root[data-season] .header-side{margin-bottom:8px;}'));
   // The main script - the one the daily email reuses - knows nothing of seasons.
   assert.ok(!/data-season|seasons\.js/.test(mainSrc));
 });
@@ -1086,6 +1101,200 @@ test('in the page: drawn once the page is there, for the season <html> names - a
   const q = run('halloween');
   q.p.app.children = [];
   assert.doesNotThrow(() => q.p.doc.listeners.DOMContentLoaded.forEach(f => f()));
+});
+
+section('9. The New Boathouse page in season (newboathouse/index.html)');
+
+const nbHtml = fs.readFileSync(path.join(__dirname, '..', 'newboathouse', 'index.html'), 'utf8');
+const nbInit = (/<script id="theme-init">([\s\S]*?)<\/script>/.exec(nbHtml) || [])[1] || '';
+const NB_INIT = new vm.Script(nbInit);
+const NB_CSS = nbHtml.slice(nbHtml.indexOf('<style>'), nbHtml.indexOf('</style>'));
+/** The season code of a <head> script: Easter, the calendar and season(), its doc comments with it. */
+function seasonCode(src) {
+  const a = src.indexOf('  /** Easter Sunday in year y'), s = src.indexOf('  function season(root, q, src) {');
+  const b = s < 0 ? -1 : src.indexOf('\n  }\n', s);
+  return a < 0 || b < 0 ? null : src.slice(a, b + 4);
+}
+/** The colours a selector sets in a page's CSS (its first rule with exactly that selector). */
+function varsIn(css, selector) {
+  const m = new RegExp(`(?:^|\\n)${selector.replace(/[[\]().*+?^$|\\]/g, '\\$&')}\\{([^}]*)\\}`).exec(css);
+  assert.ok(m, `${selector} not found`);
+  return Object.fromEntries([...m[1].matchAll(/--([a-z0-9-]+):([^;]+);/g)].map(v => [v[1], v[2].trim()]));
+}
+/** A season's colours on the New Boathouse page, as seasonBlock() reads the main page's. */
+function nbSeasonBlock(name, theme) {
+  const m = new RegExp(`(?:^|\\n|,)(:root\\[data-theme="${theme}"\\]\\[data-season="${name}"\\][^{]*)\\{([^}]*)\\}`).exec(NB_CSS);
+  assert.ok(m, `no colours for ${name} (${theme}) on the New Boathouse page`);
+  return { selector: m[1], vars: Object.fromEntries([...m[2].matchAll(/--([a-z0-9-]+):([^;]+);/g)].map(v => [v[1], v[2].trim()])), body: m[2] };
+}
+// [what, foreground, [backgrounds, bottom first], the minimum] - where the New Boathouse page puts each colour.
+const NB_PAIRS = [
+  ['the title and the way back', 'gold', ['navy'], 4.5], ['the title, under the glow at the top', 'gold', ['navy', 'glow-blue'], 4.5],
+  ['text on a card', 'white', ['navy2'], 4.5], ['grey text on a card', 'muted', ['navy2'], 4.5], ['a label on a card', 'gold', ['navy2'], 4.5],
+  ['a day\'s name on its button', 'white', ['navy3'], 4.5], ['a day\'s length on its button', 'muted', ['navy3'], 4.5],
+  ['the speed chosen: the page\'s colour on gold', 'navy', ['gold'], 4.5], ['a problem', 'bad', ['navy2'], 4.5],
+  ['the switch\'s icon', 'gold', ['navy2'], 3.0], ['the chosen day\'s frame', 'gold', ['navy2'], 3.0],
+  ['the focus ring on the page', 'focus', ['navy'], 3.0], ['the focus ring on a card', 'focus', ['navy2'], 3.0],
+];
+
+test('the New Boathouse page: the season code in its <head> word for word the main page\'s, the art the same file of the site', () => {
+  const main = seasonCode(initSrc), nb = seasonCode(nbInit);
+  assert.ok(main && nb, 'both pages have it');
+  assert.ok(main.includes('function easter(y)') && main.includes('function seasonOn(now)') && main.includes("art.src = src;"), 'all of it');
+  assert.strictEqual(nb, main, 'change the season code on both pages - scripts/test_newboathouse.js --fix-csp then updates the New Boathouse page\'s CSP');
+  // The art's address, from each page's own: the main page (twice: 8-bit or not) and the New Boathouse page.
+  assert.deepStrictEqual([...initSrc.matchAll(/season\(root, q, '([^']+)'\);/g)].map(m => m[1]), ['8bit/seasons.js', '8bit/seasons.js']);
+  assert.deepStrictEqual([...nbInit.matchAll(/season\(root, q, '([^']+)'\);/g)].map(m => m[1]), ['../8bit/seasons.js']);
+  assert.strictEqual(new URL('../8bit/seasons.js', 'https://roworno.com/newboathouse/').href, new URL('8bit/seasons.js', 'https://roworno.com/').href);
+  assert.ok(!/<script[^>]*seasons\.js/.test(nbHtml), 'never from the markup: everyone would fetch it all year');
+  // A browser with little of this (no address, no storage, no matchMedia, no way to add a script): light or dark, no error.
+  const attrs = {};
+  assert.doesNotThrow(() => vm.runInNewContext(nbInit, { window: {}, document: { documentElement: { setAttribute: (n, val) => { attrs[n] = val; } } } }));
+  assert.strictEqual(attrs['data-theme'], 'dark');
+});
+
+test('the New Boathouse page in season on the same days as the main page, in the visitor\'s light or dark; one named in its address on any day; the art fetched only then, the year-round look if it cannot be', () => {
+  const nb = (iso, search = '', o = {}) => headAt(iso, search, Object.assign({ script: NB_INIT }, o));
+  const wrong = [];
+  for (let ms = Date.UTC(2026, 0, 1); ms < Date.UTC(2032, 0, 1); ms += 864e5) {
+    const noon = new Date(ms + 17 * 3600e3).toISOString();
+    const want = headAt(noon, '').season, got = nb(noon).season;
+    if (got !== want) wrong.push(`${noon}: ${got} (main page: ${want})`);
+  }
+  assert.deepStrictEqual(wrong, []);
+  assert.strictEqual(new Set([...Array(365)].map((_, i) => nb(new Date(Date.UTC(2027, 0, 1) + i * 864e5 + 17 * 3600e3).toISOString()).season)).size, 7,
+    'all six seasons and none, in a year');
+  // Midnight in New York, not the visitor's (Tokyo's) or the server's.
+  assert.deepStrictEqual([nb('2026-10-15T03:59:00Z').season, nb('2026-10-15T04:00:00Z').season], [undefined, 'halloween']);
+  assert.deepStrictEqual([nb('2026-11-30T04:59:00Z').season, nb('2026-11-30T05:00:00Z').season], ['thanksgiving', undefined]);
+  const halloween = '2026-10-20T16:00:00Z', summer = '2027-08-10T16:00:00Z';
+  assert.deepStrictEqual(['theme', 'season'].map(k => nb(halloween)[k]), ['dark', 'halloween']);
+  assert.deepStrictEqual(['theme', 'season'].map(k => nb(halloween, '', { light: true })[k]), ['light', 'halloween']);
+  assert.deepStrictEqual(['theme', 'season'].map(k => nb(halloween, '', { stored: 'light' })[k]), ['light', 'halloween']);
+  assert.deepStrictEqual(['theme', 'season'].map(k => nb(halloween, '', { stored: 'dark', light: true })[k]), ['dark', 'halloween'], 'the choice made on either page');
+  assert.deepStrictEqual(['theme', 'season'].map(k => nb(summer)[k]), ['dark', undefined]);
+  for (const s of SEASON_NAMES) assert.strictEqual(nb(summer, `?season=${s}`).season, s, s);
+  assert.strictEqual(nb(halloween, '?season=none').season, undefined);
+  for (const s of ['xmas', '']) assert.strictEqual(nb(halloween, `?season=${s}`).season, undefined, `not a season's name: ${s}`);
+  assert.strictEqual(nb(halloween, '?season=%3Cscript%3E').season, 'halloween', 'not even a name: the day\'s own season');
+  assert.strictEqual(nb(halloween, '?8bit').theme, 'dark', 'no 8-bit look on this page');
+  assert.deepStrictEqual(nb(halloween, '?season=easter').writes, [], 'nothing remembered');
+  const r = nb(halloween);
+  assert.deepStrictEqual(r.fetched.map(e => [e.tag, e.src, e.async]), [['script', '../8bit/seasons.js', true]]);
+  assert.deepStrictEqual(nb(summer).fetched, [], 'not out of season');
+  r.fetched[0].onerror();
+  assert.deepStrictEqual([r.theme, r.season], ['dark', undefined], 'not there (or not allowed): the year-round look, no empty room');
+  const failed = nb(halloween, '', { appendThrows: true });
+  assert.deepStrictEqual([failed.theme, failed.season], ['dark', undefined]);
+});
+
+test('the New Boathouse page in season: the main page\'s colours for every name it uses - its year-round ones too - readable where it uses them', () => {
+  const base = varsIn(NB_CSS, ':root'), light = Object.assign({}, base, varsIn(NB_CSS, ':root[data-theme="light"]'));
+  const NAMES = Object.keys(base);
+  assert.ok(NAMES.length >= 12, NAMES.join(' '));
+  for (const k of NAMES) assert.strictEqual(base[k], DARK[k], `--${k}, dark`);
+  for (const k of NAMES) assert.strictEqual(light[k], LIGHT[k], `--${k}, light`);
+  for (const name of SEASON_NAMES) {
+    for (const theme of ['dark', 'light']) {
+      const own = nbSeasonBlock(name, theme), main = seasonBlock(name, theme), at = `${name} (${theme})`;
+      const want = Object.fromEntries(Object.entries(main.vars).filter(([k]) => NAMES.includes(k)));
+      assert.deepStrictEqual(own.vars, want, `${at}: the main page's values, for each name this page uses, and no others`);
+      assert.strictEqual(own.selector, main.selector, `${at}: the same rule (the New Year with Christmas)`);
+      assert.strictEqual(/color-scheme:light;/.test(own.body), theme === 'light', `${at}: a ${theme} page`);
+    }
+  }
+  const short = [];
+  for (const name of [null].concat(SEASON_NAMES)) {
+    for (const theme of ['dark', 'light']) {
+      const v = Object.assign({}, theme === 'dark' ? base : light, name ? nbSeasonBlock(name, theme).vars : {});
+      for (const [what, fg, bgs, min] of NB_PAIRS) {
+        const r = ratio(v[fg], bgs.map(b => layer(v, b)));
+        if (r < min) short.push(`${name || 'year-round'} (${theme}), ${what}: ${v[fg]} = ${r.toFixed(2)}:1, needs ${min}:1`);
+      }
+    }
+  }
+  assert.deepStrictEqual(short, []);
+  // Every rule naming a season names its theme - but the room above the header.
+  const uses = [...NB_CSS.matchAll(/([^{}]*?)\[data-season/g)].map(m => m[1].split(/[,{}]/).pop().trim());
+  for (const u of uses) assert.ok(/:root\[data-theme="(dark|light)"\]$/.test(u) || /(^|\n):root$/.test(u), `a season rule without its theme: ${u}`);
+  assert.strictEqual(uses.filter(u => /(^|\n):root$/.test(u)).length, 2, 'only the room, wide and narrow');
+});
+
+test('the New Boathouse page in season: the same room above its header, its header\'s line in the header\'s padding, a scene above the header and one at the end', () => {
+  for (const rule of ['\n:root[data-season] #app{padding-top:100px;}', '@media(max-width:599px){:root[data-season] #app{padding-top:76px;}}']) {
+    assert.ok(CSS_ALL.includes(rule) && NB_CSS.includes(rule), rule);
+  }
+  // Placed as on the main page: the scene in #app, the line in .header - both positioned - the column 900px wide, above what crosses behind it.
+  assert.ok(/\n#app\{position:relative;z-index:1;max-width:900px;/.test(NB_CSS));
+  const header = /\n\.header\{([^}]*)\}/.exec(NB_CSS)[1];
+  assert.ok(/position:relative/.test(header));
+  const pad = +/padding-bottom:(\d+)px/.exec(header)[1];
+  assert.ok(pad >= ART.GROUND.height, `the header's line (${ART.GROUND.height}px) in its padding (${pad}px), clear of its words`);
+  assert.ok(/body::before\{[^}]*z-index:0;pointer-events:none;/.test(NB_CSS));
+  // The markup: #app, the header first in it, no disclaimer.
+  assert.ok(/<body>\s*<div id="app">\s*<header class="header">/.test(nbHtml));
+  assert.ok(!nbHtml.includes('id="site-disclaimer"'));
+  // Drawn on a page of that shape.
+  for (const season of SEASON_NAMES) {
+    const p = artPage();
+    p.app.children = [];
+    p.app.appendChild(p.header);
+    p.app.appendChild(p.doc.createElement('main'));
+    ART.build(p.doc, season, { width: 1024, random: () => 0.5 });
+    assert.deepStrictEqual(p.app.children.map(e => e.className || e.tagName), [`px-scene px-${season}`, 'header', 'MAIN', `px-scene px-bottom px-${season}`], season);
+    assert.ok(p.header.children.some(e => e.className === 'px-ground'), `${season}: the header's line`);
+  }
+});
+
+section('10. The header\'s right side: the motto and the timelapse button');
+
+/** The declarations of the first rule with exactly this selector in index.html's CSS. */
+function ruleOf(selector) {
+  const m = new RegExp(`(?:^|\\n)${selector.replace(/[[\]().*+?^$|\\]/g, '\\$&')}\\{([^}]*)\\}`).exec(CSS_ALL);
+  assert.ok(m, `${selector} not found`);
+  return m[1];
+}
+
+test('the timelapse button: under the motto on the right (on a phone, where there is no motto, alone on the right), one line, an easy tap, a focus ring', () => {
+  const header = html.slice(html.indexOf('<div class="header">'), html.indexOf('<button type="button" id="theme-toggle"'));
+  assert.ok(/<div class="header-side">\s*<div class="header-motto">\s*Pulsus Remorum Fit Spiritus Fortis<br\/>\s*<span[^>]*>The Stroke of the Oar Strengthens the Spirit<\/span>\s*<\/div>\s*<!--[^>]*-->\s*<a class="timelapse-btn" href="newboathouse\/"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor"><path d="[^"]+"\/><\/svg>New Boathouse Timelapse<\/a>\s*<\/div>\s*<!--/.test(header),
+    header.slice(-800));
+  assert.ok(/^margin-left:auto;display:flex;flex-direction:column;align-items:flex-end;/.test(ruleOf('.header-side')), 'the column keeps right, its button under the motto, at the right edge');
+  assert.ok(!/margin-left/.test(ruleOf('.header-motto')), 'the column keeps right, not the motto');
+  assert.ok(/display:none/.test(ruleOf('.header-motto')) && /\.header-motto\{display:block;\}/.test(CSS_ALL), 'the motto only on a wider screen');
+  for (const sel of ['.header-side', '.timelapse-btn']) assert.ok(!new RegExp(`\\${sel}\\{[^}]*display:none`).test(CSS_ALL), `${sel} is never hidden`);
+  const btn = ruleOf('.timelapse-btn');
+  assert.ok(/min-height:36px;/.test(btn) && /white-space:nowrap;/.test(btn) && /text-decoration:none;/.test(btn), btn);
+  assert.ok(/^outline:3px solid var\(--focus\);/.test(ruleOf('.timelapse-btn:focus-visible')));
+  assert.ok(/\.timelapse-btn\{transition:none;\}/.test(CSS_ALL.slice(CSS_ALL.indexOf('@media (prefers-reduced-motion: reduce){.timelapse-btn'))), 'still for people who turn motion off');
+});
+
+test('the timelapse button: the club\'s gold on the card colour, as the light/dark switch - drawn as "Normal view" is on the 8-bit page - readable in every theme and season', () => {
+  assert.ok(/background:var\(--navy2\);color:var\(--gold\);border:1px solid var\(--border\);/.test(ruleOf('.timelapse-btn')));
+  assert.ok(/color:var\(--white\);background:var\(--px-screen\);border:2px solid var\(--px-line\);box-shadow:4px 4px 0 var\(--px-shadow\);/.test(ruleOf(':root[data-theme="8bit"] .timelapse-btn')));
+  assert.ok(/font-family:var\(--fpixel\);font-size:8px;/.test(ruleOf(':root[data-theme="8bit"] .timelapse-btn')), 'in the pixel font');
+  assert.ok(/^background:var\(--px-line\);color:var\(--px-screen\);/.test(ruleOf(':root[data-theme="8bit"] .timelapse-btn:hover')));
+  assert.ok(/^outline:3px solid var\(--focus\);outline-offset:6px;/.test(ruleOf(':root[data-theme="8bit"] .timelapse-btn:focus-visible')));
+  const short = [];
+  const need = (at, what, fg, bg, min) => { const r = ratio(fg, [bg]); if (r < min) short.push(`${at}, ${what}: ${fg} on ${bg} = ${r.toFixed(2)}:1, needs ${min}:1`); };
+  for (const name of [null].concat(SEASON_NAMES)) {
+    for (const theme of ['dark', 'light']) {
+      const v = name ? PALETTE(name, theme) : THEMES[theme], at = `${name || 'year-round'} (${theme})`;
+      need(at, 'its words', v.gold, v.navy2, 4.5);
+      need(at, 'its focus ring', v.focus, v.navy, 3);
+    }
+    const v = name ? PALETTE(name, '8bit') : EIGHT, at = `${name || 'year-round'} (8-bit)`;
+    need(at, 'its words', v.white, v['px-screen'], 4.5);
+    need(at, 'its words, pointed at', v['px-screen'], v['px-line'], 4.5);
+    need(at, 'its frame', v['px-line'], v['px-screen'], 3);
+  }
+  assert.deepStrictEqual(short, []);
+});
+
+test('a chart\'s canvas is never wider than its box - before Chart.js has sized it, too (a 320px phone does not scroll sideways)', () => {
+  assert.ok(CSS_ALL.includes('\n.chart-wrap canvas,.river-chart-wrap canvas{max-width:100%;}'));
+  assert.ok(html.includes('<div class="chart-wrap" id="chart-wrap"><canvas id="temp-chart"></canvas></div>'));
+  assert.ok(/<div class="river-chart-wrap">\s*<canvas id="river-chart"><\/canvas>/.test(html));
 });
 
 // ── run ──
