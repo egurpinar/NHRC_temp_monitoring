@@ -569,6 +569,122 @@ test('an empty snapshot buffer counts as a failure', async () => {
     /empty snapshot/);
 });
 
+/**
+ * A camera as ring-client-api 14 makes one: its data is the device list's
+ * record from when the service started, updated only by updateData(), and
+ * getSnapshot() refuses without asking Ring when that record says offline,
+ * or that motion recording is off (ring-camera.js, checkIfSnapshotsAreBlocked).
+ */
+class LibraryCamera {
+  constructor(data) { this.data = data; this.id = data.id; this.snapshots = 0; }
+  get name() { return this.data.description; }
+  get isOffline() { return this.data.alerts.connection === 'offline'; }
+  get snapshotsAreBlocked() { return this.data.settings.motion_detection_enabled === false; }
+  updateData(d) { this.data = d; }
+  async getSnapshot() {
+    if (this.snapshotsAreBlocked) throw new Error(`Motion detection is disabled for ${this.name}, which prevents snapshots from this camera.`);
+    if (this.isOffline) throw new Error(`Cannot fetch snapshot for ${this.name} because it is offline`);
+    this.snapshots++;
+    return JPEG_FRAME;
+  }
+}
+const JPEG_FRAME = Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0xFF, 0xD9]);
+const ringRecord = (id, name, connection, motion = true) => ({ id, description: name, alerts: { connection },
+  settings: { motion_detection_enabled: motion } });
+/** An account as Ring's servers see it now: getCameras() the objects made at the start, fetchRingDevices() today's list. */
+function ringAccount(cameras, today) {
+  const a = { lists: 0, cameras };
+  a.getCameras = async () => cameras;
+  a.fetchRingDevices = async () => { a.lists++; return { allCameras: today() }; };
+  return a;
+}
+
+test('a camera the start-up copy still calls offline is asked about afresh - photographed once Ring says it is back (14-17 Nov 2026)', async () => {
+  // The service started during the outage: both cameras offline in its copy.
+  const dock = new LibraryCamera(ringRecord(1, 'Dock Wired', 'offline'));
+  const lot = new LibraryCamera(ringRecord(2, 'Downstream Lot', 'offline'));
+  let now = [ringRecord(1, 'Dock Wired', 'online'), ringRecord(2, 'Downstream Lot', 'online')];
+  const api = ringAccount([dock, lot], () => now);
+  const cfg = { ...baseCfg, retries: 3, retryDelaySeconds: 0 };
+  // As it was: refused for good, Ring never asked.
+  await assert.rejects(() => S.captureWithRetry(dock, cfg), /Cannot fetch snapshot for Dock Wired because it is offline/);
+  assert.strictEqual(api.lists, 0);
+  // Now: Ring asked once, the photo taken.
+  const buf = await S.captureWithRetry(dock, cfg, () => S.refreshCameraState(api));
+  assert.ok(Buffer.compare(buf, JPEG_FRAME) === 0);
+  assert.strictEqual(api.lists, 1);
+  assert.strictEqual(lot.isOffline, false, 'every camera held is brought up to date - the backup, the timelapse\'s - by the one list');
+  // Back to normal: no more asking.
+  await S.captureWithRetry(dock, cfg, () => S.refreshCameraState(api));
+  await S.captureWithRetry(lot, cfg, () => S.refreshCameraState(api));
+  assert.strictEqual(api.lists, 1, 'no request to Ring while the copy says online');
+  // Offline for real: the same error as ever, one list per capture, never a crash.
+  now = [ringRecord(1, 'Dock Wired', 'offline'), ringRecord(2, 'Downstream Lot', 'offline')];
+  await S.refreshCameraState(api);
+  const before = api.lists;
+  await assert.rejects(() => S.captureWithRetry(dock, cfg, () => S.refreshCameraState(api)), /because it is offline/);
+  assert.strictEqual(api.lists - before, 1, 'once for the capture, not once per attempt');
+});
+
+test('motion recording off in the start-up copy is asked about afresh too; a camera that looks fine costs no request', async () => {
+  const dock = new LibraryCamera(ringRecord(1, 'Dock Wired', 'online', false));
+  const api = ringAccount([dock], () => [ringRecord(1, 'Dock Wired', 'online', true)]);
+  const cfg = { ...baseCfg, retries: 1, retryDelaySeconds: 0 };
+  await S.captureWithRetry(dock, cfg, () => S.refreshCameraState(api));
+  assert.strictEqual([api.lists, dock.snapshots].join(), '1,1');
+  // A stand-in camera with no such state (the other tests' fakes): never asked about.
+  let asked = 0;
+  await S.captureWithRetry({ getSnapshot: async () => JPEG_FRAME }, cfg, () => { asked++; });
+  await S.captureWithRetry({ get isOffline() { throw new Error('no data'); }, getSnapshot: async () => JPEG_FRAME }, cfg, () => { asked++; });
+  assert.strictEqual(asked, 0);
+  // A refresh that throws (a stand-in; refreshCameraState itself never does): the capture goes on.
+  const off = new LibraryCamera(ringRecord(3, 'Dock Wired', 'offline'));
+  await assert.rejects(() => S.captureWithRetry(off, cfg, async () => { throw new Error('boom'); }), /because it is offline/);
+});
+
+test('asking Ring afresh never throws: a slow, failing or odd answer leaves the cameras as they were, and says why', async () => {
+  const dock = new LibraryCamera(ringRecord(1, 'Dock Wired', 'offline'));
+  const answers = [
+    ['slow', { getCameras: async () => [dock], fetchRingDevices: () => new Promise(() => {}) }, /took longer than/],
+    ['failing', { getCameras: async () => [dock], fetchRingDevices: async () => { throw new Error('ECONNRESET'); } }, /ECONNRESET/],
+    ['no list', { getCameras: async () => [dock], fetchRingDevices: async () => ({}) }, null],
+    ['no cameras', { getCameras: async () => { throw new Error('signed out'); }, fetchRingDevices: async () => ({ allCameras: [] }) }, /signed out/],
+    ['someone else\'s camera', { getCameras: async () => [dock], fetchRingDevices: async () => ({ allCameras: [ringRecord(9, 'Other', 'online')] }) }, null],
+  ];
+  for (const [what, api, said] of answers) {
+    let n;
+    const lines = await captureLogs(async () => { n = await S.refreshCameraState(api, 50); });
+    assert.strictEqual(n, 0, what);
+    assert.strictEqual(dock.isOffline, true, `${what}: unchanged`);
+    if (said) assert.ok(lines.some((l) => /Could not ask Ring whether the cameras are online/.test(l) && said.test(l)), `${what}: ${lines.join(' | ')}`);
+  }
+  assert.strictEqual(await S.refreshCameraState(ringAccount([dock], () => [ringRecord(1, 'Dock Wired', 'online')])), 1);
+  assert.strictEqual(S.RING_REFRESH_TIMEOUT_MS, 20000);
+});
+
+test('the main Pi and the standby pass the fresh asking to every capture they run', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'snapshot_service.js'), 'utf8');
+  const body = (name) => { const a = src.indexOf(`async function ${name}(`); return src.slice(a, src.indexOf('\n}\n', a)); };
+  /** Each runCycle(...) call in a text, to its closing parenthesis. */
+  const callsIn = (text) => {
+    const out = [];
+    for (let i = text.indexOf('runCycle('); i >= 0; i = text.indexOf('runCycle(', i + 1)) {
+      let depth = 0, j = i + 'runCycle'.length;
+      for (; j < text.length; j++) { if (text[j] === '(') depth++; else if (text[j] === ')' && --depth === 0) break; }
+      out.push(text.slice(i, j + 1).replace(/\s+/g, ' '));
+    }
+    return out;
+  };
+  for (const name of ['main', 'runStandby']) {
+    const calls = callsIn(body(name));
+    assert.ok(calls.length >= (name === 'main' ? 4 : 2), `${name}: ${calls.length} captures`);
+    for (const c of calls) assert.ok(/, cycleOpts\)$/.test(c), `${name}: ${c}`);
+  }
+  assert.ok(/const cycleOpts = \{ refresh: \(\) => refreshCameraState\(api\) \};/.test(body('main')));
+  assert.ok(/const cycleOpts = \{ refresh: \(\) => \(api \? refreshCameraState\(api\) : Promise\.resolve\(0\)\) \};/.test(body('runStandby')));
+  assert.ok(/buf = await captureWithRetry\(camera, cfg, opts\.refresh\);/.test(body('runCycle')));
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 section('6. Cycle behaviour');
 // ═══════════════════════════════════════════════════════════════════════════

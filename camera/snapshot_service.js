@@ -1250,8 +1250,11 @@ async function connectRing(cfg = CONFIG) {
     // truthy (api.js: `if (!cameraStatusPollingSeconds) return`), so leaving it
     // unset happens to work — but it makes us dependent on a library default we
     // do not control, and the battery here has no margin for a version that
-    // changes it. We need snapshots and nothing else; polling would add regular
-    // traffic for status we never read.
+    // changes it. The one status we do need - is a camera online - the library
+    // reads before each snapshot from the device list it fetched here at the
+    // start; captureWithRetry asks Ring afresh when that copy says offline
+    // (refreshCameraState). Without that, a camera offline at the start stayed
+    // "offline" for good (November 2026).
     cameraStatusPollingSeconds: 0,
     // Likewise: no alarm/location mode polling. This account exists only to
     // pull frames from one shared camera.
@@ -1356,14 +1359,62 @@ async function pickCamera(api, cfg = CONFIG) {
   return primary || backup;
 }
 
+/** How long to wait for Ring's device list when asking it afresh whether the cameras are online. */
+const RING_REFRESH_TIMEOUT_MS = 20 * 1000;
+
+/**
+ * Ring's own word, fetched afresh, on whether the cameras are online - written
+ * into every camera this program holds. ring-client-api refuses a snapshot from
+ * a camera that its copy of Ring's device list calls offline
+ * (camera.data.alerts.connection), and with status polling off (connectRing)
+ * it fetches that list only once, when the service starts. So a camera that
+ * was offline then stayed "offline" after it came back: from 14 to 17 November
+ * 2026 the website had no photo for three days while both cameras were live in
+ * the Ring app, until the service was restarted. One request for the
+ * account's device list, to Ring's servers - the cameras are not woken.
+ * Resolves how many cameras it updated; never throws.
+ */
+async function refreshCameraState(api, timeoutMs = RING_REFRESH_TIMEOUT_MS) {
+  try {
+    const cameras = await api.getCameras();
+    const list = await withTimeout(Promise.resolve().then(() => api.fetchRingDevices()), timeoutMs, 'Ring\'s device list');
+    const fresh = list && Array.isArray(list.allCameras) ? list.allCameras : [];
+    let updated = 0;
+    for (const camera of cameras || []) {
+      const data = fresh.find((d) => d && camera && d.id === camera.id);
+      if (data && typeof camera.updateData === 'function') { camera.updateData(data); updated++; }
+    }
+    return updated;
+  } catch (e) {
+    logError(`Could not ask Ring whether the cameras are online: ${describeCause(e)}`);
+    return 0;
+  }
+}
+
+/**
+ * Whether ring-client-api would refuse a snapshot without asking Ring: the
+ * camera offline, or motion recording off (it needs that for snapshots), in
+ * its copy of Ring's device list. False for anything it cannot tell.
+ */
+function refusedWithoutAsking(camera) {
+  try { return camera.isOffline === true || camera.snapshotsAreBlocked === true; } catch (e) { return false; }
+}
+
 /**
  * Captures one snapshot, retrying on failure.
  *
  * Battery cameras cannot produce a snapshot while recording, so a capture that
  * lands during a motion event fails outright. Retrying after a short delay
  * recovers the cycle instead of leaving the site with a stale frame.
+ *
+ * refresh: asks Ring afresh whether the cameras are online
+ * (refreshCameraState) - only when ring-client-api's copy says this one is
+ * offline, so in normal running it costs nothing.
  */
-async function captureWithRetry(camera, cfg = CONFIG) {
+async function captureWithRetry(camera, cfg = CONFIG, refresh = null) {
+  if (refresh && refusedWithoutAsking(camera)) {
+    try { await refresh(); } catch (e) { /* refreshCameraState never throws; a stand-in might */ }
+  }
   let lastErr;
   for (let attempt = 1; attempt <= cfg.retries; attempt++) {
     try {
@@ -1383,7 +1434,7 @@ async function captureWithRetry(camera, cfg = CONFIG) {
 // Main loop
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function runCycle(camera, cfg = CONFIG, now = new Date(), fetchImpl = globalThis.fetch, role = 'primary') {
+async function runCycle(camera, cfg = CONFIG, now = new Date(), fetchImpl = globalThis.fetch, role = 'primary', opts = {}) {
   if (!isWithinActiveHours(now, cfg)) {
     log('Outside active hours — skipping capture.');
     return false;
@@ -1395,7 +1446,7 @@ async function runCycle(camera, cfg = CONFIG, now = new Date(), fetchImpl = glob
     new Error(`${stage.toUpperCase()} stage (${role} "${camera.name}") — ${describeCause(e)}`), { stage });
   let buf;
   try {
-    buf = await captureWithRetry(camera, cfg);
+    buf = await captureWithRetry(camera, cfg, opts.refresh);
   } catch (e) {
     throw fail('capture', e);
   }
@@ -3365,6 +3416,9 @@ async function main() {
 
   const api = await connectRing();
   const { primary, backup } = await pickCameras(api);
+  // A camera that ring-client-api's start-up copy calls offline is asked
+  // about afresh before each capture (refreshCameraState).
+  const cycleOpts = { refresh: () => refreshCameraState(api) };
   if (primary) log(`Primary camera: "${primary.name}" — ${describeTimetable(CONFIG)}`);
   if (backup) {
     log(`Backup camera: "${backup.name}" — only after ${CONFIG.backup.afterMisses} missed primary captures in a row; `
@@ -3376,12 +3430,12 @@ async function main() {
     // A deliberate test: no window. The frame shows on the website, labelled
     // as the backup, until the next primary capture replaces it.
     await runCycle(backup, Object.assign({}, backupCfg, { activeStartHour: 0, activeEndHour: 0 }),
-      new Date(), globalThis.fetch, 'backup');
+      new Date(), globalThis.fetch, 'backup', cycleOpts);
     process.exit(0);
   }
   if (args.includes('--once')) {
     if (!primary) throw new Error('No primary camera found.');
-    await runCycle(primary, CONFIG, new Date(), globalThis.fetch, 'primary');
+    await runCycle(primary, CONFIG, new Date(), globalThis.fetch, 'primary', cycleOpts);
     process.exit(0);
   }
 
@@ -3413,8 +3467,8 @@ async function main() {
     hasPrimary: !!primary,
     hasBackup: !!backup,
     cycle: (role) => role === 'backup'
-      ? runCycle(backup, backupCfg, new Date(), globalThis.fetch, 'backup')
-      : runCycle(primary, CONFIG, new Date(), globalThis.fetch, 'primary'),
+      ? runCycle(backup, backupCfg, new Date(), globalThis.fetch, 'backup', cycleOpts)
+      : runCycle(primary, CONFIG, new Date(), globalThis.fetch, 'primary', cycleOpts),
     afterSlot: timelapse && !intervalOn(CONFIG) ? () => timelapse.maybeCapture() : undefined,
     heartbeat: createMainCheckIn(CONFIG, {
       now: () => new Date(), identity, checkIn: (body) => checkIn(body, CONFIG),
@@ -3441,6 +3495,8 @@ async function runStandby(identity, backupCfg, onTimelapse = () => {}) {
   let api = null;
   let cams = { primary: null, backup: null, timelapse: null };
   let tick = null;
+  // As on the main Pi: a camera the start-up copy calls offline is asked about afresh - on whichever sign-in is current.
+  const cycleOpts = { refresh: () => (api ? refreshCameraState(api) : Promise.resolve(0)) };
   const drop = (a) => { try { if (a && typeof a.disconnect === 'function') a.disconnect(); } catch (e) { /* gone */ } };
   const standby = createStandby(CONFIG, {
     now: () => new Date(),
@@ -3509,8 +3565,8 @@ async function runStandby(identity, backupCfg, onTimelapse = () => {}) {
     wakeOffsetMs: STANDBY_WAKE_OFFSET_MS,
     maxSleepSeconds: CHECK_IN_SECONDS,
     cycle: (role) => role === 'backup'
-      ? runCycle(cams.backup, backupCfg, new Date(), globalThis.fetch, 'backup')
-      : runCycle(cams.primary, CONFIG, new Date(), globalThis.fetch, 'primary'),
+      ? runCycle(cams.backup, backupCfg, new Date(), globalThis.fetch, 'backup', cycleOpts)
+      : runCycle(cams.primary, CONFIG, new Date(), globalThis.fetch, 'primary', cycleOpts),
     afterSlot: timelapse && !intervalOn(CONFIG) ? () => timelapse.maybeCapture() : undefined,
   });
   await tick();
@@ -3521,7 +3577,7 @@ async function runStandby(identity, backupCfg, onTimelapse = () => {}) {
 
 module.exports = {
   CONFIG, validateConfig, serviceProblems, timelapseProblems, isWithinActiveHours,
-  readToken, writeToken, uploadSnapshot, captureWithRetry, runCycle,
+  readToken, writeToken, uploadSnapshot, captureWithRetry, runCycle, refreshCameraState, refusedWithoutAsking, RING_REFRESH_TIMEOUT_MS,
   describeCause, hostOf, parseHourSetting, formatHourSetting,
   intervalForTime, localHour, describeSchedule,
   localSeconds, windowGeometry, captureSlot, secondsUntilNextSlot, createScheduler,

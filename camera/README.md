@@ -1317,6 +1317,15 @@ journalctl -u nhrc-camera -n 50           # what the Pi has been doing
 - **401 on upload** — the secret on the Pi and in the Worker disagree.
 - **Snapshots repeatedly fail** — often the camera recording during motion.
   Persistent failure usually means a dead battery or lost Wi-Fi.
+- **"Cannot fetch snapshot ... because it is offline" while the Ring app shows
+  the camera live** — ring-client-api decides "offline" from Ring's device
+  list as it was when the service started, and never fetches it again by
+  itself. From 14 to 17 November 2026 a service started during an internet
+  outage at the boathouse took no photo for three days after the cameras came
+  back. Since then it asks Ring afresh before each capture while it believes a
+  camera is offline (`refreshCameraState`), so it picks a camera up within one
+  capture (15 minutes) of Ring showing it online. On a Pi still running older
+  code: `sudo systemctl restart nhrc-camera`.
 - **Authentication fails after working** — the token was not persisted. Check
   permissions on the token file, re-run `ring-auth-cli`, and if push
   notifications are also broken, delete the client in Ring Control Center first.
