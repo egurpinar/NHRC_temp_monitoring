@@ -149,8 +149,13 @@ test('one reading a quarter hour - the first in it - and only where history.json
   assert.deepStrictEqual(added[0], { ts: '2026-11-14T13:30:00Z', tempC: 11.65, tempF: 52.97 });
   assert.ok(added.every((e) => /^\d{4}-\d\d-\d\dT\d\d:(00|15|30|45):00Z$/.test(e.ts)), 'the first of each quarter hour');
   assert.ok(!added.some((e) => e.ts.startsWith('2026-11-14T16:15')), 'the Worker\'s quarter hour is left alone');
-  assert.deepStrictEqual(G.runsOf(added).map((x) => [new Date(x.from).toISOString(), x.count]),
-    [['2026-11-14T13:30:00.000Z', 11], ['2026-11-14T16:30:00.000Z', 2]]);
+  assert.deepStrictEqual(G.runsOf(added, G.filledSlots(history, worker)).map((x) => [new Date(x.from).toISOString(), x.count]),
+    [['2026-11-14T13:30:00.000Z', 11], ['2026-11-14T16:30:00.000Z', 2]], 'two gaps: the Worker\'s reading comes between');
+  // An export every 20 minutes leaves one quarter hour in four empty: still one gap. Over 45 minutes apart: two.
+  const every20 = G.toAdd(G.readExport([HEADER].concat(rows('2026-11-14T13:00:00Z', 10, 20)).join('\n'), { now: NOW }).readings, new Set());
+  assert.deepStrictEqual(G.runsOf(every20).map((x) => x.count), [10]);
+  const apart = G.toAdd(G.readExport([HEADER, '2026-11-14 08:00:00,53', '2026-11-14 08:50:00,53'].join('\n'), { now: NOW }).readings, new Set());
+  assert.deepStrictEqual(G.runsOf(apart).map((x) => x.count), [1, 1]);
   // A quarter hour whose first minute is missing: its next.
   const late = G.readExport([HEADER, '2026-11-14 12:07:00,52', '2026-11-14 12:09:00,51'].join('\n'), { now: NOW });
   assert.deepStrictEqual(G.toAdd(late.readings, new Set()).map((e) => [e.ts, e.tempF]), [['2026-11-14T17:07:00Z', 52]]);
@@ -187,7 +192,8 @@ section('3. The command');
 test('a look first: what it would add, in New York time, and nothing written; --write adds it; the same export again adds nothing', async () => {
   const dir = tmpdir();
   const hist = path.join(dir, 'history.json'), worker = path.join(dir, 'recent.json'), csv = path.join(dir, 'export.csv');
-  const before = jqLike([{ ts: '2026-11-14T13:00:19Z', tempC: 11.75, tempF: 53.16 }, { ts: '2026-11-14T13:15:19Z', tempC: 11.75, tempF: 53.16 }]);
+  const before = jqLike([{ ts: '2026-11-14T13:00:19Z', tempC: 11.75, tempF: 53.16 }, { ts: '2026-11-14T13:15:19Z', tempC: 11.75, tempF: 53.16 },
+    { ts: '2026-11-14T20:00:19Z', tempC: 11.5, tempF: 52.7 }]);
   fs.writeFileSync(hist, before);
   fs.writeFileSync(worker, JSON.stringify([{ ts: '2026-11-14T16:15:19Z', tempC: 11.6, tempF: 52.88 }]));
   fs.writeFileSync(csv, [HEADER].concat(rows('2026-11-14T13:00:00Z', 240)).join('\n'));
@@ -195,18 +201,44 @@ test('a look first: what it would add, in New York time, and nothing written; --
   const look = await run(base);
   assert.strictEqual(look.code, 0);
   assert.ok(/export\.csv: 240 readings in °F, Sat, Nov 14, 8:00 AM to Sat, Nov 14, 11:59 AM/.test(look.out), look.out);
-  assert.ok(/Would add 13 readings where the record has none:\n  Sat, Nov 14, 8:30 AM to Sat, Nov 14, 11:00 AM: 11 readings\n  Sat, Nov 14, 11:30 AM to Sat, Nov 14, 11:45 AM: 2 readings/.test(look.out), look.out);
+  assert.ok(/Would add 13 readings where the record has none, in 2 gaps:\n  Sat, Nov 14, 8:30 AM to Sat, Nov 14, 11:00 AM: 11 readings\n  Sat, Nov 14, 11:30 AM to Sat, Nov 14, 11:45 AM: 2 readings/.test(look.out), look.out);
   assert.ok(/Nothing written/.test(look.out));
   assert.strictEqual(fs.readFileSync(hist, 'utf8'), before, 'untouched');
   const write = await run(base.concat('--write'));
-  assert.ok(/Adding 13 readings/.test(write.out) && /history\.json now has 15 readings/.test(write.out), write.out);
+  assert.ok(/Adding 13 readings/.test(write.out) && /history\.json now has 16 readings/.test(write.out), write.out);
   const after = JSON.parse(fs.readFileSync(hist, 'utf8'));
-  assert.strictEqual(after.length, 15);
+  assert.strictEqual(after.length, 16);
   assert.ok(after.every((e, i) => i === 0 || Date.parse(e.ts) > Date.parse(after[i - 1].ts)), 'in time order');
   assert.ok(!fs.existsSync(`${hist}.tmp`), 'no file left over');
   const again = await run(base.concat('--write'));
   assert.ok(/Nothing to add/.test(again.out), again.out);
-  assert.strictEqual(JSON.parse(fs.readFileSync(hist, 'utf8')).length, 15);
+  assert.strictEqual(JSON.parse(fs.readFileSync(hist, 'utf8')).length, 16);
+});
+
+test('many gaps: the longest of them by name, and how many more, on how many days', async () => {
+  const dir = tmpdir();
+  const hist = path.join(dir, 'history.json'), csv = path.join(dir, 'export.csv');
+  // A reading of the archive's every other hour for three days; the export every 20 minutes throughout.
+  const archive = [];
+  for (let h = 0; h <= 72; h += 2) archive.push({ ts: new Date(Date.parse('2026-11-10T05:00:19Z') + h * 3600000).toISOString().replace('.000', ''), tempC: 12, tempF: 53.6 });
+  fs.writeFileSync(hist, jqLike(archive));
+  fs.writeFileSync(csv, [HEADER].concat(rows('2026-11-10T05:00:00Z', 3 * 72, 20)).join('\n'));
+  const r = await run([csv, '--history', hist, '--no-worker', '--now', new Date(NOW).toISOString()]);
+  assert.ok(/in 3\d gaps - the 12 longest:\n(  .+\n){12}  and 2\d shorter gaps, on [34] days in all from Tue, Nov 10, 12:20 AM to /.test(r.out), r.out);
+});
+
+test('nothing within two hours of history.json\'s newest reading - the archiver adds there, so the two commits merge; the rest is added', async () => {
+  const dir = tmpdir();
+  const hist = path.join(dir, 'history.json'), csv = path.join(dir, 'export.csv');
+  // The archive ends at 3:00 PM; the export runs from 8 AM to past 4 PM, every 20 minutes, with nothing in the archive between.
+  fs.writeFileSync(hist, jqLike([{ ts: '2026-11-14T13:00:19Z', tempC: 11.75, tempF: 53.16 }, { ts: '2026-11-14T20:00:19Z', tempC: 11.5, tempF: 52.7 }]));
+  fs.writeFileSync(csv, [HEADER].concat(rows('2026-11-14T13:00:00Z', 25, 20)).join('\n'));
+  const r = await run([csv, '--history', hist, '--no-worker', '--now', new Date(NOW).toISOString(), '--write']);
+  assert.ok(/Left for later: anything after Sat, Nov 14, 1:00 PM, two hours before history\.json's newest reading \(Sat, Nov 14, 3:00 PM\)/.test(r.out), r.out);
+  const added = JSON.parse(fs.readFileSync(hist, 'utf8')).map((e) => e.ts).filter((t) => t > '2026-11-14T13:00:19Z' && t < '2026-11-14T20:00:19Z');
+  assert.ok(added.length && added.every((t) => Date.parse(t) < Date.parse('2026-11-14T18:00:19Z')), added.join(' '));
+  assert.strictEqual(added.length, 15, '8:20 AM to 1:00 PM, every 20 minutes (8:00 shares the 8:00 reading\'s quarter hour)');
+  assert.strictEqual(G.ARCHIVER_MARGIN_MS, 2 * 3600000);
 });
 
 test('several exports at once; the Worker left out on request; bad options, files and history.json said plainly', async () => {

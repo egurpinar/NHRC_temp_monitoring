@@ -15,7 +15,9 @@
  * quarter hour that neither history.json nor the Worker's last 16 days has a
  * reading in. Nothing already recorded is changed or removed. Readings outside
  * 28-100 F, or in the future, are left out, as the Worker and fetch_temp.sh
- * leave them out. Without --write it only says what it would add.
+ * leave them out. Nor anything within two hours of history.json's newest
+ * reading: the archiver adds there (ARCHIVER_MARGIN_MS). Without --write it
+ * only says what it would add.
  *
  *   node scripts/import_govee_export.js ~/Downloads/export.csv           # what it would add
  *   node scripts/import_govee_export.js ~/Downloads/export.csv --write   # add it to history.json
@@ -37,6 +39,17 @@ const fs = require('fs');
 const path = require('path');
 
 const SLOT_MS = 15 * 60_000;
+/**
+ * The newest readings are the archiver's: scripts/fetch_temp.sh adds the
+ * Worker's to the end of history.json every 15 minutes, on GitHub. Nothing is
+ * added within this much of history.json's newest reading, so a commit of an
+ * import never changes the end of the file that the archiver is changing too,
+ * and git merges the two. Gaps there are filled by running it again later,
+ * after a pull.
+ */
+const ARCHIVER_MARGIN_MS = 2 * 3_600_000;
+/** The gaps listed one by one; with more, the longest of them and a count of the rest. */
+const SHOWN_RUNS = 12;
 const PLAUSIBLE_F = [28, 100];   // as camera/cloudflare_worker.js and scripts/fetch_temp.sh
 const WORKER_RECENT_URL = 'https://nhrc-camera.gurpinar-emre.workers.dev/water/recent.json';
 const WORKER_TIMEOUT_MS = 15_000;
@@ -274,13 +287,20 @@ function toAdd(readings, filled) {
     .map((r) => ({ ts: isoZ(r.at), tempC: cut2((r.tempF - 32) * 5 / 9), tempF: cut2(r.tempF) }));
 }
 
-/** The added readings as runs of quarter hours one after another: [{ from, to, count }]. */
-function runsOf(added) {
+/**
+ * The added readings as the gaps they fill: [{ from, to, count }]. One gap
+ * runs on while no reading already recorded comes between two added ones, and
+ * none of them is more than 45 minutes from the next (an export every 20
+ * minutes leaves one quarter hour in four empty).
+ */
+function runsOf(added, filled = new Set()) {
   const runs = [];
   for (const e of added) {
     const t = Date.parse(e.ts), slot = Math.floor(t / SLOT_MS), last = runs[runs.length - 1];
-    if (last && slot - last.slot <= 1) { last.to = t; last.count++; last.slot = slot; }
-    else runs.push({ from: t, to: t, count: 1, slot });
+    let apart = !last || t - last.to > 45 * 60_000;
+    for (let s = last ? last.slot + 1 : slot; !apart && s < slot; s++) apart = filled.has(s);
+    if (apart) runs.push({ from: t, to: t, count: 1, slot });
+    else { last.to = t; last.count++; last.slot = slot; }
   }
   return runs.map(({ from, to, count }) => ({ from, to, count }));
 }
@@ -380,15 +400,30 @@ async function main(argv, log = console.log) {
       (r.readings.length ? `, ${nyTime(r.readings[0].at, o.tz)} to ${nyTime(r.readings[r.readings.length - 1].at, o.tz)}` : ''));
     for (const [why, n] of Object.entries(r.rejected)) log(`  left out ${n}: ${why}, e.g. ${r.examples[why]}`);
   }
-  const added = toAdd(readings, filledSlots(history, worker));
+  const newest = history.reduce((m, h) => { const t = h && Date.parse(h.ts); return Number.isFinite(t) && t > m ? t : m; }, -Infinity);
+  const until = Number.isFinite(newest) ? newest - ARCHIVER_MARGIN_MS : Infinity;
+  if (readings.some((r) => r.at >= until)) {
+    log(`Left for later: anything after ${nyTime(until, o.tz)}, two hours before history.json's newest reading (${nyTime(newest, o.tz)}) - `
+      + 'the archiver adds the newest readings there. Pull and run again later to fill those.');
+    readings = readings.filter((r) => r.at < until);
+  }
+  const filled = filledSlots(history, worker);
+  const added = toAdd(readings, filled);
   if (!added.length) {
     log('Nothing to add: every quarter hour the export covers already has a reading.');
     return 0;
   }
   const plural = (n) => `${n} reading${n === 1 ? '' : 's'}`;
-  log(`${o.write ? 'Adding' : 'Would add'} ${plural(added.length)} where the record has none:`);
-  for (const run of runsOf(added)) {
-    log(`  ${run.count === 1 ? nyTime(run.from, o.tz) : `${nyTime(run.from, o.tz)} to ${nyTime(run.to, o.tz)}`}: ${plural(run.count)}`);
+  const runs = runsOf(added, filled);
+  const say = (run) => log(`  ${run.count === 1 ? nyTime(run.from, o.tz) : `${nyTime(run.from, o.tz)} to ${nyTime(run.to, o.tz)}`}: ${plural(run.count)}`);
+  log(`${o.write ? 'Adding' : 'Would add'} ${plural(added.length)} where the record has none, in ${runs.length} gap${runs.length === 1 ? '' : 's'}`
+    + `${runs.length > SHOWN_RUNS ? ` - the ${SHOWN_RUNS} longest:` : ':'}`);
+  if (runs.length <= SHOWN_RUNS) runs.forEach(say);
+  else {
+    runs.slice().sort((a, b) => b.count - a.count || a.from - b.from).slice(0, SHOWN_RUNS).sort((a, b) => a.from - b.from).forEach(say);
+    const days = new Set(added.map((e) => nyTime(Date.parse(e.ts), o.tz).replace(/,[^,]*$/, '')));
+    log(`  and ${runs.length - SHOWN_RUNS} shorter gaps, on ${days.size} days in all from ${nyTime(Date.parse(added[0].ts), o.tz)}`
+      + ` to ${nyTime(Date.parse(added[added.length - 1].ts), o.tz)}.`);
   }
   if (!o.write) { log('Nothing written. To add them: run again with --write, then commit and push history.json.'); return 0; }
   const tmp = `${o.history}.tmp`;
@@ -404,6 +439,6 @@ if (require.main === module) {
     process.exitCode = 1;
   });
 } else {
-  module.exports = { SLOT_MS, PLAUSIBLE_F, splitLine, findColumns, unitIn, parseTemp, zoneOffsetMin, wallToInstants,
+  module.exports = { SLOT_MS, ARCHIVER_MARGIN_MS, PLAUSIBLE_F, splitLine, findColumns, unitIn, parseTemp, zoneOffsetMin, wallToInstants,
     parseTimeParts, readExport, filledSlots, toAdd, runsOf, entrySpans, merged, args, main };
 }
