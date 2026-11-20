@@ -81,11 +81,11 @@ function section(title) {
 // normalised through JSON before structural comparison.
 function plain(v) { return JSON.parse(JSON.stringify(v)); }
 
-// Build synthetic history that guarantees a given zone is "earned" via the
-// 3-morning streak, so we can drive the pipeline into every zone deliberately.
-// Readings MUST land inside the 5:00-11:00 AM America/New_York window that
-// checkMorningStreak looks at — computed properly rather than assuming a fixed
-// UTC offset, so these tests stay correct across DST.
+// Build synthetic history that puts the water in a given zone - mornings at
+// that temperature for days on end - so we can drive the pipeline into every
+// zone deliberately. Readings MUST land inside the 5:00-11:00 AM
+// America/New_York window the rules read (rulesMornings) — computed properly
+// rather than assuming a fixed UTC offset, so these tests stay correct across DST.
 function historyAtTemp(tempF, days = 10) {
   const out = [];
   const now = new Date();
@@ -308,17 +308,17 @@ test('SAFETY every river label names exactly the boats the flood table restricts
 section('4. Cold-water zones');
 // ═══════════════════════════════════════════════════════════════════════════
 
-test('freezing water forces winter zone regardless of warm history', () => {
-  const hist = historyAtTemp(75); // warm history
-  const digest = M.computeDigest(logic, { raw: makeRaw(35), history: hist },
-    { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() },
-    { available: false }, new Date());
-  // Zone is the safety-relevant output and must always be winter below 40F.
-  // (The `immediate` flag is intentionally NOT asserted here: it depends on
-  // whether the run happens inside the 5-11am ET window, because the live cold
-  // reading is folded into today's morning streak. Both outcomes are correct
-  // site behaviour; parity with index.html is covered by the section-2 matrix.)
-  assert.strictEqual(digest.zone, 'winter', 'below 40F must be Winter Rowing');
+test('freezing water: Winter Rowing once the mornings have been below 40°F - and a freezing reading alone moves nothing', () => {
+  const river = { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: Date.now() };
+  // Mornings below 40 for days: Winter Rowing, whatever the reading now.
+  for (const live of [35, 45, 75]) {
+    const digest = M.computeDigest(logic, { raw: makeRaw(live), history: historyAtTemp(35) }, river, { available: false }, new Date());
+    assert.strictEqual(digest.zone, 'winter', `mornings below 40F, reading now ${live}F`);
+  }
+  // Warm mornings and one freezing reading (a sensor glitch, say): three
+  // mornings in a row decide, either way (Safety Committee, November 2026).
+  const digest = M.computeDigest(logic, { raw: makeRaw(35), history: historyAtTemp(75) }, river, { available: false }, new Date());
+  assert.strictEqual(digest.zone, 'normal', 'one reading is not three mornings');
 });
 
 test('every zone the email reports is a zone the site defines', () => {
@@ -2322,7 +2322,7 @@ function loadSite(nowMs, fetchImpl, opts = {}) {
   };
   els.__sandbox = sandbox;
   const ctx = vmT.createContext(sandbox);
-  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, getEffectiveLevel, morningsNeeded, wind24, renderWind24, wireWind24, smoothPath, renderFogOutlook, renderFloodGrid, renderDashboard,' +
+  vmT.runInContext(src + '\n;this.__site = { state, renderRowingStatus, getEffectiveLevel, morningsNeeded, zoneChangeText, rulesMornings, sideOfLine, wind24, renderWind24, wireWind24, smoothPath, renderFogOutlook, renderFloodGrid, renderDashboard,' +
     ' renderSummaryWeather, renderSummaryRiver, renderRiverCardUnavailable, updateStats, loadWeather, loadRiverData,' +
     ' loadData, loadHistory, refreshAll, loadFogOutlook, loadCameraSnapshot, historyNeedsRefresh, pickRiverLevel,' +
     ' fetchWithTimeout, renderRiverCard, renderChartData, updateFreshnessWarnings, updateInfoBar, isCameraBackupAsleep,' +
@@ -3758,7 +3758,7 @@ test('camera: an image that never settles cannot block later refreshes', async (
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-section('13d2. Lifting a zone: three mornings in a row, all year');
+section('13d2. Zones change after three mornings in a row on the other side of a line - warmer or colder');
 // ═══════════════════════════════════════════════════════════════════════════
 
 // A New York wall-clock time as UTC ms (the same offset rule index.html uses).
@@ -3778,8 +3778,13 @@ function mornings(list, extra = []) {
   return out.sort((a, b) => a.ts - b.ts);
 }
 // The rules card at a given moment, with a live reading taken 5 minutes earlier.
+// One page for all of them, its clock moved to each moment: a page per card
+// added half a gigabyte to the suite, too much for four time-travel runs at once.
+let cardClock = 0, cardSite = null;
 function cardAt(nowMs, history, liveF) {
-  const { site, els } = loadSite(nowMs);
+  cardClock = nowMs;
+  if (!cardSite) cardSite = loadSite(() => cardClock);
+  const { site, els } = cardSite;
   site.state.allHistory = history;
   site.state.lastTempF = liveF;
   site.state.lastFetchedAt = new Date(nowMs - 5 * 60000);
@@ -3792,20 +3797,28 @@ function cardAt(nowMs, history, liveF) {
   };
   return { rule: els['rule-banner'].innerHTML, notes: els['rowing-notes'].innerHTML, status, eff: site.getEffectiveLevel(liveF), site };
 }
-// The email's logic with its clock pinned: the sandbox takes Date when it loads.
-function emailZoneAt(nowMs, history, liveF) {
-  const RealDate = Date;
-  class FixedDate extends RealDate {
-    constructor(...a) { if (a.length) super(...a); else super(nowMs); }
-    static now() { return nowMs; }
+// The email's digest at a moment: its logic loaded once, on a clock moved to
+// each moment (the sandbox takes Date when it loads).
+let emailClock = 0, emailLogic = null;
+function emailAt(nowMs, history, liveF) {
+  emailClock = nowMs;
+  if (!emailLogic) {
+    const RealDate = Date;
+    class ClockDate extends RealDate {
+      constructor(...a) { if (a.length) super(...a); else super(emailClock); }
+      static now() { return emailClock; }
+    }
+    global.Date = ClockDate;
+    try { emailLogic = M.loadSiteLogic(); } finally { global.Date = RealDate; }
   }
-  global.Date = FixedDate;
-  let L;
-  try { L = M.loadSiteLogic(); } finally { global.Date = RealDate; }
-  const d = M.computeDigest(L, { raw: makeRaw(liveF, new Date(nowMs - 5 * 60000)), history },
+  const d = M.computeDigest(emailLogic, { raw: makeRaw(liveF, new Date(nowMs - 5 * 60000)), history },
     { level: 3, isEstimate: false, failed: false, stale: false, ageMs: 0, lastObsTs: nowMs }, { available: false }, new Date(nowMs));
-  return d.zone;
+  return { d, html: M.renderEmailHtml(d) };
 }
+function emailZoneAt(nowMs, history, liveF) {
+  return emailAt(nowMs, history, liveF).d.zone;
+}
+const text = (html) => html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
 
 test('three mornings in a row, every day of the year', () => {
   const { site } = loadSite(Date.now());
@@ -3815,96 +3828,234 @@ test('three mornings in a row, every day of the year', () => {
   }
 });
 
-// The mornings around the Cold Water announcement of October 22, 2026 (peak
-// 5-11 AM readings from history.json), and what the days after might bring.
-const ANNOUNCED = [[2026, 10, 17, 62.2], [2026, 10, 18, 59.6], [2026, 10, 19, 60.4], [2026, 10, 20, 59.4], [2026, 10, 21, 58.9], [2026, 10, 22, 59.1]];
+// The highest reading of each morning, 5-11 AM, from history.json (November 2026).
+const NOV = [[2026, 11, 6, 57.16], [2026, 11, 7, 56.66], [2026, 11, 8, 56.03], [2026, 11, 9, 55.4], [2026, 11, 10, 54.93],
+  [2026, 11, 11, 55.05], [2026, 11, 12, 54.93], [2026, 11, 13, 54.37], [2026, 11, 14, 53.24], [2026, 11, 15, 54.26],
+  [2026, 11, 16, 52.77], [2026, 11, 17, 52.34], [2026, 11, 18, 51.54], [2026, 11, 19, 50.77]];
+// November 20, 2026 as the sensor read it: just below 50°F from 6:45 to 8:45 AM.
+const NOV20 = [[5, 0, 50.28], [6, 30, 50.03], [6, 45, 49.98], [7, 30, 49.87], [8, 30, 49.91], [8, 45, 49.85], [9, 0, 50], [9, 30, 50.07],
+  [10, 45, 50.25], [12, 0, 51.04]].map(([h, mi, t]) => [etAt(2026, 11, 20, h, mi), t]);
 
-test('Cold Water as announced on October 22, 2026: one warm morning does not lift it, nor two - three in a row do', () => {
-  const at = etAt(2026, 10, 22, 9, 0);
-  const today = cardAt(at, mornings(ANNOUNCED), 59.1);
-  assert.strictEqual(today.eff.zone, 'coldWater', 'today: the water is below 60, and so were the last three mornings');
-  const one = mornings(ANNOUNCED.concat([[2026, 10, 23, 60.5]]));
-  const c1 = cardAt(etAt(2026, 10, 23, 15, 0), one, 61.2);
-  assert.deepStrictEqual([c1.eff.zone, c1.eff.confirmed, c1.eff.needed], ['coldWater', 1, 3], 'a warm morning and a warm afternoon: still Cold Water');
-  assert.strictEqual(c1.rule.replace(/<[^>]+>/g, ''), 'COLD WATER — awaiting 3-morning confirmation to lift');
-  assert.ok(c1.notes.includes('only <strong>1 of 3 mornings</strong> confirmed so far. Need 2 more qualifying mornings.'), c1.notes);
-  assert.deepStrictEqual([c1.status('Tier 1', '1x / 2-'), c1.status('Tier 2', '1x / 2-'), c1.status('Tier 2', '2x')], ['bs-no', 'bs-no', 'bs-go'], 'the Cold Water tiers');
-  assert.strictEqual(emailZoneAt(etAt(2026, 10, 23, 15, 0), one, 61.2), 'coldWater', 'the email agrees');
-  const two = mornings(ANNOUNCED.concat([[2026, 10, 23, 60.5], [2026, 10, 24, 61]]));
-  assert.deepStrictEqual([cardAt(etAt(2026, 10, 24, 15, 0), two, 61.2).eff.zone, emailZoneAt(etAt(2026, 10, 24, 15, 0), two, 61.2)], ['coldWater', 'coldWater'], 'two: still Cold Water');
-  const three = mornings(ANNOUNCED.concat([[2026, 10, 23, 60.5], [2026, 10, 24, 61], [2026, 10, 25, 60]]));
-  const c3 = cardAt(etAt(2026, 10, 25, 15, 0), three, 61.2);
-  assert.strictEqual(c3.eff.zone, 'normal', 'three mornings in a row at 60 or more');
-  assert.ok(/No temperature restrictions \(water (&gt;|>) 60°F, 3-day confirmed\)/.test(c3.rule), c3.rule);
-  assert.strictEqual(emailZoneAt(etAt(2026, 10, 25, 15, 0), three, 61.2), 'normal', 'the email agrees');
-  // A cool morning in between starts the count again.
-  const broken = mornings(ANNOUNCED.concat([[2026, 10, 23, 60.5], [2026, 10, 24, 59.5], [2026, 10, 25, 60.5]]));
-  assert.deepStrictEqual([cardAt(etAt(2026, 10, 25, 15, 0), broken, 61.2).eff.confirmed, cardAt(etAt(2026, 10, 25, 15, 0), broken, 61.2).eff.zone], [1, 'coldWater']);
-});
-
-test('a cool morning keeps Cold Water even when the afternoon reads warmer - and the card says why', () => {
-  const now = etAt(2026, 10, 20, 15, 0);
-  const hist = mornings([[2026, 10, 16, 62], [2026, 10, 17, 62], [2026, 10, 18, 62], [2026, 10, 19, 61], [2026, 10, 20, 59.5]],
-    [[etAt(2026, 10, 20, 14, 0), 61.2]]);
-  const c = cardAt(now, hist, 61.3);
-  assert.deepStrictEqual([c.eff.zone, c.eff.immediate], ['coldWater', false]);
-  assert.strictEqual(c.rule.replace(/<[^>]+>/g, ''), 'COLD WATER — awaiting 3-morning confirmation to lift');
-  assert.ok(c.notes.includes('the latest morning reading (5–11 AM) was below 60°F — <strong>59.5°F on Tue, Oct 20</strong>. They lift after three mornings in a row at 60°F or more.'), c.notes);
-  assert.ok(!/one morning|June 1/.test(c.notes), 'no seasons in the words any more');
-  assert.ok(!/most recent mornings \(5–11 AM\) are above/.test(c.notes), 'never that the mornings are warm');
-  assert.strictEqual(c.status('Tier 1', '1x / 2-'), 'bs-no');
-  assert.strictEqual(emailZoneAt(now, hist, 61.3), 'coldWater', 'the email agrees');
-});
-
-test('a reading at or below 60°F brings Cold Water back at once', () => {
-  const now = etAt(2026, 10, 20, 8, 0);
-  const hist = mornings([[2026, 10, 17, 62], [2026, 10, 18, 62], [2026, 10, 19, 62]]);
-  for (const live of [60, 59.8]) {
+test('November 20, 2026: 49.98°F at 6:45 AM and 50.07°F at 9:30 change nothing - Cold Water all day, on the page and in the email', () => {
+  for (const [h, mi] of [[6, 50], [8, 30], [9, 31], [12, 5]]) {
+    const now = etAt(2026, 11, 20, h, mi);
+    const hist = mornings(NOV, NOV20.filter(([ts]) => ts <= now));
+    const live = NOV20.filter(([ts]) => ts <= now).pop()[1];
     const c = cardAt(now, hist, live);
-    assert.deepStrictEqual([c.eff.zone, c.eff.immediate], ['coldWater', true], String(live));
-    assert.ok(/COLD WATER restrictions apply \(water 51–60°F\)/.test(c.rule), c.rule);
-    assert.strictEqual(c.status('Tier 1', '1x / 2-'), 'bs-no');
+    assert.strictEqual(c.eff.zone, 'coldWater', `${h}:${mi} at ${live}°F`);
+    assert.strictEqual(text(c.rule), 'COLD WATER restrictions apply (water 50–60°F)');
+    assert.strictEqual(c.eff.change, null, 'no morning has been below 50°F (this one peaked at 50.28)');
+    assert.ok(!/zone-change/.test(c.notes), 'nothing about a change');
+    assert.ok(text(c.notes).includes('Zones change only after three mornings in a row on the other side of 40, 50 or 60°F'), c.notes);
+    assert.deepStrictEqual([c.status('Tier 3', '1x / 2-'), c.status('Tier 2', '2x'), c.status('Tier 1', '2x')], ['bs-go', 'bs-go', 'bs-no'], 'the Cold Water tiers');
+    const e = emailAt(now, hist, live);
+    assert.deepStrictEqual([e.d.zone, e.d.zoneChange], ['coldWater', ''], 'the email agrees');
   }
 });
 
-test('spring as well: three mornings in a row (May 2026 sat between 59 and 61°F for twelve days)', () => {
-  const now = etAt(2026, 5, 16, 9, 30);
-  const two = mornings([[2026, 5, 14, 59], [2026, 5, 15, 61], [2026, 5, 16, 63.5]]);
-  const c = cardAt(now, two, 63.6);
-  assert.deepStrictEqual([c.eff.zone, c.eff.confirmed, c.eff.needed], ['coldWater', 2, 3]);
-  assert.ok(c.notes.includes('only <strong>2 of 3 mornings</strong> confirmed so far. Need 1 more qualifying morning.'), c.notes);
-  assert.strictEqual(emailZoneAt(now, two, 63.6), 'coldWater', 'the email agrees');
-  const three = mornings([[2026, 5, 14, 61], [2026, 5, 15, 61], [2026, 5, 16, 63.5]]);
-  assert.strictEqual(cardAt(now, three, 63.6).eff.zone, 'normal');
-  assert.strictEqual(emailZoneAt(now, three, 63.6), 'normal');
-  // And in midsummer: one warm morning after a cool one lifts nothing.
+test('the water cooling past 50°F: one morning below changes nothing, nor two - the third brings the Four Oar Rule, once it is over', () => {
+  const cool = NOV.concat([[2026, 11, 20, 49.5], [2026, 11, 21, 49], [2026, 11, 22, 48.5]]);
+  const upTo = (d) => mornings(cool.filter(m => m[2] <= d));
+  // One: the 20th, seen at noon.
+  const c1 = cardAt(etAt(2026, 11, 20, 12), upTo(20), 50.4);
+  assert.deepStrictEqual([c1.eff.zone, c1.eff.change.direction, c1.eff.change.line, c1.eff.change.count], ['coldWater', 'colder', 50, 1]);
+  assert.strictEqual(c1.site.zoneChangeText(c1.eff),
+    'The latest morning was below 50°F (Fri, Nov 20: 49.5°F). The Four Oar Rule starts after 3 in a row: 2 more to go.');
+  assert.ok(/class="zone-change"[\s\S]*Colder/.test(c1.notes), 'said on the card, as a caution');
+  // Two: the 21st. Still Cold Water - its boats too.
+  const now2 = etAt(2026, 11, 21, 12);
+  const c2 = cardAt(now2, upTo(21), 50.1);
+  assert.deepStrictEqual([c2.eff.zone, c2.eff.change.count], ['coldWater', 2]);
+  assert.strictEqual(c2.site.zoneChangeText(c2.eff),
+    'The latest 2 mornings were below 50°F (Fri, Nov 20: 49.5°F; Sat, Nov 21: 49.0°F). The Four Oar Rule starts after 3 in a row: 1 more to go.');
+  assert.ok(/Fri, Nov 20[\s\S]*Sat, Nov 21/.test(c2.notes), 'the mornings, oldest first');
+  assert.strictEqual(c2.status('Tier 2', '2x'), 'bs-go');
+  const e2 = emailAt(now2, upTo(21), 50.1);
+  assert.strictEqual(e2.d.zone, 'coldWater');
+  assert.strictEqual(e2.d.zoneChange, c2.site.zoneChangeText(c2.eff), 'the email says it in the same words');
+  assert.ok(text(e2.html).includes('The latest 2 mornings were below 50&#176;F'), 'in the email itself (its degree signs are entities)');
+  // The third morning, still under way at 10 AM: not yet.
+  const c3a = cardAt(etAt(2026, 11, 22, 10), mornings(cool), 48.5);
+  assert.deepStrictEqual([c3a.eff.zone, c3a.eff.change.count], ['coldWater', 2], 'a morning counts once it is over');
+  // 11 AM: it is over - the Four Oar Rule, and its boats.
+  const now3 = etAt(2026, 11, 22, 11, 5);
+  const c3 = cardAt(now3, mornings(cool), 48.6);
+  assert.strictEqual(c3.eff.zone, 'fourOar');
+  assert.strictEqual(text(c3.rule), 'FOUR OAR RULE in effect (water 40–50°F)');
+  assert.strictEqual(c3.eff.change, null);
+  assert.deepStrictEqual([c3.status('Tier 2', '2x'), c3.status('Tier 3', '1x / 2-'), c3.status('Tier 2', '4+ / 4-')], ['bs-no', 'bs-no', 'bs-go']);
+  assert.strictEqual(emailAt(now3, mornings(cool), 48.6).d.zone, 'fourOar', 'the email agrees');
+});
+
+test('and back past 50°F: a cooler morning in between starts the count again; three in a row at 50°F or more lift the Four Oar Rule', () => {
+  const cool = NOV.concat([[2026, 11, 20, 49.5], [2026, 11, 21, 49], [2026, 11, 22, 48.5]]);
+  const back = cool.concat([[2026, 11, 23, 50.5], [2026, 11, 24, 49.5], [2026, 11, 25, 50.5], [2026, 11, 26, 51], [2026, 11, 27, 51]]);
+  const at = (d, list = back) => cardAt(etAt(2026, 11, d, 12), mornings(list.filter(m => m[2] <= d)), 51);
+  const c23 = at(23);
+  assert.deepStrictEqual([c23.eff.zone, c23.eff.change.direction, c23.eff.change.count], ['fourOar', 'warmer', 1]);
+  assert.strictEqual(c23.site.zoneChangeText(c23.eff),
+    'The latest morning was at 50°F or more (Mon, Nov 23: 50.5°F). The Four Oar Rule lifts after 3 in a row: 2 more to go.');
+  assert.ok(!/Colder/.test(c23.notes), 'warmer is not a caution');
+  assert.deepStrictEqual([at(24).eff.zone, at(24).eff.change], ['fourOar', null], 'the 24th was below 50 again: the count starts over');
+  assert.deepStrictEqual([at(26).eff.zone, at(26).eff.change.count], ['fourOar', 2]);
+  const c27 = at(27);
+  assert.deepStrictEqual([c27.eff.zone, c27.eff.change], ['coldWater', null], 'three in a row from the 25th');
+  assert.strictEqual(emailAt(etAt(2026, 11, 27, 12), mornings(back), 51).d.zone, 'coldWater');
+});
+
+// The highest morning readings around the Cold Water announcement of October 22, 2026 (history.json).
+const OCT = [[2026, 10, 10, 63.53], [2026, 10, 11, 63.24], [2026, 10, 12, 63.82], [2026, 10, 13, 63.14], [2026, 10, 14, 62.74],
+  [2026, 10, 15, 62.16], [2026, 10, 16, 62.07], [2026, 10, 17, 62.22], [2026, 10, 18, 59.64], [2026, 10, 19, 60.36],
+  [2026, 10, 20, 59.41], [2026, 10, 21, 59.19], [2026, 10, 22, 59.14]];
+
+test('the 60°F line in the fall: Cold Water came on October 22, 2026 at 11 AM - the third morning below 60 in a row', () => {
+  // Before: a reading of exactly 60.0°F at 12:39 AM on the 18th brought Cold Water at once.
+  const night = cardAt(etAt(2026, 10, 18, 1), mornings(OCT.filter(m => m[2] <= 17), [[etAt(2026, 10, 18, 0, 39), 60]]), 60);
+  assert.deepStrictEqual([night.eff.zone, night.eff.change], ['normal', null], 'a night reading moves nothing');
+  assert.strictEqual(text(night.rule), 'No temperature restrictions (water 60°F or more)');
+  // The 19th (60.4°F) broke the run of the 18th; the 20th and 21st make two.
+  const c22 = cardAt(etAt(2026, 10, 22, 9), mornings(OCT), 59.1);
+  assert.deepStrictEqual([c22.eff.zone, c22.eff.change.direction, c22.eff.change.count], ['normal', 'colder', 2]);
+  assert.strictEqual(c22.site.zoneChangeText(c22.eff),
+    'The latest 2 mornings were below 60°F (Tue, Oct 20: 59.4°F; Wed, Oct 21: 59.2°F). Cold Water restrictions start after 3 in a row: 1 more to go.');
+  const now = etAt(2026, 10, 22, 11, 5);
+  const c = cardAt(now, mornings(OCT), 59.2);
+  assert.strictEqual(c.eff.zone, 'coldWater');
+  assert.strictEqual(text(c.rule), 'COLD WATER restrictions apply (water 50–60°F)');
+  assert.deepStrictEqual([c.status('Tier 1', '1x / 2-'), c.status('Tier 2', '1x / 2-'), c.status('Tier 2', '2x')], ['bs-no', 'bs-no', 'bs-go']);
+  assert.strictEqual(emailAt(now, mornings(OCT), 59.2).d.zone, 'coldWater', 'the email agrees');
+  // One warm morning does not lift it, nor two; three in a row do.
+  const warm = OCT.concat([[2026, 10, 23, 60.5], [2026, 10, 24, 61], [2026, 10, 25, 60]]);
+  assert.deepStrictEqual([cardAt(etAt(2026, 10, 23, 15), mornings(warm.slice(0, -2)), 61.2).eff.zone, cardAt(etAt(2026, 10, 24, 15), mornings(warm.slice(0, -1)), 61.2).eff.zone],
+    ['coldWater', 'coldWater']);
+  assert.strictEqual(cardAt(etAt(2026, 10, 25, 15), mornings(warm), 61.2).eff.zone, 'normal');
+});
+
+// The highest morning readings in May 2026 (history.json): around 59-61°F for two weeks.
+const MAY = [[2026, 5, 1, 58.42], [2026, 5, 2, 57.07], [2026, 5, 3, 57.42], [2026, 5, 4, 58.62], [2026, 5, 5, 59.77], [2026, 5, 6, 59.07],
+  [2026, 5, 7, 60.85], [2026, 5, 8, 60.08], [2026, 5, 9, 59.52], [2026, 5, 10, 61.75], [2026, 5, 11, 59.32], [2026, 5, 12, 60.66],
+  [2026, 5, 13, 61.07], [2026, 5, 14, 58.87], [2026, 5, 15, 60.87], [2026, 5, 16, 64.24], [2026, 5, 17, 63.66]];
+
+test('the 60°F line in the spring: May 2026 went back and forth for two weeks; the restrictions lifted on the 17th at 11 AM', () => {
+  for (let d = 8; d <= 16; d++) {
+    const c = cardAt(etAt(2026, 5, d, 12), mornings(MAY.filter(m => m[2] <= d)), 61);
+    assert.strictEqual(c.eff.zone, 'coldWater', `May ${d}`);
+  }
+  const c16 = cardAt(etAt(2026, 5, 17, 9), mornings(MAY), 63);
+  assert.deepStrictEqual([c16.eff.change.direction, c16.eff.change.count], ['warmer', 2]);
+  assert.ok(c16.site.zoneChangeText(c16.eff).endsWith('Cold Water restrictions lift after 3 in a row: 1 more to go.'));
+  const c = cardAt(etAt(2026, 5, 17, 11, 5), mornings(MAY), 63.7);
+  assert.strictEqual(c.eff.zone, 'normal');
+  assert.strictEqual(emailAt(etAt(2026, 5, 17, 11, 5), mornings(MAY), 63.7).d.zone, 'normal');
+  // And a cool morning in July does not bring Cold Water back.
   const july = mornings([[2026, 7, 11, 62], [2026, 7, 12, 62], [2026, 7, 13, 62], [2026, 7, 14, 59.5], [2026, 7, 15, 61]]);
-  assert.deepStrictEqual([cardAt(etAt(2026, 7, 15, 15), july, 62).eff.zone, cardAt(etAt(2026, 7, 15, 15), july, 62).eff.needed], ['coldWater', 3]);
+  assert.strictEqual(cardAt(etAt(2026, 7, 14, 15), july.filter(h => h.ts < etAt(2026, 7, 15, 0)), 62).eff.zone, 'normal');
 });
 
-test('the other lines too: Four Oar and Winter Rowing lift only after three mornings in a row', () => {
-  // 3 PM: the reading now is not a morning one, so the 11th is the one mild morning.
-  const jan = cardAt(etAt(2027, 1, 12, 15), mornings([[2027, 1, 10, 38], [2027, 1, 11, 40.5]]), 41);
-  assert.deepStrictEqual([jan.eff.zone, jan.eff.confirmed, jan.eff.needed], ['winter', 1, 3], JSON.stringify(jan.eff));
-  assert.strictEqual(jan.rule.replace(/<[^>]+>/g, ''), 'WINTER ROWING — awaiting 3-morning confirmation to lift');
-  assert.strictEqual(jan.status('Tier 3', '4x / 8+'), 'bs-go', 'the Winter Rowing tiers');
-  assert.strictEqual(emailZoneAt(etAt(2027, 1, 12, 15), mornings([[2027, 1, 10, 38], [2027, 1, 11, 40.5]]), 41), 'winter', 'the email agrees');
-  const nov = cardAt(etAt(2026, 11, 10, 15), mornings([[2026, 11, 6, 45], [2026, 11, 7, 46], [2026, 11, 8, 49], [2026, 11, 9, 50.5]]), 51);
-  assert.deepStrictEqual([nov.eff.zone, nov.eff.confirmed, nov.eff.needed], ['fourOar', 1, 3], 'one morning at 50.5 does not lift Four Oar');
-  assert.ok(/FOUR OAR RULE — awaiting 3-morning confirmation to lift/.test(nov.rule.replace(/<[^>]+>/g, '')));
-  assert.strictEqual(nov.status('Tier 2', '2x'), 'bs-no', 'the Four Oar tiers');
-  // Three mild mornings in a row do lift it, in the middle of winter too.
-  const three = mornings([[2027, 2, 7, 41], [2027, 2, 8, 41.5], [2027, 2, 9, 42]]);
-  const feb = cardAt(etAt(2027, 2, 10, 8), three, 42);
-  assert.deepStrictEqual([feb.eff.zone, feb.eff.needed], ['fourOar', 3], 'Winter Rowing lifted after three mornings at 40 or more');
-  assert.strictEqual(emailZoneAt(etAt(2027, 2, 10, 8), three, 42), 'fourOar');
+test('the 40°F line, both ways: Winter Rowing after three mornings below 40, lifted after three at 40 or more', () => {
+  const dec = [[2026, 12, 10, 43], [2026, 12, 11, 42], [2026, 12, 12, 41], [2026, 12, 13, 39.5], [2026, 12, 14, 39], [2026, 12, 15, 38.5]];
+  const c14 = cardAt(etAt(2026, 12, 14, 12), mornings(dec.slice(0, 5)), 39);
+  assert.deepStrictEqual([c14.eff.zone, c14.eff.change.count], ['fourOar', 2]);
+  assert.ok(c14.site.zoneChangeText(c14.eff).endsWith('Winter Rowing starts after 3 in a row: 1 more to go.'));
+  const c15 = cardAt(etAt(2026, 12, 15, 12), mornings(dec), 38.5);
+  assert.strictEqual(c15.eff.zone, 'winter');
+  assert.strictEqual(text(c15.rule), 'WINTER ROWING in effect (water below 40°F)');
+  assert.strictEqual(c15.status('Tier 3', '4x / 8+'), 'bs-go', 'the Winter Rowing tiers');
+  assert.strictEqual(c15.status('Tier 2', '4x / 8+'), 'bs-no');
+  const spring = [[2027, 3, 1, 37], [2027, 3, 2, 38], [2027, 3, 3, 38], [2027, 3, 4, 40.5], [2027, 3, 5, 41], [2027, 3, 6, 40]];
+  const c5 = cardAt(etAt(2027, 3, 5, 12), mornings(spring.slice(0, 5)), 41);
+  assert.deepStrictEqual([c5.eff.zone, c5.eff.change.count], ['winter', 2]);
+  assert.ok(c5.site.zoneChangeText(c5.eff).endsWith('Winter Rowing lifts after 3 in a row: 1 more to go.'));
+  assert.strictEqual(cardAt(etAt(2027, 3, 6, 12), mornings(spring), 40).eff.zone, 'fourOar');
+  assert.strictEqual(emailAt(etAt(2027, 3, 6, 12), mornings(spring), 40).d.zone, 'fourOar');
 });
 
-test('with no morning readings at all, the card says it cannot confirm the three', () => {
+test('two lines at once: from 61°F to 48°F, Cold Water after three mornings below 60 - the Four Oar Rule only after three below 50', () => {
+  const drop = [[2026, 10, 1, 61], [2026, 10, 2, 61], [2026, 10, 3, 61], [2026, 10, 4, 58], [2026, 10, 5, 48], [2026, 10, 6, 48]];
+  const c6 = cardAt(etAt(2026, 10, 6, 12), mornings(drop), 48);
+  assert.strictEqual(c6.eff.zone, 'coldWater', 'three below 60 (58, 48, 48), two below 50');
+  assert.deepStrictEqual([c6.eff.change.line, c6.eff.change.count], [50, 2]);
+  const c7 = cardAt(etAt(2026, 10, 7, 12), mornings(drop.concat([[2026, 10, 7, 47.5]])), 47.5);
+  assert.strictEqual(c7.eff.zone, 'fourOar');
+  // Straight from 61 to 48: both lines at the third morning.
+  const fall = [[2026, 10, 1, 61], [2026, 10, 2, 61], [2026, 10, 3, 61], [2026, 10, 4, 48], [2026, 10, 5, 48], [2026, 10, 6, 48]];
+  const c = cardAt(etAt(2026, 10, 5, 12), mornings(fall.slice(0, 5)), 48);
+  assert.deepStrictEqual([c.eff.zone, c.eff.change.line, c.eff.change.count], ['normal', 60, 2], 'the change it is heading for is the next one: Cold Water');
+  assert.strictEqual(cardAt(etAt(2026, 10, 6, 12), mornings(fall), 48).eff.zone, 'fourOar');
+});
+
+test('the reading now never moves the zone - a cold afternoon, a warm one, a morning still under way', () => {
+  const settled = mornings([[2026, 9, 1, 65], [2026, 9, 2, 65], [2026, 9, 3, 65]]);
+  for (const live of [35, 45, 55, 59.9, 60, 61, 75]) {
+    assert.strictEqual(cardAt(etAt(2026, 9, 3, 15), settled.concat([{ ts: etAt(2026, 9, 3, 14, 50), tempF: live }]), live).eff.zone, 'normal', String(live));
+  }
+  // Two mornings below 60 and the third under way, below 60 since 5 AM: not until 11.
+  const two = mornings([[2026, 9, 1, 65], [2026, 9, 2, 65], [2026, 9, 3, 65], [2026, 9, 4, 59], [2026, 9, 5, 59]],
+    [[etAt(2026, 9, 6, 5, 15), 58.5], [etAt(2026, 9, 6, 9, 45), 58.8]]);
+  assert.strictEqual(cardAt(etAt(2026, 9, 6, 10, 55), two, 58.8).eff.zone, 'normal');
+  assert.strictEqual(cardAt(etAt(2026, 9, 6, 11, 0), two, 58.8).eff.zone, 'coldWater', 'at 11:00 the morning is over');
+});
+
+test('the newest reading counts for its morning when the readings do not have it yet (the archive lags it)', () => {
+  const now = etAt(2026, 11, 22, 11, 5);
+  const hist = mornings([[2026, 11, 17, 52], [2026, 11, 18, 51], [2026, 11, 19, 51], [2026, 11, 20, 49], [2026, 11, 21, 49]]);
+  const { site } = loadSite(now);
+  site.state.allHistory = hist; site.state.lastTempF = 49.2; site.state.riverLevel = 3;
+  site.state.lastFetchedAt = new Date(etAt(2026, 11, 22, 10, 58));
+  assert.strictEqual(site.getEffectiveLevel(49.2).zone, 'fourOar', 'the 22nd\'s morning, from the newest reading alone: the third below 50');
+  site.state.lastFetchedAt = new Date(etAt(2026, 11, 22, 11, 2));   // after the morning: not part of it
+  assert.strictEqual(site.getEffectiveLevel(49.2).zone, 'coldWater');
+});
+
+test('rounding to 0.5°F, as before: a morning of 49.75°F counts as 50, 49.74°F as below it; 59.75°F as 60', () => {
+  const base = [[2026, 11, 1, 55], [2026, 11, 2, 55], [2026, 11, 3, 55]];
+  const z = (t, line) => {
+    const c = cardAt(etAt(2026, 11, 6, 12), mornings(base.concat([[2026, 11, 4, t], [2026, 11, 5, t], [2026, 11, 6, t]])), t);
+    return c.eff.zone;
+  };
+  assert.strictEqual(z(49.75), 'coldWater');
+  assert.strictEqual(z(49.74), 'fourOar');
+  assert.strictEqual(z(59.75), 'normal');
+  assert.strictEqual(z(59.74), 'coldWater');
+  // A morning that rounds up to the line starts the count - and the words say how it was counted.
+  const fourOar = [[2026, 11, 1, 48], [2026, 11, 2, 48], [2026, 11, 3, 48], [2026, 11, 4, 49.8]];
+  const c = cardAt(etAt(2026, 11, 4, 12), mornings(fourOar), 49.8);
+  assert.deepStrictEqual([c.eff.zone, c.eff.change && c.eff.change.direction, c.eff.change && c.eff.change.count], ['fourOar', 'warmer', 1]);
+  assert.strictEqual(c.site.zoneChangeText(c.eff),
+    'The latest morning was at 50°F or more (Wed, Nov 4: 49.8°F, counted as 50.0°F). The Four Oar Rule lifts after 3 in a row: 2 more to go.');
+  assert.ok(c.notes.includes('49.8°F, counted as 50.0°F'), 'on the card\'s list too');
+  // At the line exactly, nothing to explain.
+  const at50 = cardAt(etAt(2026, 11, 4, 12), mornings(fourOar.slice(0, 3).concat([[2026, 11, 4, 50]])), 50);
+  assert.ok(at50.site.zoneChangeText(at50.eff).includes('(Wed, Nov 4: 50.0°F)'), at50.site.zoneChangeText(at50.eff));
+});
+
+test('a morning with no readings is passed over: it neither continues nor breaks a run', () => {
+  const list = [[2026, 11, 1, 55], [2026, 11, 2, 55], [2026, 11, 3, 55], [2026, 11, 4, 49], [2026, 11, 6, 49], [2026, 11, 8, 49]];
+  const c = cardAt(etAt(2026, 11, 8, 12), mornings(list), 49);
+  assert.strictEqual(c.eff.zone, 'fourOar', 'three below 50, with gaps on the 5th and 7th');
+  const broken = cardAt(etAt(2026, 11, 8, 12), mornings([[2026, 11, 1, 55], [2026, 11, 2, 55], [2026, 11, 3, 55], [2026, 11, 4, 49], [2026, 11, 6, 51], [2026, 11, 8, 49]]), 49);
+  assert.deepStrictEqual([broken.eff.zone, broken.eff.change.count], ['coldWater', 1], 'a warm morning in between does break it');
+});
+
+test('mornings back and forth across a line for two weeks: the stricter zone, and the card says why', () => {
+  const list = [];
+  for (let d = 1; d <= 15; d++) list.push([2026, 11, d, d % 2 ? 49 : 51]);
+  const c = cardAt(etAt(2026, 11, 15, 12), mornings(list), 49);
+  assert.deepStrictEqual([c.eff.zone, c.eff.unsettled], ['fourOar', 50]);
+  assert.strictEqual(text(c.rule), 'FOUR OAR RULE in effect — no three mornings in a row on one side of 50°F');
+  assert.ok(text(c.notes).includes('The mornings have gone back and forth across 50°F, with no three in a row on one side of it in the last 15 days, so the stricter rules apply.'), c.notes);
+  assert.strictEqual(emailAt(etAt(2026, 11, 15, 12), mornings(list), 49).d.zone, 'fourOar', 'the email agrees');
+});
+
+test('with fewer than three mornings with readings, the card says it cannot confirm the zone: Winter Rowing', () => {
   const now = etAt(2026, 10, 20, 15, 0);
-  const c = cardAt(now, [{ ts: etAt(2026, 10, 20, 13, 0), tempF: 62 }], 62);
-  assert.strictEqual(c.eff.zone, 'winter');
-  assert.ok(c.notes.includes('<strong>Fewer than 3 mornings (5–11 AM ET) have readings</strong>'), c.notes);
+  for (const hist of [[{ ts: etAt(2026, 10, 20, 13, 0), tempF: 62 }], mornings([[2026, 10, 19, 62], [2026, 10, 20, 62]])]) {
+    const c = cardAt(now, hist, 62);
+    assert.deepStrictEqual([c.eff.zone, c.eff.insufficient], ['winter', true]);
+    assert.strictEqual(text(c.rule), 'WINTER ROWING in effect — too few mornings with readings');
+    assert.ok(c.notes.includes('<strong>Fewer than 3 mornings (5–11 AM ET) have readings</strong>'), c.notes);
+    assert.strictEqual(c.site.zoneChangeText(c.eff), '', 'no count towards a change it cannot see');
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3965,7 +4116,7 @@ test('override: a typo cannot break the page - it is ignored, and the card says 
   for (const bad of ['cold', 'Winter', 'four oar', '<b>x</b>', 42]) {
     let els;
     assert.doesNotThrow(() => { els = overrideSite(bad, 72); }, String(bad));
-    assert.ok(/No temperature restrictions \(water > 60°F, 3-day confirmed\)/.test(els['rule-banner'].innerHTML),
+    assert.ok(/No temperature restrictions \(water 60°F or more\)/.test(els['rule-banner'].innerHTML),
       `${bad}: automatic rules: ${els['rule-banner'].innerHTML}`);
     assert.ok(/is not recognised/.test(els['rowing-notes'].innerHTML), `${bad}: the mistake is visible`);
     assert.ok(!/<b>x<\/b>/.test(els['rowing-notes'].innerHTML), 'and cannot inject markup');
@@ -4108,20 +4259,21 @@ test('water: the page never goes back to an older reading than it shows', async 
 });
 
 // The mornings for the rule: history.json has them up to the 23rd; the Worker has the 23rd to the 25th.
+// Noon on the 25th: that morning is over, and counts.
 test('water: the 3-morning rule counts the Worker\'s mornings that history.json does not have yet', async () => {
-  const now = etAt(2026, 10, 25, 10, 0);
-  const archiveList = [[2026, 10, 21, 58], [2026, 10, 22, 59], [2026, 10, 23, 61]];
+  const now = etAt(2026, 10, 25, 12, 0);
+  const archiveList = [[2026, 10, 18, 58], [2026, 10, 19, 58], [2026, 10, 20, 58], [2026, 10, 21, 58], [2026, 10, 22, 59], [2026, 10, 23, 61]];
   const archive = mornings(archiveList).map(x => ({ ts: new Date(x.ts).toISOString(), tempF: x.tempF }));
   const days = mornings([[2026, 10, 23, 61], [2026, 10, 24, 61.5], [2026, 10, 25, 62]]).map(x => ({ ts: new Date(x.ts).toISOString().replace(/\.\d{3}Z$/, 'Z'), tempF: x.tempF, tempC: 16 }));
   const repo = makeRaw(61, new Date(etAt(2026, 10, 23, 9)));
   const withWorker = waterPage(now, { repo, archive, latest: makeRaw(62, new Date(etAt(2026, 10, 25, 9))), recent: days });
   withWorker.site.state.riverLevel = 3;
   await withWorker.site.loadData();
-  assert.ok(/No temperature restrictions \(water > 60°F, 3-day confirmed\)/.test(withWorker.els['rule-banner'].innerHTML), withWorker.els['rule-banner'].innerHTML);
+  assert.ok(/No temperature restrictions \(water 60°F or more\)/.test(withWorker.els['rule-banner'].innerHTML), withWorker.els['rule-banner'].innerHTML);
   const without = waterPage(now, { repo, archive, latest: undefined, recent: undefined });
   without.site.state.riverLevel = 3;
   await without.site.loadData();
-  assert.ok(/COLD WATER/.test(without.els['rule-banner'].innerHTML.replace(/<[^>]+>/g, '')), 'archive alone: one warm morning of three');
+  assert.strictEqual(without.els['rule-banner'].innerHTML.replace(/<[^>]+>/g, ''), 'COLD WATER restrictions apply (water 50–60°F)', 'archive alone: one warm morning of three');
 });
 
 test('water: history.json (over 1 MB) is downloaded again only every 30 minutes while the Worker keeps up', async () => {
@@ -4994,7 +5146,7 @@ test('rules: the Worker\'s 16 days hold every morning the rules read, at any hou
   assert.strictEqual(site.__MORNING_WINDOW.lookbackDays, 14);
 });
 
-test('rules: a morning missing from the Worker\'s days - or today\'s, begun with no reading yet - means the archive is needed', () => {
+test('rules: a morning missing from the Worker\'s days means the archive is needed - today\'s only once it is over', () => {
   const { site } = loadSite(Date.now());
   const now = etDate('2026-10-31', 12).getTime();
   const missing = (ymd) => quarterHours(now, 16, () => 60, ts => { const e = etParts(ts); return e.ymd === ymd && e.hour >= 5 && e.hour < 11; });
@@ -5004,12 +5156,17 @@ test('rules: a morning missing from the Worker\'s days - or today\'s, begun with
   // One reading in a morning is enough to hold it.
   const one = quarterHours(now, 16, () => 60, ts => { const e = etParts(ts); return e.ymd === '2026-10-24' && e.hour >= 5 && e.hour < 11 && e.hour !== 8; });
   assert.strictEqual(site.__rulesCoveredBy(one, now), true);
-  // 5:07 AM: today's morning has begun - and has no reading yet.
+  // 5:07 AM: today's morning has begun, with no reading yet - the rules read
+  // it only once it is over (at 11), so it is not asked for.
   const early = etDate('2026-10-31', 5, 7).getTime();
-  assert.strictEqual(site.__rulesCoveredBy(quarterHours(etDate('2026-10-31', 4, 59).getTime(), 16), early), false);
-  // 3 AM: today's morning has not begun; it is not asked for.
+  assert.strictEqual(site.__rulesCoveredBy(quarterHours(etDate('2026-10-31', 4, 59).getTime(), 16), early), true);
+  // 3 AM: nor before it begins.
   const night = etDate('2026-10-31', 3).getTime();
   assert.strictEqual(site.__rulesCoveredBy(quarterHours(night, 16), night), true);
+  // 11:07 AM: it is over, and without its readings the archive is needed.
+  const late = etDate('2026-10-31', 11, 7).getTime();
+  assert.strictEqual(site.__rulesCoveredBy(missing('2026-10-31').filter(h => h.ts <= late), late), false);
+  assert.strictEqual(site.__rulesCoveredBy(quarterHours(late, 16), late), true);
   for (const bad of [null, [], 'x', [{}]]) assert.strictEqual(site.__rulesCoveredBy(bad, now), false);
 });
 
@@ -5050,8 +5207,10 @@ test('SAFETY rules: from the Worker\'s days the rules are never laxer than from 
 test('SAFETY rules: why the check exists - a cold morning missing from the Worker\'s days would lift a restriction early', () => {
   const now = etDate('2026-10-31', 12).getTime();
   const { site } = loadSite(now);
-  // Warm (61°F) mornings, but yesterday's was cold (55°F): the archive breaks the streak there.
-  const tempAt = (ts) => (etParts(ts).ymd === '2026-10-30' ? 55 : 61);
+  // Warm (61°F) mornings, then three cold ones in a row (55°F, the 29th to
+  // the 31st): the archive has Cold Water. Without the 30th, the Worker's
+  // days would have two cold mornings, not three.
+  const tempAt = (ts) => (['2026-10-29', '2026-10-30', '2026-10-31'].includes(etParts(ts).ymd) ? 55 : 61);
   const full = quarterHours(now, 16, tempAt);
   const sub = full.filter(h => !(etParts(h.ts).ymd === '2026-10-30' && etParts(h.ts).hour >= 5 && etParts(h.ts).hour < 11));
   const realNow = Date.now; Date.now = () => now;

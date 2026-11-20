@@ -21,7 +21,7 @@ status using the site's own functions and compares against the email output.
 | `daily_email.js` | Builds and sends the digest |
 | `send_notice.js` | The "No conditions report today - check roworno.com" notice, sent instead when the job's tests, build or send fail (see Safety behaviour) |
 | `test_send_notice.js` | Its tests (22): the words, the season and the day as `daily_email.js` has them, at most one email a day against a stand-in Buttondown, working with `daily_email.js` broken, and how the job runs it |
-| `test_daily_email.js` | Test suite (309 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, the NWS alerts and thunderstorms, and that every script and style from another server is pinned by its hash (Subresource Integrity), the chart libraries too. It reads no live data: not the network, not the checkout's `data.json`/`history.json` (stand-ins), so what those hold on the morning of a run cannot stop the email |
+| `test_daily_email.js` | Test suite (316 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, the NWS alerts and thunderstorms, and that every script and style from another server is pinned by its hash (Subresource Integrity), the chart libraries too. It reads no live data: not the network, not the checkout's `data.json`/`history.json` (stand-ins), so what those hold on the morning of a run cannot stop the email |
 | `test_time_travel.js` | Runs every test suite with the clock moved (`fakenow.js`, and a stand-in `date`) to the hours the email job really runs them (1-2 AM), the morning window's edges, the next daylight-saving changes, the season's edges and the new year. The 2 Nov 2026 email did not go out because two tests passed in the afternoon and failed at 1:58 AM. GitHub runs it on every push and every evening (`tests.yml`) |
 | `run_suite.js` | Runs one suite for `tests.yml`: output and exit code unchanged, and on GitHub each failing test becomes an annotation - named on the run page and in GitHub's email without signing in. Tests: `test_run_suite.js` (8) |
 | `fakenow.js` | The moved clock for `test_time_travel.js`: node's `Date`, in every process and vm context a run starts |
@@ -79,12 +79,27 @@ everything is exactly as before: `data.json` and `history.json`, refreshed
 whenever they are behind.
 
 **Why the rules can use the Worker's days alone.** A morning they hold fewer
-readings of than the archive can only have a lower highest reading, so it
-confirms no more than it would - the rules can come out stricter, never
-laxer. A morning with no reading at all is different: the rules pass over it,
-so a cold morning missing from the Worker's days could lift a restriction too
-soon. That is why every morning must hold a reading before the archive is
-left out. A test checks this on 400 random histories.
+readings of than the archive can only have a lower highest reading, which can
+only keep the water on the cold side of a line, or put it there - the rules
+can come out stricter, never laxer. A morning with no reading at all is
+different: the rules pass over it, so a cold morning missing from the Worker's
+days could lift a restriction too soon. That is why every morning the rules
+read (those that are over) must hold a reading before the archive is left out.
+A test checks this on 400 random histories.
+
+**The water-temperature rule.** The zones change at 40, 50 and 60°F, and only
+after **three mornings in a row** on the other side of a line - as the water
+warms or as it cools (Safety Committee, November 2026; until then a single
+reading at or below a line brought its restrictions at once, and on November
+20 the page went from Cold Water to the Four Oar Rule and back the same
+morning). A morning is its highest reading from 5 to 11 AM, rounded to the
+nearest 0.5°F, and counts once it is over, so the zone never changes while
+people are on the water. A morning with no readings is passed over. Replayed
+over 2026's readings (March 29 to November 20), the old rule changed the zone
+70 times, the new one 4: Four Oar on March 31, Cold Water on April 11, no
+restrictions on May 17, Cold Water on October 22 - the day the committee
+announced it. When the latest mornings are on the other side of a line, the
+rules card and the email say how many so far (`zoneChangeText()`).
 
 Why: GitHub's scheduler skipped or delayed so many runs that, in late October
 2026, the reading on the website was more than 45 minutes old 24% of the time -

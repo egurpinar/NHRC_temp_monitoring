@@ -167,7 +167,7 @@ function loadSiteLogic(indexHtmlPath = INDEX_HTML) {
   // Expose the pure functions + shared state object we need.
   const EXPORTS = [
     'state', 'ZONE_TIERS', 'ZONE_OVERRIDE',
-    'getEffectiveLevel', 'checkMorningStreak', 'nyWindowBound', 'nyTzAbbr',
+    'getEffectiveLevel', 'rulesMornings', 'sideOfLine', 'zoneChangeText', 'nyWindowBound', 'nyTzAbbr',
     'getFloodStatus', 'combineStatus', 'boatKeys', 'floodStatusForBoat',
     'floodSummaryLabel', 'riverStaleNote', 'extractTemp', 'parseLastDeviceData',
     // The water readings: the Worker's first, the repository's alongside, as on the site.
@@ -641,7 +641,9 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
     // A manual Safety Committee setting is labelled as one, as on the website.
     zoneLabel: (ZONE_LABEL[eff.zone] || eff.zone) + (eff.override ? ' (set by the Safety Committee)' : ''),
     zoneColor: ZONE_COLOR[eff.zone] || ZONE_COLOR.normal,
-    immediate: !!eff.immediate,
+    // Where the mornings are heading, in the website's words: say the water
+    // has been below 50°F two mornings running, while Cold Water still holds.
+    zoneChange: logic.zoneChangeText(eff),
     rows,
     river,
     floodSummary,
@@ -963,7 +965,8 @@ function renderEmailHtml(d) {
 
       <tr><td style="padding:16px ${PAD}px 12px ${PAD}px;background-color:${C.card};">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-          <tr><td style="background-color:${zoneStyle.bg};border:1px solid ${zoneStyle.border};border-radius:8px;padding:12px 14px;font-size:15px;font-weight:bold;color:${zoneStyle.text};font-family:Arial,Helvetica,sans-serif;">${esc(d.zoneLabel)}</td></tr>
+          <tr><td style="background-color:${zoneStyle.bg};border:1px solid ${zoneStyle.border};border-radius:8px;padding:12px 14px;font-size:15px;font-weight:bold;color:${zoneStyle.text};font-family:Arial,Helvetica,sans-serif;">${esc(d.zoneLabel)}${d.zoneChange
+            ? `<div style="font-size:13px;font-weight:normal;line-height:1.45;padding-top:6px;">${esc(d.zoneChange)}</div>` : ''}</td></tr>
         </table>
       </td></tr>
 
