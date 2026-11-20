@@ -1947,6 +1947,20 @@ function ffmpegSummary(file) {
   return parts.join('; ');
 }
 
+/**
+ * How many packets the recording ffmpeg says so far it has missed ("RTP:
+ * missed N packets", in its report) - 0 when none, or there is no report.
+ * Packets can be lost on the last step, into ffmpeg (its receive buffer full
+ * while it was not reading), after this program has counted them.
+ */
+function ffmpegMissed(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { return 0; }
+  let n = 0;
+  for (const m of text.matchAll(/missed (\d+) packets/g)) n += Number(m[1]);
+  return n;
+}
+
 /** Hides anything that looks like a token or ticket, before text reaches the journal. */
 function redact(text) {
   return String(text)
@@ -2111,10 +2125,11 @@ async function recordAndPickInner(camera, tl, workDir, ffprobe, halt, clipBytes)
   let canSeeAnswer = false, asks = 0;
   // Stopping early: the camera announces each keyframe's size in its SPS.
   // `at`: when one TIMELAPSE_TARGET_HEIGHT tall was announced (null while
-  // waiting for one), `missing`: packets missing by then; `early`: when the
+  // waiting for one), `missing`: packets missing by then, and `ffMissed`:
+  // those the recording ffmpeg had said by then it missed; `early`: when the
   // live view was ended for it; `best`: the largest announced.
   const target = Number(tl.targetHeight) > 0 ? Number(tl.targetHeight) : 0;
-  const goal = { at: null, size: null, missing: 0, early: null, best: null };
+  const goal = { at: null, size: null, missing: 0, ffMissed: 0, early: null, best: null };
   const story = () => {
     const s = (t) => ((t - t0) / 1000).toFixed(1);
     const parts = [
@@ -2200,7 +2215,9 @@ async function recordAndPickInner(camera, tl, workDir, ffprobe, halt, clipBytes)
               const size = spsResolution(nal);
               if (!size) continue;
               if (!goal.best || size.width * size.height > goal.best.width * goal.best.height) goal.best = size;
-              if (size.height >= target && goal.at === null) Object.assign(goal, { at: now, size, missing: seen.missing });
+              if (size.height >= target && goal.at === null) {
+                Object.assign(goal, { at: now, size, missing: seen.missing, ffMissed: ffmpegMissed(ffLog) });
+              }
             }
           }
         } catch (e) { /* counting and watching are niceties */ }
@@ -2230,11 +2247,16 @@ async function recordAndPickInner(camera, tl, workDir, ffprobe, halt, clipBytes)
       // The early stop: a keyframe of the target height was announced, the
       // recording is running, and no packet has gone missing since - give it
       // TARGET_SETTLE_MS to arrive whole, then stop. A packet lost meanwhile
-      // may be part of it: wait for the next one instead.
+      // may be part of it: wait for the next one instead. Lost before it got
+      // here (the count), or after: on the way into ffmpeg, which says so in
+      // its report. Watching the count alone, a keyframe that arrived here
+      // whole but reached ffmpeg damaged ended the recording with no clean
+      // keyframe in it, and the frame was lost - the likely cause of a test
+      // that failed on GitHub's runner on 20 November 2026.
       if (target) {
         watcher = setInterval(() => {
           if (goal.at === null || goal.early) return;
-          if (seen.missing > goal.missing) { goal.at = null; return; }
+          if (seen.missing > goal.missing || ffmpegMissed(ffLog) > goal.ffMissed) { goal.at = null; return; }
           if (!recording()) return;
           if (Date.now() - goal.at >= (tl.targetSettleMs || TARGET_SETTLE_MS)) {
             goal.early = { at: (Date.now() - t0) / 1000, size: goal.size };
@@ -3588,7 +3610,7 @@ module.exports = {
   parseTimeList, timelapseOn, intervalOn, localDateParts, timelapseFile, timelapseDue, withTimeout, runTool, keyframeInfo,
   keyframeOrder, resolutionTimeline, pickKeyframe,
   decodeKeyframe, SequenceCounter, jpegSize, captureLiveFrame, saveAtomically, freeMb, memoryReport,
-  createTimelapse, describeTimelapse, availableMb, watchMemory, CaptureStop, ffmpegSummary, redact, briefly, ringNotes,
+  createTimelapse, describeTimelapse, availableMb, watchMemory, CaptureStop, ffmpegSummary, ffmpegMissed, redact, briefly, ringNotes,
   parseWindowEdge, sunTimes, daylightMinutes, intervalSlot, spsNals, spsResolution, finishFfmpeg, ffmpegDone,
   inMemory, resolveWorkRoot, describeWorkRoot, sweepWorkRoot, strayFfmpeg, openFileCount, readBattery, sameCamera, makeDir,
   TIMELAPSE_WINDOW_MINUTES, CAPTURE_TIMEOUT_MS, MAX_KEYFRAMES_TRIED, LIVE_MEMORY_NEED_MB,

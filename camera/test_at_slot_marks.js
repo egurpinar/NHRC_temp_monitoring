@@ -6,7 +6,8 @@
  * and 3 s before a 5-minute mark, where a timelapse slot does. A test
  * that counts one slot's captures must wait until the mark has passed
  * (awayFromSlotMark in test_snapshot_service.js): five did not, and failed
- * whenever they happened to begin a few seconds before one.
+ * whenever they happened to begin a few seconds before one. A run that fails
+ * prints why under it (the service's errors first), then everything it printed.
  *
  *   node camera/test_at_slot_marks.js        # a few minutes
  *   node camera/test_at_slot_marks.js 10 5   # only the 11th to the 15th test
@@ -46,7 +47,23 @@ for (const ms of moments) {
     console.log(`${ok ? 'ok  ' : 'FAIL'}  ${iso}  ${name}`);
     if (!ok) {
       failed.push(`${iso}  ${name}`);
-      for (const l of out.split('\n').filter(l => /^\s+FAIL|full output/.test(l))) console.log(`        ${l.trim()}`);
+      // Why, as the time-travel run gave it: the indented lines under its
+      // FAIL line - for the run page's annotation too (run_suite.js). Until
+      // 20 November 2026 only the FAIL lines were kept, and a failure on
+      // GitHub said nothing about its cause.
+      const lines = out.split('\n');
+      const at = lines.findIndex(l => /^FAIL /.test(l));
+      for (let j = at + 1; at >= 0 && j < lines.length && /^\s{6,}\S/.test(lines[j]); j++) console.log(`        ${lines[j].trim()}`);
+      // And all that run printed, for the run's log: the file it is in is
+      // gone once GitHub's job ends.
+      const log = (out.match(/full output: (\S+)/) || [])[1];
+      let text = '';
+      try { text = log ? fs.readFileSync(log, 'utf8') : ''; } catch (e) { /* gone already */ }
+      if (text) {
+        console.log(`  --- everything it printed (${log}) ---`);
+        for (const l of text.split('\n')) console.log(`  | ${l}`);
+        console.log('  --- end ---');
+      }
     }
   }
 }

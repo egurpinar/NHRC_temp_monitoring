@@ -12,6 +12,7 @@
 'use strict';
 
 const assert = require('assert');
+const dgram = require('dgram');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -96,7 +97,7 @@ function test(name, fn, deadlineMs = ASYNC_DEADLINE_MS) {
       const t0 = Date.now();
       const took = () => { const s = (Date.now() - t0) / 1000; return s >= 3 ? `  (${s.toFixed(0)} s)` : ''; };
       try { await Promise.race([fn(), deadline]); passed++; console.log(`  PASS  ${name}${took()}`); }
-      catch (e) { failed++; failures.push([name, e]); console.log(`  FAIL  ${name}\n        ${e.message}`); }
+      catch (e) { failed++; failures.push([name, e]); console.log(`  FAIL  ${name}\n${explain(e)}`); }
       finally { clearTimeout(timer); }
     });
     return;
@@ -107,8 +108,22 @@ function test(name, fn, deadlineMs = ASYNC_DEADLINE_MS) {
     passed++; console.log(`  PASS  ${name}`);
   } catch (e) {
     failed++; failures.push([name, e]);
-    console.log(`  FAIL  ${name}\n        ${e.message}`);
+    console.log(`  FAIL  ${name}\n${explain(e)}`);
   }
+}
+
+/**
+ * Why a test failed, every line indented - so the run's summaries
+ * (test_time_travel.js, run_suite.js's annotations) keep it with the test.
+ * When it is a service's whole output, its ERROR lines - what went wrong -
+ * come first: on 20 November 2026 a failure on GitHub said only the test's
+ * name, the reason lost at the top of the service's start-up lines.
+ */
+function explain(e) {
+  const lines = String(e && e.message !== undefined ? e.message : e).split('\n');
+  const errors = lines.length > 8 ? lines.filter(l => /\bERROR\b/.test(l)).slice(0, 4) : [];
+  const head = errors.length ? ['the service\'s errors:', ...errors, 'all it said:'] : [];
+  return [...head, ...lines].map(l => `        ${l}`).join('\n');
 }
 
 function section(t) { console.log(`\n${t}\n${'-'.repeat(t.length)}`); }
@@ -2589,6 +2604,51 @@ test('end to end: --check and --status describe the Pi; CAMERA_PI is read lenien
   assert.strictEqual(box.host.env.BUCKET.record('standby'), null, 'and records nothing');
 });
 
+// ── The stand-in cameras' plumbing (FakeLiveCall, liveRingLibrary) ──
+//
+// These three also go, as they are, into the stand-in ring-client-api that
+// the service processes load (liveRingLibrary): they use only fs and dgram.
+
+/** Whether nothing holds UDP `port` on 127.0.0.1 (bound for a moment to see). */
+function udpFree(port) {
+  return new Promise((resolve) => {
+    const s = dgram.createSocket('udp4');
+    s.once('error', () => { try { s.close(); } catch (e) { /* closed */ } resolve(false); });
+    s.bind(port, '127.0.0.1', () => s.close(() => resolve(true)));
+  });
+}
+
+/**
+ * Ports for a stand-in camera's stream: the relay's (the camera sends its
+ * RTCP one above) and the recording ffmpeg's pair (RTP, RTCP). Below 32768,
+ * where Linux hands out ports on its own - so no socket it hands out, the
+ * camera's own among them, can be on one - and each checked free.
+ */
+async function freeRtpPorts() {
+  for (let k = 0; k < 50; k++) {
+    const relayPort = 20000 + Math.floor(Math.random() * 3000) * 2, recvPort = relayPort + 6000;
+    let free = true;
+    for (const p of [relayPort, relayPort + 1, recvPort, recvPort + 1]) if (!(await udpFree(p))) { free = false; break; }
+    if (free) return { relayPort, recvPort };
+  }
+  throw new Error('no free ports for the stand-in camera');
+}
+
+/**
+ * The camera's description of its stream (the sending ffmpeg's -sdp_file),
+ * once it is there whole - the file exists a moment before anything is in
+ * it. '' if that takes longer than `ms`.
+ */
+async function wholeSdp(file, ms = 10000) {
+  for (const until = Date.now() + ms; Date.now() < until;) {
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch (e) { /* not yet */ }
+    if (/^m=video \d+/m.test(text) && /^a=rtpmap:/m.test(text)) return text;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  return '';
+}
+
 /**
  * A stand-in ring-client-api, installed in dir, whose live view is a real
  * 1080p stream (ffmpeg sending RTP through a relay, as Ring's would arrive),
@@ -2603,6 +2663,9 @@ function liveRingLibrary(dir, ringLog) {
   fs.writeFileSync(path.join(pkg, 'util.js'), 'export function useLogger(l) { globalThis.ringLogger = l; }');
   fs.writeFileSync(path.join(pkg, 'index.js'), `
     import fs from 'fs'; import dgram from 'dgram'; import { spawn } from 'child_process';
+    ${udpFree}
+    ${freeRtpPorts}
+    ${wholeSdp}
     const note = (o) => fs.appendFileSync(${JSON.stringify(ringLog)}, JSON.stringify(Object.assign({ pi: process.env.CAMERA_PI || 'main' }, o)) + String.fromCharCode(10));
     const JPEG = Buffer.from([0xFF, 0xD8, 0xFF, 0xC0, 0, 17, 8, 1, 104, 2, 128, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 0xFF, 0xD9]);
     let ffmpegPath = null;
@@ -2634,7 +2697,8 @@ function liveRingLibrary(dir, ringLog) {
             this.end();
           }, 1500);
         }
-        const rp = 45000 + Math.floor(Math.random() * 4000) * 2, vp = rp + 9000;
+        // Ports and the stream's description as FakeLiveCall gets them (see there).
+        const { relayPort: rp, recvPort: vp } = await freeRtpPorts();
         const sdpFile = ${JSON.stringify(dir)} + '/s' + rp + '.sdp';
         // The camera's ffmpeg: another name (a link), no report - see FakeLiveCall.
         const senderEnv = Object.assign({}, process.env); delete senderEnv.FFREPORT;
@@ -2642,13 +2706,14 @@ function liveRingLibrary(dir, ringLog) {
           '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-g', '30', '-bf', '0', '-an', '-f', 'rtp', '-sdp_file', sdpFile, 'rtp://127.0.0.1:' + rp],
           { env: senderEnv });
         this.relay = dgram.createSocket({ type: 'udp4', recvBufferSize: ${RELAY_BUFFER} }); this.out = dgram.createSocket('udp4');
+        // A socket's error would otherwise end the service itself.
+        this.relay.on('error', () => this.end()); this.out.on('error', () => {});
         this.relay.on('message', (m) => { const nal = m[12] & 31;
           if (closing && (nal === 7 || nal === 8 || nal === 24)) return;
           const seq = m.readUInt16BE(2); this.subs.forEach(fn => fn({ header: { sequenceNumber: seq }, payload: m.subarray(12) }));
           if (!this.ended) this.out.send(m, vp, '127.0.0.1'); });
         this.relay.bind(rp, '127.0.0.1');
-        for (let k = 0; k < 100 && !fs.existsSync(sdpFile); k++) await new Promise(r => setTimeout(r, 50));
-        const sdp = fs.readFileSync(sdpFile, 'utf8').replace(/m=video \\d+/, 'm=video ' + vp);
+        const sdp = (await wholeSdp(sdpFile)).replace(/m=video \\d+/, 'm=video ' + vp);
         const args = ['-hide_banner', '-protocol_whitelist', 'pipe,udp,rtp,file,crypto', '-f', 'sdp', ...(o.input || []), '-i', 'pipe:',
           ...(o.audio || []), ...(o.video || []), ...(o.output || [])];
         note({ ev: 'ffmpeg', path: ffmpegPath, args });
@@ -3940,8 +4005,26 @@ test('no room for the recording where it is made: not started - the camera not e
 // RTP, through a relay that can lose packets, and the recording ffmpeg is
 // started with the arguments ring-client-api builds around ours.
 
-const dgram = require('dgram');
 const { spawn: spawnProc } = require('child_process');
+/**
+ * Whether an RTP packet's H.264 payload carries an SPS - on its own, or in a
+ * STAP-A with others. (A STAP-A is not always one: ffmpeg also puts a frame's
+ * small slices together in one.)
+ */
+function carriesSps(msg) {
+  if (msg.length <= 12) return false;
+  const type = msg[12] & 0x1F;
+  if (type === 7) return true;
+  if (type !== 24) return false;
+  for (let i = 13; i + 2 < msg.length;) {
+    const n = msg.readUInt16BE(i);
+    if (!n || i + 2 + n > msg.length) return false;
+    if ((msg[i + 2] & 0x1F) === 7) return true;
+    i += 2 + n;
+  }
+  return false;
+}
+
 // The stand-in camera's ffmpeg, under another name (see FakeLiveCall).
 const SENDER = path.join(os.tmpdir(), 'ffsender');
 if (HAVE_FFMPEG && !fs.existsSync(SENDER)) fs.symlinkSync('/usr/bin/ffmpeg', SENDER);
@@ -3982,7 +4065,9 @@ class FakeLiveCall {
       setTimeout(() => { this.message({ method: 'close', body: { reason: { code: 42, text: 'stand-in camera busy' }, token: 'S3CRET-T0KEN' } }); this.end(); },
         this.opts.ringCloseAfterMs);
     }
-    const relayPort = 43000 + Math.floor(Math.random() * 4000) * 2, recvPort = relayPort + 9000;
+    // Ports no other socket is on (see freeRtpPorts). They used to be picked
+    // at random from 43000-61000, where Linux also hands out ports of its own.
+    const { relayPort, recvPort } = await freeRtpPorts();
     const sdpFile = path.join(os.tmpdir(), `nhrc-fake-${relayPort}.sdp`);
     // The camera: a live 1920x1080 test picture (or `size`), or a ready-made
     // H.264 stream (`source`) - one whose resolution steps up, as Ring's does.
@@ -3998,6 +4083,8 @@ class FakeLiveCall {
     this.sender = spawnProc(SENDER, ['-v', 'error', ...input, '-an', '-f', 'rtp', '-sdp_file', sdpFile, `rtp://127.0.0.1:${relayPort}`],
       { env: senderEnv });
     this.relay = dgram.createSocket({ type: 'udp4', recvBufferSize: RELAY_BUFFER }); this.out = dgram.createSocket('udp4');
+    // A socket's error ends the live view, as a camera gone away would - not the test run.
+    this.relay.on('error', () => this.end()); this.out.on('error', () => {});
     let start = null, i = 0;
     this.relay.on('message', (msg) => {
       i++;
@@ -4011,14 +4098,22 @@ class FakeLiveCall {
         || (this.opts.loss === 'sps' && description)
         || (this.opts.loss === 'spsUntilAsked' && description && !this.spsAllowed)
         || (this.opts.loss === 'afterFirstSps' && afterSps && !description && i % 3 === 0);
+      // Lost on the last step only - into the recording ffmpeg, its receive
+      // buffer full - after this program has counted it (recorderLoss: the
+      // first that many keyframes each lose one packet that way).
+      if (carriesSps(msg)) { this.keys = (this.keys || 0) + 1; this.keyPackets = 0; }
+      const slice = nal === 5 || (nal === 28 && msg.length > 13 && (msg[13] & 0x1F) === 5);
+      if (slice) this.keyPackets = (this.keyPackets || 0) + 1;
+      const lostOnTheWayIn = !!this.opts.recorderLoss && slice && this.keys <= this.opts.recorderLoss && this.keyPackets === 5;
       // As werift hands them to ring-client-api: the header, and the payload after the 12-byte RTP header.
       if (!drop) { const seq = msg.readUInt16BE(2); this.rtpSubs.forEach(fn => fn({ header: { sequenceNumber: seq }, payload: msg.subarray(12) })); }
-      if (!drop && !this.ended) this.out.send(msg, recvPort, '127.0.0.1');
+      if (!drop && !lostOnTheWayIn && !this.ended) this.out.send(msg, recvPort, '127.0.0.1');
     });
     this.relay.bind(relayPort, '127.0.0.1');
-    for (let k = 0; k < 100 && !fs.existsSync(sdpFile); k++) await new Promise(r => setTimeout(r, 50));
-    const sdp = fs.readFileSync(sdpFile, 'utf8').replace(/m=video \d+/, `m=video ${recvPort}`);
-    fs.unlinkSync(sdpFile);
+    // Read once written whole: read the moment the file appeared, it could
+    // still be empty (see wholeSdp).
+    const sdp = (await wholeSdp(sdpFile)).replace(/m=video \d+/, `m=video ${recvPort}`);
+    try { fs.unlinkSync(sdpFile); } catch (e) { /* never written */ }
     const args = ['-hide_banner', '-protocol_whitelist', 'pipe,udp,rtp,file,crypto', '-acodec', 'libopus', '-f', 'sdp',
       ...(o.input || []), '-i', 'pipe:', ...(o.audio || []), ...(o.video || []), ...(o.output || [])];
     this.args = args;
@@ -4516,6 +4611,35 @@ if (HAVE_FFMPEG) {
     fs.rmSync(work, { recursive: true, force: true });
   }, 45000);
 
+  test('keyframes damaged on the way into ffmpeg (its buffer full), after they were counted whole: not stopped on them - the next whole one is saved', async () => {
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-work-'));
+    // The first three keyframes each lose a packet between this program and
+    // ffmpeg; the fourth (6 s in) arrives whole. Stopping 3 s after the first
+    // - as when only this program's count was watched - left no clean
+    // keyframe in the recording, and the frame was lost.
+    const r = await S.captureLiveFrame(liveCamera({ recorderLoss: 3 }), tlCfg('/tmp', { recordSeconds: 30, targetHeight: 1080 }), work);
+    assert.strictEqual(r.missing, 0, 'every packet reached this program');
+    assert.ok(r.stoppedEarly, 'stopped early, in the end');
+    assert.ok(r.stoppedEarly.at >= 6.5 && r.stoppedEarly.at < 20, `stopped at ${r.stoppedEarly.at} s - after the fourth keyframe`);
+    const check = require('child_process').spawnSync('ffmpeg', ['-v', 'error', '-xerror', '-err_detect', 'explode', '-i', r.frame, '-f', 'null', '-']);
+    assert.strictEqual(check.status, 0, 'what is returned decodes cleanly');
+    const probe = require('child_process').spawnSync('ffprobe', ['-v', 'error', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', r.frame], { encoding: 'utf8' });
+    assert.strictEqual(probe.stdout.trim(), '1920,1080');
+    await new Promise(res => setTimeout(res, 300));
+    assert.strictEqual(ffmpegChildren(), 0);
+    fs.rmSync(work, { recursive: true, force: true });
+  }, 60000);
+
+  test('what the recording ffmpeg says it missed is read from its report: every "missed N packets", 0 without a report', () => {
+    const dir = tlDir();
+    const report = path.join(dir, 'ffmpeg.log');
+    assert.strictEqual(S.ffmpegMissed(report), 0, 'no report yet');
+    fs.writeFileSync(report, 'ffmpeg started on 2026-11-20 at 00:30:01\nCommand line:\nffmpeg -t 8 -i pipe:\n'
+      + '[sdp @ 0x5590] RTP: missed 1 packets\nframe=   12 fps=0.0 q=-1.0 size=  512kB\n[sdp @ 0x5590] RTP: missed 3 packets\n');
+    assert.strictEqual(S.ffmpegMissed(report), 4);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   test('Ring ends the live view mid-recording: ffmpeg is given the time to finish its file - the last keyframe is kept, no ffmpeg left', async () => {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-tl-work-'));
     const t0 = Date.now();
@@ -4654,7 +4778,9 @@ if (HAVE_FFMPEG) {
     fs.writeFileSync(path.join(box.tmp, 'nhrc-timelapse-left-behind', 'clip.mkv'), 'x');
     await awayFromSlotMark();
     // Stopped once the frame is saved AND its recording removed (see above).
-    const r = await box.run([], Object.assign({ TIMELAPSE_WORK_DIR: '/proc/nhrc-camera', TIMELAPSE_RECORD_SECONDS: '8' }, allDay),
+    // Up to 20 s, as above: it stops at the first whole 1080-line keyframe
+    // anyway, and one that arrives damaged leaves time for the next.
+    const r = await box.run([], Object.assign({ TIMELAPSE_WORK_DIR: '/proc/nhrc-camera', TIMELAPSE_RECORD_SECONDS: '20' }, allDay),
       { until: (o) => /Timelapse \S+ \S+: (saved|live video failed)/.test(o) && noRecordingIn(box.tmp), maxMs: 45000 });
     require('child_process').spawnSync('pkill', ['-KILL', '-f', box.dir]);
     assert.ok(/Timelapse: TIMELAPSE_WORK_DIR \/proc\/nhrc-camera cannot be used \(E[A-Z]+\); recording in \S+\/tmp instead\./.test(r.out), r.out);

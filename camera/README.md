@@ -720,7 +720,11 @@ back down. On the Pi in October 2026: by day 848x480 after 5 seconds and
 within 8 seconds. So each frame records up to 45 seconds of live video
 (`TIMELAPSE_RECORD_SECONDS`) and **stops as soon as a 1920x1080 keyframe has
 arrived whole** (`TIMELAPSE_TARGET_HEIGHT`, 1080) - often within seconds at
-night - then keeps the sharpest clean keyframe. Ring decides the resolution
+night - then keeps the sharpest clean keyframe. Whole means no packet lost on
+the way to the Pi, nor on the last step into ffmpeg (ffmpeg says so in its
+report, next to the recording): if one is, it waits for the next keyframe.
+Until November 2026 only the first was watched, and a keyframe damaged on the
+last step could end the recording with no clean frame in it. Ring decides the resolution
 (the light, and the camera's Wi-Fi); nothing on the Pi can raise it. Every
 frame's journal line says how the resolution went and whether 1080 was
 reached, and after sunset one line sums up the day by size.
@@ -1628,9 +1632,16 @@ starting the service: five did not, and failed whenever they began in the last
 seconds before a 5-minute mark, where the next slot's captures joined in
 (found in November 2026 by starting each with the clock moved there;
 `test_at_slot_marks.js` keeps checking it). GitHub runs all of this on every
-push and every evening (`.github/workflows/tests.yml`).
+push and every evening (`.github/workflows/tests.yml`). A test that fails says
+why under its name, the service's ERROR lines first, and that reaches the run
+page's annotations, readable without signing in; `test_at_slot_marks.js` also
+puts the failing run's whole output in the log. (On 20 November 2026 it gave
+only the test's name, and the cause had to be worked out again.)
 
-301 tests covering config validation, the timezone-aware windows, the capture
+The stand-in cameras stream over UDP on ports below 32768, checked free
+first, and their stream's description is read once written whole.
+
+305 tests covering config validation, the timezone-aware windows, the capture
 timetable and the switch to the backup (whole days on a fake clock, including
 both daylight-saving days and day-long outages), camera selection, atomic token
 persistence and file permissions, upload auth and retry behaviour, the Worker
