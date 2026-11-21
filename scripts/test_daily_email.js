@@ -3996,6 +3996,28 @@ test('the reading now never moves the zone - a cold afternoon, a warm one, a mor
   assert.strictEqual(cardAt(etAt(2026, 9, 6, 11, 0), two, 58.8).eff.zone, 'coldWater', 'at 11:00 the morning is over');
 });
 
+test('a day the water flips across the line is one data point, its morning\'s highest reading: 50.1°F in the morning and 49°F that afternoon count as a day at 50 or more', () => {
+  // The Safety Handbook as Emre reads it (November 2026): in the spring, water
+  // that reaches 50.1°F in the morning and drops to 49 in the afternoon counts
+  // as one day towards lifting the Four Oar Rule - however often it flips.
+  const flips = (d) => [[6, 0, 49.6], [8, 0, 50.1], [10, 0, 49.8], [14, 0, 49.0], [16, 0, 48.8]]
+    .map(([h, mi, t]) => [etAt(2027, 3, d, h, mi), t]);
+  const hist = mornings([[2027, 3, 20, 47], [2027, 3, 21, 47], [2027, 3, 22, 47]], [...flips(23), ...flips(24), ...flips(25)]);
+  const upTo = (ms) => hist.filter(h => h.ts <= ms);
+  const d1 = cardAt(etAt(2027, 3, 23, 15), upTo(etAt(2027, 3, 23, 15)), 49);
+  assert.deepStrictEqual([d1.eff.zone, d1.eff.change.direction, d1.eff.change.count], ['fourOar', 'warmer', 1]);
+  assert.strictEqual(d1.site.zoneChangeText(d1.eff),
+    'The latest morning was at 50°F or more (Tue, Mar 23: 50.1°F). The Four Oar Rule lifts after 3 in a row: 2 more to go.');
+  assert.strictEqual(d1.eff.mornings.filter(mo => mo.ts >= etAt(2027, 3, 23, 0) && mo.ts < etAt(2027, 3, 24, 0)).length, 1,
+    'one data point for the day');
+  const d3a = cardAt(etAt(2027, 3, 25, 10, 59), upTo(etAt(2027, 3, 25, 10, 59)), 49.8);
+  assert.deepStrictEqual([d3a.eff.zone, d3a.eff.change.count], ['fourOar', 2], 'the third morning, not over yet');
+  assert.strictEqual(cardAt(etAt(2027, 3, 25, 11, 0), upTo(etAt(2027, 3, 25, 11, 0)), 49.8).eff.zone, 'coldWater',
+    'the third such morning lifts it, at 11 AM');
+  assert.strictEqual(cardAt(etAt(2027, 3, 25, 15), hist, 49).eff.zone, 'coldWater', 'and it stays lifted that afternoon at 49°F');
+  assert.strictEqual(emailZoneAt(etAt(2027, 3, 25, 15), hist, 49), 'coldWater', 'the email agrees');
+});
+
 test('the newest reading counts for its morning when the readings do not have it yet (the archive lags it)', () => {
   const now = etAt(2026, 11, 22, 11, 5);
   const hist = mornings([[2026, 11, 17, 52], [2026, 11, 18, 51], [2026, 11, 19, 51], [2026, 11, 20, 49], [2026, 11, 21, 49]]);
