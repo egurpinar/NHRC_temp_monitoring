@@ -745,6 +745,28 @@ test('no address of the home network in these files', () => {
   }
 });
 
+test('no file in the repository - it is public - holds a home-network address or a personal email address; CLAUDE.local.md, which does, is never committed', () => {
+  const repo = path.join(__dirname, '..');
+  const ls = spawnSync('git', ['ls-files', '-z'], { cwd: repo, encoding: 'utf8' });
+  if (ls.error || ls.status !== 0) return;    // not a git checkout here
+  const lan = /\b(192\.168|10\.\d{1,3}|172\.(1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}\b/;
+  const mail = /[\w.%+-]+@(gmail|googlemail|yahoo|outlook|hotmail|live|icloud|me|aol|protonmail|proton)\.(com|me)\b/i;
+  // Every tracked file, and CLAUDE.md even before it is: Claude Code reads it, and so can anyone.
+  const files = new Set(ls.stdout.split('\0').filter(Boolean).concat(['CLAUDE.md']));
+  const found = [];
+  for (const f of files) {
+    let text;
+    try { text = fs.readFileSync(path.join(repo, f), 'utf8'); } catch (e) { continue; }
+    if (text.includes('\0')) continue;          // a picture or a font
+    const m = lan.exec(text) || mail.exec(text);
+    if (m) found.push(`${f}: ${m[0]}`);
+  }
+  assert.deepStrictEqual(found, []);
+  assert.ok(fs.readFileSync(path.join(repo, '.gitignore'), 'utf8').split('\n').includes('CLAUDE.local.md'));
+  const r = spawnSync('git', ['check-ignore', '-q', 'CLAUDE.local.md'], { cwd: repo });
+  assert.strictEqual(r.status, 0, 'git would commit CLAUDE.local.md');
+});
+
 test('the Mac script is written for the bash every Mac has (3.2)', () => {
   const src = fs.readFileSync(CHECK, 'utf8').replace(/^\s*#.*$/gm, '');
   for (const [re, what] of [[/declare -A|local -A/, 'associative arrays'], [/\bmapfile\b|\breadarray\b/, 'mapfile'],

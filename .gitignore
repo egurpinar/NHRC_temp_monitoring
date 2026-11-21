@@ -22,3 +22,7 @@ node_modules/
 # What the Mac's hourly Pi check writes (camera/pi_check.sh): the Pis' reports,
 # with home-network addresses and logs. Never committed.
 .pi-health/
+
+# Claude Code's private notes for this repository: the Pis' home-network
+# addresses and paths on Emre's Mac. CLAUDE.md is the shared, public one.
+CLAUDE.local.md
