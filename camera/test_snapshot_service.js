@@ -2858,6 +2858,38 @@ test('a time is due for one dock slot (15 minutes), once: not before, not after,
   assert.strictEqual(path.basename(S.timelapseFile(cfg, '2026-08-15', S.parseTimeList('15:00')[0], 'snapshot')), '2026-08-15_1500_snapshot.jpg');
 });
 
+// A set time half a day from `ms`, boathouse time: never due while an
+// end-to-end test runs, whatever the clock says. Those tests used 3:00 until
+// 24 Nov 2026, when GitHub's slot-mark run (test_at_slot_marks.js) began one
+// at 3:14:59 AM - inside 3:00's 15-minute window. The service took its own
+// 3:00 frame first and skipped the requested test capture as "already
+// running", as it should, and the test failed.
+const farTimeLabel = (ms = Date.now()) => {
+  const p = S.localDateParts(new Date(ms + 12 * 3600000), { timeZone: 'America/New_York' });
+  return `${String(Math.floor(p.minutes / 60)).padStart(2, '0')}:${String(p.minutes % 60).padStart(2, '0')}`;
+};
+
+test('the end-to-end tests\' set time is never due while they run - any minute, daylight-saving days too', () => {
+  const base = tlCfg('/nowhere');
+  const dueAt = (label, ms) => S.timelapseDue(new Date(ms), Object.assign({}, base,
+    { timelapse: Object.assign({}, base.timelapse, { times: S.parseTimeList(label) }) }), () => false, new Set()).length > 0;
+  // Why: 3:00 was due at the moment GitHub began the test.
+  assert.ok(dueAt('3:00', Date.parse('2026-11-24T08:14:59.500Z')), 'the old fixed 3:00 was due at 3:14:59 AM');
+  const bad = [];
+  for (const day of ['2026-03-08', '2026-08-15', '2026-11-01', '2026-11-24']) {
+    const from = ny(day, 0).getTime();
+    // Every start, a second before each minute, through the day and past
+    // midnight; due at no point in the 3 minutes after it (a test takes 1).
+    for (let start = from - 1000; start < from + 25 * 3600000 && bad.length < 5; start += 60000) {
+      const label = farTimeLabel(start);
+      for (let t = start; t <= start + 180000; t += 15000) {
+        if (dueAt(label, t)) { bad.push(`${new Date(start).toISOString()} -> ${label}`); break; }
+      }
+    }
+  }
+  assert.deepStrictEqual(bad, [], `due while the test runs: ${bad.join(', ')}`);
+});
+
 /** createTimelapse with a scripted live view and camera; records what it was asked. */
 function fakeTimelapse(dir, opts = {}) {
   let t = (opts.start || ny(DAY, 8, 0, 1)).getTime();
@@ -4439,7 +4471,8 @@ if (HAVE_FFMPEG) {
 
   test('end to end: a test capture on request (SIGUSR2), inside the running service', async () => {
     const box = timelapseSandbox();
-    const r = await box.run([], { TIMELAPSE_TIMES: '3:00', TIMELAPSE_RECORD_SECONDS: '4' }, {
+    // A set time half a day away (farTimeLabel), so no frame of its own is due.
+    const r = await box.run([], { TIMELAPSE_TIMES: farTimeLabel(), TIMELAPSE_RECORD_SECONDS: '4' }, {
       onStart: (child, out) => { const iv = setInterval(() => { if (/Test it now with/.test(out())) { clearInterval(iv); child.kill('SIGUSR2'); } }, 100); },
       until: (o) => /Timelapse test: (saved|live video failed)/.test(o) });
     assert.ok(/Timelapse test requested\./.test(r.out), r.out);
@@ -4451,7 +4484,7 @@ if (HAVE_FFMPEG) {
   test('end to end: a test signal while the service is still starting does not stop it', async () => {
     const box = timelapseSandbox();
     let sent = false;
-    const r = await box.run([], { TIMELAPSE_TIMES: '3:00', TIMELAPSE_RECORD_SECONDS: '4', FAKE_SLOW_CAMERAS_MS: '1500' }, {
+    const r = await box.run([], { TIMELAPSE_TIMES: farTimeLabel(), TIMELAPSE_RECORD_SECONDS: '4', FAKE_SLOW_CAMERAS_MS: '1500' }, {
       // Sent while it is still signing in to Ring, as on the Pi 12 s after a restart.
       onStart: (child) => { const iv = setInterval(() => {
         if (box.events().some(e => e.ev === 'construct')) { clearInterval(iv); sent = true; child.kill('SIGUSR2'); } }, 20); },
