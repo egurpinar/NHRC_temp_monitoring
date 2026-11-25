@@ -72,6 +72,12 @@ colder, only after **three mornings in a row** on the other side of its line.
   for 15 days: the stricter zone, and the page says why.
 - `ZONE_OVERRIDE` in `index.html` is the committee's manual setting. River
   level restrictions are separate (`getFloodStatus`), and the stricter wins.
+- The count towards a change ("Mornings toward the Four Oar Rule: 2 of 3") is
+  said every day, under the zone's title and in the email (`zoneCount`).
+- The email goes out every day except while Winter Rowing is confirmed: three
+  mornings in a row below 40°F, or the committee's setting
+  (`winterRowingConfirmed`; `pauseFor` in `scripts/daily_email.js`). The night
+  after it starts, a last email says so. Missing readings confirm nothing.
 - Code: "ROWING STATUS" in `index.html`. Tests: section 13d2 of
   `scripts/test_daily_email.js`, with real mornings from 2026.
 
@@ -98,7 +104,7 @@ colder, only after **three mornings in a row** on the other side of its line.
 - `data.json`, `history.json` - the water readings, committed by the bot.
   Never reformat `history.json` (jq's layout, over 1 MB).
 - `.github/workflows/` - `tests.yml` (every push and every evening),
-  `daily_email.yml` (1 AM, March 15 to November 15), `fetch_temp.yml` (every
+  `daily_email.yml` (1 AM, every day but during Winter Rowing), `fetch_temp.yml` (every
   30 minutes), `timelapse.yml` (evenings and 6:30 AM).
 
 ## How changes go live
@@ -120,7 +126,7 @@ Every suite must pass before a commit; GitHub runs them all (`tests.yml`).
   Also `camera/test_timelapse_web.js`, `camera/test_pi_check.js` and
   `camera/test_at_slot_marks.js`.
 - `node scripts/test_time_travel.js` - every suite at risky dates and times
-  (daylight saving, 1-2 AM, the season's edges), about 30 minutes;
+  (daylight saving, 1-2 AM, mid-March and mid-November), about 30 minutes;
   `bash scripts/without_network.sh <command>` - no test may reach the network.
 
 Standards:

@@ -13,8 +13,8 @@
  * The moments: tomorrow and the day after at the email job's hours (it waits
  * for 1 AM; GitHub can start it hours late, up to the 5 AM cutoff) and the
  * morning window's edges (5 and 11 AM); the next two daylight-saving changes,
- * through the hour that is skipped or repeated; the season's edges (March 15,
- * November 15) and the new year. Always from now on, never back: the
+ * through the hour that is skipped or repeated; March 15 and November 15 (the
+ * email's season's edges until 25 Nov 2026) and the new year. Always from now on, never back: the
  * repository's own readings are real and must not be newer than the clock.
  * The two suites that take minutes run at three of the moments.
  *

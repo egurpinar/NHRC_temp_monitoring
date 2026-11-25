@@ -478,6 +478,9 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
 .rule-banner.yellow{background:rgba(255,209,102,.15);color:var(--caution);border:1px solid rgba(255,209,102,.5);}
 .rule-banner.red{background:rgba(224,62,62,.12);color:var(--bad);border:1px solid rgba(224,62,62,.3);}
 .rule-banner.neutral{background:rgba(var(--ink),.04);color:var(--muted);border:1px solid rgba(var(--ink),.1);}
+/* The count towards a zone change (zoneCount): under the title, smaller and lighter, in the zone's colour. */
+.rule-banner .zone-count{display:block;margin-top:5px;font-size:.76rem;font-weight:400;line-height:1.45;}
+.rule-banner .zone-count strong{font-weight:700;}
 .allowed-note{margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid rgba(var(--ink),.06);color:var(--white);}
 .fog-outlook:empty{display:none;}
 .fog-outlook{margin-top:14px;padding-top:12px;border-top:1px solid rgba(var(--ink),.06);}
@@ -1125,7 +1128,7 @@ body::before{content:'';position:fixed;inset:0;z-index:0;
                style="background:#f0b429;color:#0d1f3c;font-weight:700;font-size:.8rem;padding:10px 18px;border-radius:8px;border:0;cursor:pointer;font-family:inherit;"/>
       </form>
       <div class="note-text">
-        One email each morning, March 15 – November 15. Unsubscribe anytime from any email.
+        One email each morning, except during Winter Rowing. Unsubscribe anytime from any email.
         Prefer a hosted page? <a href="https://buttondown.com/gurpinar" target="_blank" rel="noopener" style="color:var(--muted);text-decoration:underline;">Sign up on Buttondown</a>.
       </div>
     </div>
@@ -2655,9 +2658,10 @@ function nyTzAbbr(ts) {
  * each once it is over (at 11 AM) and if it has readings - with its highest
  * reading (tempF), when that was read (ts), and it rounded to the nearest
  * 0.5°F (rounded). The newest reading (state.lastTempF) is added when `hist`
- * does not have it yet: the archive can lag it by half an hour.
+ * does not have it yet: the archive can lag it by half an hour. `lookbackDays`
+ * reads further back (winterRowingConfirmed, for the daily email).
  */
-function rulesMornings(hist, nowMs = Date.now()) {
+function rulesMornings(hist, nowMs = Date.now(), lookbackDays = MORNING_WINDOW.lookbackDays) {
   const W = MORNING_WINDOW;
   const all = Array.isArray(hist) ? hist.slice() : [];
   if (state.lastTempF !== null && state.lastFetchedAt !== null) {
@@ -2667,7 +2671,7 @@ function rulesMornings(hist, nowMs = Date.now()) {
   const [y, m, d] = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York',
     year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(nowMs)).split('-').map(Number);
   const out = [];
-  for (let daysAgo = 0; daysAgo <= W.lookbackDays; daysAgo++) {
+  for (let daysAgo = 0; daysAgo <= lookbackDays; daysAgo++) {
     const noon = new Date(Date.UTC(y, m - 1, d - daysAgo, 12, 0, 0));
     const ty = noon.getUTCFullYear(), tm = noon.getUTCMonth() + 1, td = noon.getUTCDate();
     const start = nyWindowBound(ty, tm, td, W.startH, W.startM);
@@ -2763,6 +2767,24 @@ function getEffectiveLevel(tempF) {
 }
 
 /**
+ * Whether Winter Rowing is confirmed at `nowMs`: set by the Safety Committee,
+ * or the latest three mornings in a row on one side of 40°F - however long
+ * ago, up to a year - were below it. The daily email pauses while it is
+ * (scripts/daily_email.js; Safety Committee, 25 November 2026). Not the same
+ * as the zone: too few mornings with readings, or mornings back and forth
+ * across 40°F, put the page in Winter Rowing as the stricter zone, but
+ * confirm nothing. So a sensor that fails in the fall does not stop the
+ * email, and one taken out for the winter does not start it again.
+ */
+const WINTER_CONFIRM_LOOKBACK_DAYS = 366;
+function winterRowingConfirmed(hist, nowMs = Date.now()) {
+  const override = activeOverride();
+  if (override !== null) return override === 'winter';
+  const line = ZONE_LINES.find(L => L.below === 'winter').f;
+  return sideOfLine(rulesMornings(hist, nowMs, WINTER_CONFIRM_LOOKBACK_DAYS), line) === 'below';
+}
+
+/**
  * A morning's highest reading, for the words: "49.8°F, counted as 50.0°F"
  * when the rounding (to 0.5°F, for the sensor's sensitivity) took it up to
  * the line - or the words would say a morning of 49.8°F was at 50 or more.
@@ -2781,22 +2803,74 @@ const ZONE_WORDS = Object.freeze({
   normal:    { title: 'No temperature restrictions',   band: 'water 60°F or more', name: 'No temperature restrictions' },
 });
 
+// A zone's name inside a sentence: "the Four Oar Rule", "no temperature restrictions".
+const zoneNameMid = (zone) => ZONE_WORDS[zone].name.replace(/^(The|No) /, (w) => w.toLowerCase());
+// Where a zone's mornings are: "below 40°F", "inside 50–60°F", "at 60°F or more".
+function zoneBandWords(zone) {
+  const e = ZONE_EDGES[zone];
+  if (e.under === undefined) return `below ${e.over}°F`;
+  if (e.over === undefined) return `at ${e.under}°F or more`;
+  return `inside ${e.under}–${e.over}°F`;
+}
+// The time a morning ends, in words: "11 AM".
+function morningEndWords() {
+  const { endH: h, endM: m } = MORNING_WINDOW;
+  return `${h % 12 || 12}${m ? `:${String(m).padStart(2, '0')}` : ''} ${h < 12 ? 'AM' : 'PM'}`;
+}
+// Whether `nowMs` is inside today's morning, 5 to 11 AM boathouse time.
+function inMorningWindow(nowMs) {
+  const W = MORNING_WINDOW;
+  const [y, m, d] = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York',
+    year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(nowMs)).split('-').map(Number);
+  return nowMs >= nyWindowBound(y, m, d, W.startH, W.startM) && nowMs < nyWindowBound(y, m, d, W.endH, W.endM);
+}
+
 /**
- * Where the latest mornings are heading, in words - for the rules card and
- * the daily email (plain text) - or '' when they are not heading out of the
- * zone. E.g. "The latest 2 mornings were below 50°F (Thu, Nov 19: 49.4°F;
- * Fri, Nov 20: 49.0°F). The Four Oar Rule starts after 3 in a row: 1 more to go."
+ * The count towards the next zone change, said every day under the zone's
+ * title on the rules card, and in the daily email. Until 25 November 2026 a
+ * count was said only once a morning had crossed a line, and with none said
+ * members could not tell the three-morning rule was being counted (Emre).
+ *   "Mornings toward a change: 0 of 3. The latest, Tue, Nov 24, was 51.0°F, inside 50–60°F."
+ *   "Mornings toward the Four Oar Rule: 1 of 3 below 50°F. It starts after 2 more in a row."
+ *   "Mornings toward the Four Oar Rule: 2 of 3 below 50°F. If the next morning
+ *    is below 50°F too, it starts at 11 AM that day."
+ * `withDays` adds each of those mornings' highest reading (the email; the
+ * card lists them below). From 5 to 11 AM it adds that this morning counts
+ * at 11 - or, with one to go, says "If this morning is below 50°F too, it
+ * starts at 11 AM today." Returns { lead, rest } - the lead is shown in bold -
+ * or null when the zone is set by the Safety Committee or too few mornings
+ * have readings, each said in its own words.
  */
-function zoneChangeText(eff) {
-  const c = eff && eff.change;
-  if (!c || eff.override || eff.insufficient) return '';
+function zoneCount(eff, nowMs = Date.now(), withDays = false) {
+  if (!eff || eff.override || eff.insufficient || !Array.isArray(eff.mornings) || !eff.mornings.length) return null;
   const needed = eff.needed || MORNINGS_NEEDED;
-  const where = c.direction === 'colder' ? `below ${c.line}°F` : `at ${c.line}°F or more`;
-  const days = c.mornings.slice().reverse().map(mo => `${mo.date}: ${morningTemp(mo, c.line)}`).join('; ');
-  const lead = c.count === 1 ? `The latest morning was ${where}` : `The latest ${c.count} mornings were ${where}`;
-  const z = c.direction === 'colder' ? ZONE_WORDS[ZONE_LINES.find(L => L.f === c.line).below] : ZONE_WORDS[eff.zone];
-  const verb = c.direction === 'colder' ? z.starts : z.lifts;
-  return `${lead} (${days}). ${z.name} ${verb} after ${needed} in a row: ${needed - c.count} more to go.`;
+  const at = morningEndWords();
+  const c = eff.change;
+  let lead, rest;
+  if (!c) {
+    const mo = labelledMorning(eff.mornings[0]);
+    const e = ZONE_EDGES[eff.zone];
+    lead = `Mornings toward a change: 0 of ${needed}.`;
+    rest = ` The latest, ${mo.date}, was ${morningTemp(mo, e.under !== undefined ? e.under : e.over)}, ${zoneBandWords(eff.zone)}.`;
+  } else {
+    const colder = c.direction === 'colder';
+    const L = ZONE_LINES.find(x => x.f === c.line);
+    const dest = colder ? L.below : L.above;
+    const where = colder ? `below ${c.line}°F` : `at ${c.line}°F or more`;
+    // Colder: the stricter zone starts. Warmer: the zone in force lifts.
+    const who = colder ? (ZONE_WORDS[dest].starts === 'start' ? 'they' : 'it') : zoneNameMid(eff.zone);
+    const verb = colder ? ZONE_WORDS[dest].starts : ZONE_WORDS[eff.zone].lifts;
+    const more = needed - c.count;
+    const days = withDays ? ` (${c.mornings.slice().reverse().map(mo => `${mo.date}: ${morningTemp(mo, c.line)}`).join('; ')})` : '';
+    lead = `Mornings toward ${zoneNameMid(dest)}: ${c.count} of ${needed}`;
+    rest = ` ${where}${days}. `;
+    if (more !== 1) rest += `${who.charAt(0).toUpperCase()}${who.slice(1)} ${verb} after ${more} more in a row.`;
+    // One to go, while the morning that may be it is under way: say it of this morning.
+    else if (inMorningWindow(nowMs)) return { lead, rest: rest + `If this morning is ${where} too, ${who} ${verb} at ${at} today.` };
+    else rest += `If the next morning is ${where} too, ${who} ${verb} at ${at} that day.`;
+  }
+  if (inMorningWindow(nowMs)) rest += ` This morning counts at ${at}.`;
+  return { lead, rest };
 }
 
 // ── Status wording, shared with the daily email ─────────────────────────────
@@ -2881,14 +2955,17 @@ function renderRowingStatus(tempF) {
   } else {
     rule = `${words.title} (${words.band})`;
   }
-  const heading = zoneChangeText(eff);
-  if (heading) {
-    // The mornings so far on the other side of the line, oldest first.
+  // The count towards a change, under the zone's title (zoneCount).
+  const count = isOverride ? null : zoneCount(eff, Date.now());
+  if (count && eff.change) {
+    // The mornings counted so far, oldest first: the count's own sentence is
+    // under the title, so this box only lists them.
     const c = eff.change;
     const colder = c.direction === 'colder';
+    const where = colder ? `below ${c.line}°F` : `at ${c.line}°F or more`;
     notes += `<div class="zone-change" style="margin-top:10px;padding:10px 14px;border-radius:8px;font-size:.78rem;line-height:1.6;
         background:${colder ? 'rgba(240,180,41,0.08)' : 'rgba(var(--ink),0.04)'};border:1px solid ${colder ? 'rgba(240,180,41,0.3)' : 'rgba(var(--ink),0.1)'};">
-        ${colder ? '<strong style="color:var(--caution);">&#9888; Colder</strong> ' : '<strong>Warmer</strong> '}${heading}
+        ${colder ? '<strong style="color:var(--caution);">&#9888; Colder</strong>' : '<strong>Warmer</strong>'}: the ${c.count === 1 ? 'morning' : `${c.count} mornings`} ${where} so far
         <div style="margin-top:8px;">${c.mornings.slice().reverse().map(mo =>
           `<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-top:1px solid rgba(var(--ink),0.05);">
              <span style="color:var(--white);">${mo.date}</span>
@@ -2905,7 +2982,10 @@ function renderRowingStatus(tempF) {
   notes = `<div class="allowed-note">${ALLOWED_NOTE_HTML}</div>` + notes;
 
   banner.className = `rule-banner ${cssLevel}`;
-  banner.innerHTML = `<span>${rule}</span>`;
+  // A space before the count, so the title and the count read apart as text
+  // (a screen reader, a copy) as they look apart on the page.
+  banner.innerHTML = `<span>${rule}${count
+    ? ` <span class="zone-count"><strong>${count.lead}</strong>${count.rest}</span>` : ''}</span>`;
 
   const lvl = state.riverLevel;
   document.getElementById('tiers-grid').innerHTML = tiers.map(tier=>`

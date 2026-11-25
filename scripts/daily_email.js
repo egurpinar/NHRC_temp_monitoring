@@ -19,8 +19,10 @@
  *
  * Usage:
  *   node scripts/daily_email.js            # print HTML to stdout (dry run)
- *   node scripts/daily_email.js --send     # send via Buttondown API
+ *   node scripts/daily_email.js --send     # send via Buttondown API (none during Winter Rowing)
+ *   node scripts/daily_email.js --send --force   # send even during Winter Rowing
  *   node scripts/daily_email.js --json     # print computed data as JSON
+ *   node scripts/daily_email.js --due      # is a report due tonight? send, last or paused
  */
 
 'use strict';
@@ -43,46 +45,54 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const INDEX_HTML = path.join(REPO_ROOT, 'index.html');
 
 // ═════════════════════════════════════════════════════════════════════════════
-// ROWING SEASON — Safety Committee setting
+// NO EMAIL DURING WINTER ROWING — Safety Committee decision, 25 November 2026
 // ═════════════════════════════════════════════════════════════════════════════
-// The daily email is sent every day DURING the season and paused outside it.
+// The daily email goes out every day of the year, except while Winter Rowing
+// is confirmed: three mornings in a row below 40°F, or set by the Safety
+// Committee (index.html's winterRowingConfirmed). Missing readings do not
+// confirm it, so a broken sensor does not stop the email.
 //
-// Both endpoints are INCLUSIVE: with the values below, March 15 and November 15
-// both receive an email; March 14 and November 16 do not. Months are 1-based
-// (1 = January ... 12 = December).
+// The night after Winter Rowing starts, one more email goes out and says the
+// emails pause ('last'). It cannot tell when the Committee set its zone, so
+// with ZONE_OVERRIDE it simply stops.
 //
-// The date is evaluated in America/New_York, NOT UTC. This matters: the job
-// fires at 08:00/09:00 UTC, which is still the previous calendar day in the
-// evening — a UTC comparison would start and end the season a day early.
-//
-// To change the season, edit these four numbers. A range that wraps the new
-// year (e.g. Nov 1 -> Mar 31) is supported.
-const SEASON = {
-  startMonth: 3,  startDay: 15,   // March 15
-  endMonth:  11,  endDay:   15,   // November 15
-};
+// Until then the email ran from March 15 to November 15. From November 16,
+// 2026 it sent nothing, while Cold Water restrictions still applied.
+const DAY_MS = 24 * 3600000;
 
 /**
- * True if the given instant falls inside the configured rowing season,
- * evaluated in the boathouse's local timezone. Handles ranges that wrap the
- * year end. Both endpoints are inclusive.
+ * Whether tonight's report goes out, from the site's own rules: { state, why }.
+ * state is 'send', 'last' (Winter Rowing started since the night before: send,
+ * and say the emails pause) or 'paused'. Expects logic.state to hold the
+ * readings, as computeDigest sets it; `eff` is getEffectiveLevel's.
  */
-function isInSeason(now = new Date(), season = SEASON) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York', month: 'numeric', day: 'numeric',
-  }).formatToParts(now);
-  const month = parseInt(parts.find(p => p.type === 'month').value, 10);
-  const day   = parseInt(parts.find(p => p.type === 'day').value, 10);
+function pauseFor(logic, eff, history, nowMs) {
+  const confirmed = logic.winterRowingConfirmed(history, nowMs);
+  if (!confirmed) return { state: 'send', why: `Winter Rowing is not confirmed (${ZONE_LABEL[eff.zone] || eff.zone}): the report is due.` };
+  // Winter Rowing confirmed is Winter Rowing on the page too. Should the two
+  // ever disagree, the report goes out: a report too many is better than none.
+  if (eff.zone !== 'winter') {
+    return { state: 'send', why: `Winter Rowing looks confirmed but the zone is ${ZONE_LABEL[eff.zone] || eff.zone}: the report is due.` };
+  }
+  const by = eff.override ? 'set by the Safety Committee' : 'three mornings in a row below 40°F';
+  if (!eff.override && !logic.winterRowingConfirmed(history, nowMs - DAY_MS)) {
+    return { state: 'last', why: `Winter Rowing started (${by}): tonight's report goes out, the last until it ends, and says so.` };
+  }
+  return { state: 'paused', why: `Winter Rowing is in effect (${by}): the daily email is paused until it ends.` };
+}
 
-  // Encode month/day as a single comparable integer (e.g. Mar 15 -> 315,
-  // Nov 15 -> 1115) so the range check is a plain numeric comparison.
-  const key   = month * 100 + day;
-  const start = season.startMonth * 100 + season.startDay;
-  const end   = season.endMonth   * 100 + season.endDay;
+// What the last email before the pause says, in its zone box and its subject
+// (short: the subject stays within 78 characters, a high river included).
+const LAST_EMAIL_WORDS = Object.freeze({
+  lead: 'This is the last daily email until Winter Rowing ends.',
+  rest: 'The emails pause during Winter Rowing and start again once it lifts. roworno.com stays up to date.',
+  subject: 'last email',
+});
 
-  return start <= end
-    ? (key >= start && key <= end)    // normal range, e.g. Mar 15 - Nov 15
-    : (key >= start || key <= end);   // wraps the year, e.g. Nov 1 - Mar 31
+/** As pauseFor, from the water readings alone (for --due): sets logic.state as computeDigest does. */
+function emailPause(logic, water, now = new Date()) {
+  const { tempF } = setWaterState(logic, water.raw, water.history);
+  return pauseFor(logic, logic.getEffectiveLevel(tempF), water.history, now.getTime());
 }
 
 // Buttondown's free tier caps at 100 subscribers. Warn before that becomes a
@@ -167,7 +177,7 @@ function loadSiteLogic(indexHtmlPath = INDEX_HTML) {
   // Expose the pure functions + shared state object we need.
   const EXPORTS = [
     'state', 'ZONE_TIERS', 'ZONE_OVERRIDE',
-    'getEffectiveLevel', 'rulesMornings', 'sideOfLine', 'zoneChangeText', 'nyWindowBound', 'nyTzAbbr',
+    'getEffectiveLevel', 'rulesMornings', 'sideOfLine', 'zoneCount', 'winterRowingConfirmed', 'nyWindowBound', 'nyTzAbbr',
     'getFloodStatus', 'combineStatus', 'boatKeys', 'floodStatusForBoat',
     'floodSummaryLabel', 'riverStaleNote', 'extractTemp', 'parseLastDeviceData',
     // The water readings: the Worker's first, the repository's alongside, as on the site.
@@ -545,18 +555,22 @@ const ZONE_COLOR = {
   normal:    { bg: 'rgba(46,125,79,0.15)',  border: 'rgba(46,125,79,0.4)',  text: '#5cc98a' },
 };
 
-function computeDigest(logic, { raw, history }, river, weather, now = new Date(), fogInputs = null, nwsForecast = undefined) {
+/** The water readings into the site's state object, exactly as the browser sets them: { tempF, fetchedAt }. */
+function setWaterState(logic, raw, history) {
   const tempC = logic.extractTemp(raw);
   if (tempC === null || tempC === undefined) {
     throw new Error('Could not extract water temperature from data.json');
   }
   const tempF = Math.round((tempC * 9 / 5 + 32) * 10) / 10;
   const fetchedAt = raw.fetchedAt ? new Date(raw.fetchedAt) : null;
-
-  // Populate the site's state object exactly as the browser would.
   logic.state.allHistory   = history;
   logic.state.lastTempF    = tempF;
   logic.state.lastFetchedAt = fetchedAt;
+  return { tempF, fetchedAt };
+}
+
+function computeDigest(logic, { raw, history }, river, weather, now = new Date(), fogInputs = null, nwsForecast = undefined) {
+  const { tempF, fetchedAt } = setWaterState(logic, raw, history);
   logic.state.riverLevel   = river.level;
 
   const eff   = logic.getEffectiveLevel(tempF);
@@ -641,9 +655,12 @@ function computeDigest(logic, { raw, history }, river, weather, now = new Date()
     // A manual Safety Committee setting is labelled as one, as on the website.
     zoneLabel: (ZONE_LABEL[eff.zone] || eff.zone) + (eff.override ? ' (set by the Safety Committee)' : ''),
     zoneColor: ZONE_COLOR[eff.zone] || ZONE_COLOR.normal,
-    // Where the mornings are heading, in the website's words: say the water
-    // has been below 50°F two mornings running, while Cold Water still holds.
-    zoneChange: logic.zoneChangeText(eff),
+    // The count towards the next zone change, in the website's words, with
+    // each morning's reading: { lead, rest }, or null (see zoneCount).
+    zoneCount: logic.zoneCount(eff, now.getTime(), true),
+    // Whether tonight's report goes out, and whether it is the last before
+    // Winter Rowing pauses the emails.
+    pause: pauseFor(logic, eff, history, now.getTime()),
     rows,
     river,
     floodSummary,
@@ -965,8 +982,9 @@ function renderEmailHtml(d) {
 
       <tr><td style="padding:16px ${PAD}px 12px ${PAD}px;background-color:${C.card};">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-          <tr><td style="background-color:${zoneStyle.bg};border:1px solid ${zoneStyle.border};border-radius:8px;padding:12px 14px;font-size:15px;font-weight:bold;color:${zoneStyle.text};font-family:Arial,Helvetica,sans-serif;">${esc(d.zoneLabel)}${d.zoneChange
-            ? `<div style="font-size:13px;font-weight:normal;line-height:1.45;padding-top:6px;">${esc(d.zoneChange)}</div>` : ''}</td></tr>
+          <tr><td style="background-color:${zoneStyle.bg};border:1px solid ${zoneStyle.border};border-radius:8px;padding:12px 14px;font-size:15px;font-weight:bold;color:${zoneStyle.text};font-family:Arial,Helvetica,sans-serif;">${esc(d.zoneLabel)}${d.zoneCount
+            ? `<div style="font-size:13px;font-weight:normal;line-height:1.45;padding-top:6px;color:${zoneStyle.text};background-color:${zoneStyle.bg};"><strong>${esc(d.zoneCount.lead)}</strong>${esc(d.zoneCount.rest)}</div>` : ''}${d.pause && d.pause.state === 'last'
+            ? `<div style="font-size:13px;font-weight:normal;line-height:1.45;padding-top:8px;color:${zoneStyle.text};background-color:${zoneStyle.bg};"><strong>${esc(LAST_EMAIL_WORDS.lead)}</strong> ${esc(LAST_EMAIL_WORDS.rest)}</div>` : ''}</td></tr>
         </table>
       </td></tr>
 
@@ -1097,9 +1115,11 @@ function renderSubject(d, now = new Date()) {
   // body: the subject is all many members read, and it would otherwise show a
   // stale temperature exactly like a current one.
   const waterPart = `${d.tempF.toFixed(1)}F${d.sensorStale ? ' (old reading)' : ''}`;
+  // The last email before the Winter Rowing pause says so where all can see it.
+  const lastPart = d.pause && d.pause.state === 'last' ? ` - ${LAST_EMAIL_WORDS.subject}` : '';
 
   return toAsciiSubject(
-    `NHRC ${dateShort} - ${nwsPrefix}${fogPrefix}${headline} - ${waterPart} - ${riverPart}`);
+    `NHRC ${dateShort} - ${nwsPrefix}${fogPrefix}${headline} - ${waterPart} - ${riverPart}${lastPart}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1265,16 +1285,14 @@ async function build() {
 async function main() {
   const args = process.argv.slice(2);
 
-  // Season gate — applies only to real sends. Previews (--json, default HTML
-  // output) always work so the committee can check the email off-season.
-  // --force overrides the gate for a deliberate out-of-season send.
-  if (args.includes('--send') && !args.includes('--force') && !isInSeason()) {
-    const today = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York', month: 'long', day: 'numeric',
-    }).format(new Date());
-    const fmt = (m, d) => new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric' })
-      .format(new Date(Date.UTC(2000, m - 1, d, 12)));
-    console.log(`Off-season: today is ${today}; season runs ${fmt(SEASON.startMonth, SEASON.startDay)} through ${fmt(SEASON.endMonth, SEASON.endDay)}. Nothing sent.`);
+  // Is a report due tonight? One word on stdout - send, last or paused - and
+  // why on stderr. The email job asks before its tests, and skips them, the
+  // build and the send, and any notice, only on a clear "paused".
+  if (args.includes('--due')) {
+    const logic = loadSiteLogic();
+    const p = emailPause(logic, await loadWater(logic), new Date());
+    console.error(p.why);
+    console.log(p.state);
     return;
   }
 
@@ -1285,6 +1303,13 @@ async function main() {
     return;
   }
   if (args.includes('--send')) {
+    // No email during Winter Rowing - applies only to real sends. Previews
+    // (--json, the HTML) always work, so the email can be checked meanwhile;
+    // --force sends anyway.
+    if (digest.pause.state === 'paused' && !args.includes('--force')) {
+      console.log(`${digest.pause.why} Nothing sent.`);
+      return;
+    }
     const now = new Date();
 
     // Duplicate guard. The workflow deliberately allows several runs inside the
@@ -1324,11 +1349,11 @@ module.exports = {
   loadSiteLogic, loadLocalData, loadWater, loadRiver, loadWeather, loadFogInputs, loadNwsForecast, NWS_HEADERS,
   loadTimelapse, timelapseFor, timelapseRow, TIMELAPSE_PAGE,
   computeDigest, renderEmailHtml, renderSubject, sendViaButtondown, build,
-  parseGaugeSeries, checkSubscriberHeadroom, isInSeason, dailySlug,
+  parseGaugeSeries, checkSubscriberHeadroom, pauseFor, emailPause, setWaterState, dailySlug,
   alreadySentToday, isPrimarySendHour,
   describeWeatherCode, withWeatherDescription, formatLocalClock,
   toAsciiEntities, toAsciiSubject,
-  STALE_MS, SEASON, SUBSCRIBER_FREE_LIMIT, LOGO_URL,
+  STALE_MS, LAST_EMAIL_WORDS, SUBSCRIBER_FREE_LIMIT, LOGO_URL,
   WMO_CODES_FALLBACK, WMO_ICONS_FALLBACK, DEFAULT_WEATHER_ICON,
 };
 

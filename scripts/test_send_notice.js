@@ -122,42 +122,7 @@ test('its slug is the day\'s - the report\'s, as daily_email.js makes it - and "
   }
 }, { needsM: true });
 
-section('2. The season, read from daily_email.js');
-
-test('the season it reads is daily_email.js\'s', () => {
-  assert.deepStrictEqual(N.readSeason(), Object.assign({}, M.SEASON));
-}, { needsM: true });
-
-test('in season on exactly the days daily_email.js sends - every day of 2026 and 2027, late evening and just after midnight', () => {
-  const season = N.readSeason();
-  for (let d = Date.UTC(2026, 0, 1); d < Date.UTC(2028, 0, 1); d += 86400000) {
-    for (const hour of [4, 6, 17]) {   // 11 PM / midnight-1 AM / noon-1 PM in New York
-      const now = new Date(d + hour * 3600000);
-      assert.strictEqual(N.inSeason(now, season), M.isInSeason(now), now.toISOString());
-    }
-  }
-}, { needsM: true });
-
-test('a season that wraps the new year, or ends on either side of the 15th, is read and applied as daily_email.js would', () => {
-  const src = (a, b, c, e) => `const SEASON = {\n  startMonth: ${a},  startDay: ${b},   // x\n  endMonth:  ${c},  endDay:   ${e},   // y\n};`;
-  for (const s of [[11, 1, 3, 31], [3, 15, 11, 15], [1, 1, 12, 31], [6, 1, 6, 30]]) {
-    const season = N.readSeason(src(...s));
-    assert.deepStrictEqual(season, { startMonth: s[0], startDay: s[1], endMonth: s[2], endDay: s[3] });
-    for (let d = Date.UTC(2026, 0, 1); d < Date.UTC(2027, 0, 1); d += 86400000) {
-      const now = new Date(d + 6 * 3600000);
-      assert.strictEqual(N.inSeason(now, season), M.isInSeason(now, season), `${s} ${now.toISOString()}`);
-    }
-  }
-  assert.deepStrictEqual(N.readSeason('const SEASON = { startMonth: 4, startDay: 1, endMonth: 10, endDay: 31 };'),
-    { startMonth: 4, startDay: 1, endMonth: 10, endDay: 31 }, 'on one line too');
-}, { needsM: true });
-
-test('a season it cannot read is no season: nothing is sent', async () => {
-  for (const bad of ['', 'const SEASON = {};', 'const SEASON = { startMonth: 13, startDay: 1, endMonth: 11, endDay: 15 };',
-    'const SEASON = { startMonth: 3, startDay: 15, endMonth: 11 };']) assert.strictEqual(N.readSeason(bad), null, bad);
-});
-
-section('3. Sending: at most one email a day');
+section('2. Sending: at most one email a day');
 
 test('in season, nothing out yet today: the notice is sent, once, as the report is', async () => {
   const bd = buttondown();
@@ -227,18 +192,12 @@ test('the send itself fails: said, and the step fails (exit 1) - not taken for s
   assert.strictEqual(script.status, 1, script.stdout + script.stderr);
 });
 
-test('outside the season: no notice, and Buttondown is not even asked', async () => {
-  for (const iso of ['2026-11-16T06:05:00Z', '2027-01-15T06:05:00Z', '2027-03-14T06:05:00Z']) {
+test('any day of the year: there are no dates - the job runs it only when a report was due (not while Winter Rowing pauses the email)', async () => {
+  // The days the March 15 - November 15 season used to leave out, and its edges.
+  for (const iso of ['2026-11-16T06:05:00Z', '2027-01-15T06:05:00Z', '2027-03-14T06:05:00Z', '2026-11-15T06:05:00Z', '2027-03-15T06:05:00Z', '2026-07-15T05:05:00Z']) {
     const bd = buttondown();
     const r = await withButtondown(bd, 'test-key', () => N.main(['--send'], at(iso)));
     assert.strictEqual(r.code, 0, iso);
-    assert.deepStrictEqual(bd.calls, [], iso);
-    assert.ok(r.lines.some(l => /Outside the rowing season/.test(l)), iso);
-  }
-  // The season's first and last days are in it.
-  for (const iso of ['2026-11-15T06:05:00Z', '2027-03-15T06:05:00Z']) {
-    const bd = buttondown();
-    await withButtondown(bd, 'test-key', () => N.main(['--send'], at(iso)));
     assert.deepStrictEqual(bd.calls.map(c => c.method), ['GET', 'POST'], iso);
   }
 });
@@ -264,55 +223,63 @@ test('once the notice is out, the report\'s own check counts it: a later run sen
   assert.deepStrictEqual(r.code, { known: true, found: true });
 }, { needsM: true });
 
-section('4. On its own: none of the code whose failure it reports');
+section('3. On its own: none of the code whose failure it reports');
 
-test('it loads neither daily_email.js nor index.html', () => {
+test('it loads neither daily_email.js nor index.html - nor reads any file', () => {
   const src = fs.readFileSync(path.join(__dirname, 'send_notice.js'), 'utf8');
   const requires = [...src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map(m => m[1]);
-  assert.deepStrictEqual(requires.sort(), ['fs', 'path']);
-  // It reads one file: daily_email.js, as text, for the season.
-  assert.strictEqual(src.split('readFileSync(').length - 1, 1);
-  assert.ok(src.includes("fs.readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8')"));
+  assert.deepStrictEqual(requires, [], 'no module at all, so no file can be read');
+  // Until 25 Nov 2026 it read the season's dates from daily_email.js's text.
+  assert.ok(!/readFileSync|readFile\(/.test(src), 'no file read');
 });
 
-test('with daily_email.js broken (it does not even parse), the notice still works; with it gone, nothing is sent', () => {
+test('with daily_email.js broken (it does not even parse), or gone, the notice still goes out', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nhrc-notice-'));
   try {
     fs.copyFileSync(path.join(__dirname, 'send_notice.js'), path.join(dir, 'send_notice.js'));
     const real = fs.readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8');
     fs.writeFileSync(path.join(dir, 'daily_email.js'), real + '\n}}} this is not javascript (\n');
     assert.notStrictEqual(spawnSync(process.execPath, ['--check', path.join(dir, 'daily_email.js')]).status, 0, 'it really is broken');
-    let r = spawnSync(process.execPath, [path.join(dir, 'send_notice.js')], { encoding: 'utf8' });
-    assert.strictEqual(r.status, 0, r.stderr);
-    assert.ok(/Subject: NHRC \w{3} \d{1,2} - No conditions report today/.test(r.stdout), r.stdout);
-    const N2 = require(path.join(dir, 'send_notice.js'));
-    assert.deepStrictEqual(N2.readSeason(), Object.assign({}, M.SEASON), 'the season is still read');
-    fs.unlinkSync(path.join(dir, 'daily_email.js'));
-    r = spawnSync(process.execPath, [path.join(dir, 'send_notice.js'), '--send'], { encoding: 'utf8', env: Object.assign({}, process.env, { BUTTONDOWN_API_KEY: 'k' }) });
-    assert.strictEqual(r.status, 1);
-    assert.ok(/Could not read the rowing season/.test(r.stdout), r.stdout);
+    // A stand-in Buttondown, in the process: nothing out today, the send accepted.
+    const preload = path.join(dir, 'buttondown.js');
+    fs.writeFileSync(preload, `globalThis.fetch = async (u, o) => (o && o.method === 'POST')
+      ? { ok: true, status: 201, text: async () => '{"id":"em_1"}' }
+      : { ok: true, status: 200, json: async () => ({ results: [] }) };`);
+    const env = Object.assign({}, process.env, { BUTTONDOWN_API_KEY: 'k' });
+    for (const gone of [false, true]) {
+      if (gone) fs.unlinkSync(path.join(dir, 'daily_email.js'));
+      let r = spawnSync(process.execPath, [path.join(dir, 'send_notice.js')], { encoding: 'utf8' });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.ok(/Subject: NHRC \w{3} \d{1,2} - No conditions report today/.test(r.stdout), r.stdout);
+      r = spawnSync(process.execPath, ['-r', preload, path.join(dir, 'send_notice.js'), '--send'], { encoding: 'utf8', env });
+      assert.strictEqual(r.status, 0, `${gone ? 'gone' : 'broken'}: ${r.stdout}${r.stderr}`);
+      assert.ok(/^Sent the notice: NHRC \w{3} \d{1,2} - No conditions report today/m.test(r.stdout), r.stdout);
+    }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-}, { needsM: true });
+});
 
-section('5. How the jobs run it');
+section('4. How the jobs run it');
 
 const wf = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'daily_email.yml'), 'utf8');
 /** The workflow's steps as [name, text] - the text from its "- name:" line to the next. */
 const steps = wf.split(/\n(?=      - name: )/).slice(1).map(s => [/^ {6}- name: (.*)/.exec(s)[1].trim(), s]);
 const step = (name) => (steps.find(([n]) => n === name) || [])[1] || '';
 
-test('the email job: when the tests, the build or the send failed - not on a dry run, not before the send window - its tests, then the notice', () => {
+test('the email job: when the tests, the build or the send failed - not on a dry run, not before the send window, not while Winter Rowing pauses the email - its tests, then the notice', () => {
   const names = steps.map(([n]) => n);
   const notice = 'No report today - tell the subscribers instead';
   assert.strictEqual(names[names.length - 1], notice, 'the last step');
   assert.ok(/\n {8}id: tests\n/.test(step('Run test suite')));
   assert.ok(/\n {8}id: build\n/.test(step('Build email (dry run preview)')));
   assert.ok(/\n {8}id: send\n/.test(step('Send via Buttondown')));
+  // The pause is decided by the job's "Is a report due" step (daily_email.js --due), before the tests.
+  assert.ok(/\n {8}id: due\n/.test(step('Is a report due tonight? (none during Winter Rowing)')));
   const s = step(notice);
   const cond = /\n {8}if: >-\n((?: {10}.*\n)+)/.exec(s);
   assert.ok(cond, s);
   assert.strictEqual(cond[1].replace(/\s+/g, ' ').trim(),
     "failure() && steps.gate.outputs.proceed == 'true' && github.event.inputs.dry_run != 'true' && " +
+    "steps.due.outputs.paused != 'true' && " +
     "(steps.tests.outcome == 'failure' || steps.build.outcome == 'failure' || steps.send.outcome == 'failure')");
   assert.ok(/\n {10}BUTTONDOWN_API_KEY: \$\{\{ secrets\.BUTTONDOWN_API_KEY \}\}\n/.test(s));
   assert.ok(/\n {8}run: \|\n {10}NOTICE_PREFLIGHT=1 node scripts\/test_send_notice\.js\n {10}node scripts\/send_notice\.js --send\n?$/.test(s), s);

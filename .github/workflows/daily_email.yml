@@ -1,7 +1,9 @@
 name: Daily Conditions Email
 
-# Sends the daily conditions digest at 1:00 AM Eastern, year-round, so it is in
-# inboxes well before anyone leaves for a dawn practice.
+# Sends the daily conditions digest at 1:00 AM Eastern, so it is in inboxes
+# well before anyone leaves for a dawn practice - every day of the year except
+# during Winter Rowing (Safety Committee, 25 Nov 2026; until then, March 15 to
+# November 15). The night after Winter Rowing starts, a last one says so.
 #
 # WHY THE JOB WAITS INSTEAD OF CHECKING THE CLOCK AND GIVING UP
 # -------------------------------------------------------------
@@ -48,8 +50,8 @@ on:
         description: 'Build the email but do NOT send it'
         type: boolean
         default: true
-      force_off_season:
-        description: 'Send even if today falls outside the rowing season'
+      force_during_pause:
+        description: 'Send even while Winter Rowing pauses the email'
         type: boolean
         default: false
 
@@ -115,9 +117,23 @@ jobs:
         # Never fails the job: if the refresh fails, the email still goes out.
         run: bash scripts/refresh_checkout.sh
 
+      - name: Is a report due tonight? (none during Winter Rowing)
+        id: due
+        if: steps.gate.outputs.proceed == 'true'
+        # No daily email while Winter Rowing is confirmed: three mornings in a
+        # row below 40°F, or set by the Safety Committee (daily_email.js --due,
+        # from index.html's rules). On a clear "paused" the tests, the build,
+        # the send and the notice are skipped - on a manual run only the
+        # notice. Anything else, an error included, lets the report go ahead:
+        # a report too many is better than none.
+        run: |
+          DUE=$(node scripts/daily_email.js --due | tail -n 1) || DUE="error"
+          echo "Due: $DUE"
+          if [ "$DUE" = "paused" ]; then echo "paused=true" >> "$GITHUB_OUTPUT"; else echo "paused=false" >> "$GITHUB_OUTPUT"; fi
+
       - name: Run test suite
         id: tests
-        if: steps.gate.outputs.proceed == 'true'
+        if: steps.gate.outputs.proceed == 'true' && (steps.due.outputs.paused != 'true' || github.event_name == 'workflow_dispatch')
         # The rules logic is safety-critical. If the tests fail, do not send
         # the report (the last step tells the subscribers there is none).
         run: |
@@ -127,7 +143,7 @@ jobs:
 
       - name: Build email (dry run preview)
         id: build
-        if: steps.gate.outputs.proceed == 'true'
+        if: steps.gate.outputs.proceed == 'true' && (steps.due.outputs.paused != 'true' || github.event_name == 'workflow_dispatch')
         run: |
           node scripts/daily_email.js --json > /tmp/digest.json
           echo "Computed digest:"
@@ -135,13 +151,15 @@ jobs:
 
       - name: Send via Buttondown
         id: send
-        # The script applies the rowing-season gate itself and exits quietly
-        # (success, nothing sent) when today falls outside the season.
-        if: steps.gate.outputs.proceed == 'true' && github.event.inputs.dry_run != 'true'
+        # The script applies the Winter Rowing pause itself too, and exits
+        # quietly (success, nothing sent) while it lasts - unless forced.
+        if: >-
+          steps.gate.outputs.proceed == 'true' && github.event.inputs.dry_run != 'true' &&
+          (steps.due.outputs.paused != 'true' || github.event_name == 'workflow_dispatch')
         env:
           BUTTONDOWN_API_KEY: ${{ secrets.BUTTONDOWN_API_KEY }}
         run: |
-          if [ "${{ github.event.inputs.force_off_season }}" = "true" ]; then
+          if [ "${{ github.event.inputs.force_during_pause }}" = "true" ]; then
             node scripts/daily_email.js --send --force
           else
             node scripts/daily_email.js --send
@@ -153,10 +171,11 @@ jobs:
         # roworno.com (scripts/send_notice.js). A script of its own that loads
         # none of the code that failed, and its own tests first - a notice that
         # is itself broken stays unsent. Never once today's report or notice
-        # is out (so never twice, and no report after it), never off-season,
-        # never on a dry run.
+        # is out (so never twice, and no report after it), never while Winter
+        # Rowing pauses the email, never on a dry run.
         if: >-
           failure() && steps.gate.outputs.proceed == 'true' && github.event.inputs.dry_run != 'true' &&
+          steps.due.outputs.paused != 'true' &&
           (steps.tests.outcome == 'failure' || steps.build.outcome == 'failure' || steps.send.outcome == 'failure')
         env:
           BUTTONDOWN_API_KEY: ${{ secrets.BUTTONDOWN_API_KEY }}

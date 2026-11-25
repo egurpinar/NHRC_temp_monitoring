@@ -20,9 +20,9 @@ status using the site's own functions and compares against the email output.
 |---|---|
 | `daily_email.js` | Builds and sends the digest |
 | `send_notice.js` | The "No conditions report today - check roworno.com" notice, sent instead when the job's tests, build or send fail (see Safety behaviour) |
-| `test_send_notice.js` | Its tests (22): the words, the season and the day as `daily_email.js` has them, at most one email a day against a stand-in Buttondown, working with `daily_email.js` broken, and how the job runs it |
-| `test_daily_email.js` | Test suite (317 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, the NWS alerts and thunderstorms, and that every script and style from another server is pinned by its hash (Subresource Integrity), the chart libraries too. It reads no live data: not the network, not the checkout's `data.json`/`history.json` (stand-ins), so what those hold on the morning of a run cannot stop the email |
-| `test_time_travel.js` | Runs every test suite with the clock moved (`fakenow.js`, and a stand-in `date`) to the hours the email job really runs them (1-2 AM), the morning window's edges, the next daylight-saving changes, the season's edges and the new year. The 2 Nov 2026 email did not go out because two tests passed in the afternoon and failed at 1:58 AM. GitHub runs it on every push and every evening (`tests.yml`) |
+| `test_send_notice.js` | Its tests (18): the words and the day as `daily_email.js` has them, at most one email a day against a stand-in Buttondown, working with `daily_email.js` broken or gone, and how the job runs it (never while Winter Rowing pauses the email) |
+| `test_daily_email.js` | Test suite (321 tests): the email, and the website's script run against a fake network and clock - including where the water reading comes from, the Worker or the repository, the NWS alerts and thunderstorms, and that every script and style from another server is pinned by its hash (Subresource Integrity), the chart libraries too. It reads no live data: not the network, not the checkout's `data.json`/`history.json` (stand-ins), so what those hold on the morning of a run cannot stop the email |
+| `test_time_travel.js` | Runs every test suite with the clock moved (`fakenow.js`, and a stand-in `date`) to the hours the email job really runs them (1-2 AM), the morning window's edges, the next daylight-saving changes, March 15 and November 15 (the email's old season's edges) and the new year. The 2 Nov 2026 email did not go out because two tests passed in the afternoon and failed at 1:58 AM. GitHub runs it on every push and every evening (`tests.yml`) |
 | `run_suite.js` | Runs one suite for `tests.yml`: output and exit code unchanged, and on GitHub each failing test becomes an annotation - named on the run page and in GitHub's email without signing in. Tests: `test_run_suite.js` (8) |
 | `fakenow.js` | The moved clock for `test_time_travel.js`: node's `Date`, in every process and vm context a run starts |
 | `without_network.sh`, `no_network.js` | Run a command with the network cut off for every process it starts, and fail if anything tried to reach it - no test may depend on a server somewhere else |
@@ -98,8 +98,12 @@ people are on the water. A morning with no readings is passed over. Replayed
 over 2026's readings (March 29 to November 20), the old rule changed the zone
 70 times, the new one 4: Four Oar on March 31, Cold Water on April 11, no
 restrictions on May 17, Cold Water on October 22 - the day the committee
-announced it. When the latest mornings are on the other side of a line, the
-rules card and the email say how many so far (`zoneChangeText()`).
+announced it. Every day, under the zone's title on the rules card and in the
+email, the count towards a change is said (`zoneCount()`): "Mornings toward
+the Four Oar Rule: 2 of 3 below 50°F. If the next morning is below 50°F too,
+it starts at 11 AM that day." - or, with none yet, "0 of 3" and the latest
+morning's reading. Until 25 November 2026 it was said only once a morning had
+crossed a line, and members could not tell the rule was being counted.
 
 Why: GitHub's scheduler skipped or delayed so many runs that, in late October
 2026, the reading on the website was more than 45 minutes old 24% of the time -
@@ -238,29 +242,34 @@ it. The page loads `map/wind-map.js?v=` + the start of its SHA-256, so a new
 version reaches browsers at once; `scripts/test_map.js` says the value after
 any change.
 
-## Rowing season
+## When the email goes out: every day but during Winter Rowing
 
-The email sends **every day from March 15 through November 15** and pauses
-outside that window (246 days on, 119 days off). The season is set in one
-place — the `SEASON` constant at the top of `daily_email.js`:
+The email goes out **every day of the year, except while Winter Rowing is
+confirmed** (Safety Committee, 25 November 2026): three mornings in a row below
+40°F, or Winter Rowing set by the Committee (`ZONE_OVERRIDE` in `index.html`).
+The rule is `winterRowingConfirmed()` in `index.html`; `pauseFor()` in
+`daily_email.js` applies it.
 
-```js
-const SEASON = {
-  startMonth: 3,  startDay: 15,   // March 15
-  endMonth:  11,  endDay:   15,   // November 15
-};
-```
+- **The last email.** The night after Winter Rowing starts, one more email goes
+  out and says, in its zone box and its subject, that the emails pause until
+  Winter Rowing ends. They start again the night after it lifts (three mornings
+  in a row at 40°F or more). With the Committee's setting there is no last
+  email: the email cannot tell when it was set.
+- **Missing readings confirm nothing.** Too few mornings with readings, or
+  mornings back and forth across 40°F, put the page in Winter Rowing as the
+  stricter zone, but the email keeps going: a sensor that fails in the fall
+  does not stop it. Once Winter Rowing is confirmed, a sensor taken out for the
+  winter keeps it paused - for up to a year.
+- **The job asks first.** `daily_email.yml` runs `daily_email.js --due` before
+  its tests. It prints `send`, `last` or `paused` (and why, on stderr). Only a
+  clear `paused` skips the tests, the build, the send and the "no report today"
+  notice; anything else, an error included, lets the report go ahead.
+  `--send` applies the pause too; `--send --force` (or the manual run's
+  `force_during_pause`) sends anyway.
 
-Both endpoints are **inclusive**: March 15 and November 15 each get an email;
-March 14 and November 16 do not.
-
-Dates are evaluated in `America/New_York`, not UTC. This matters because the job
-fires at 05:00/06:00 UTC — on November 15 that is still the 15th locally, but a
-UTC comparison would read the 16th and end the season a day early. A range that
-wraps the new year (e.g. Nov 1 → Mar 31) is also supported.
-
-Change those four numbers to whatever the committee decides; nothing else needs
-editing. Previews still work off-season, so you can check the email year-round.
+Until 25 November 2026 the email ran from March 15 to November 15 (a `SEASON`
+constant), and from November 16, 2026 it sent nothing while Cold Water
+restrictions still applied. Previews (`--json`, the HTML) work at any time.
 
 ## Email rendering rules (read before editing the template)
 
@@ -360,8 +369,9 @@ won't pick up the change.
 ```bash
 node scripts/daily_email.js           # print the email HTML (no send)
 node scripts/daily_email.js --json    # print computed values
-node scripts/daily_email.js --send    # send (respects the season gate)
-node scripts/daily_email.js --send --force   # send even if off-season
+node scripts/daily_email.js --send    # send (none while Winter Rowing pauses the email)
+node scripts/daily_email.js --send --force   # send even then
+node scripts/daily_email.js --due     # is a report due tonight? send, last or paused
 node scripts/test_daily_email.js      # run the tests
 node scripts/test_time_travel.js      # every suite at 1-2 AM, DST, new year... (minutes)
 bash scripts/without_network.sh node scripts/test_time_travel.js   # ...and with no network, as tests.yml
@@ -426,7 +436,8 @@ It never fails the job; if the remote cannot be reached the email is still sent.
   step). It loads none of the code that failed and runs its own tests first
   (`test_send_notice.js`, which skip their checks against a `daily_email.js`
   that does not load, so that cannot stop the notice too). At most one email a
-  day: none outside the season, none if today's report or notice is already
+  day: none while Winter Rowing pauses the email (the job does not run it
+  then), none if today's report or notice is already
   out, none if Buttondown cannot say; and once the notice is out, a later run
   sends no report (its duplicate check counts the notice, whose slug starts
   with the day's).

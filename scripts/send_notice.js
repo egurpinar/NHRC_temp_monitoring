@@ -6,11 +6,13 @@
  * words and a link to the site.
  *
  * On its own on purpose: it loads neither daily_email.js nor index.html, the
- * code whose failure it reports. From daily_email.js it reads only the rowing
- * season, as text (test_send_notice.js keeps the two in step).
+ * code whose failure it reports - nor any other file.
  *
  * At most one email a day:
- *   - none outside the rowing season (no report was due);
+ *   - none while Winter Rowing pauses the email (no report was due): the job
+ *     does not run this then (daily_email.yml, its "Is a report due" step).
+ *     Until 25 Nov 2026 the email ran March 15 - November 15, and this read
+ *     those dates from daily_email.js;
  *   - none if today's report or notice already went out - both slugs start
  *     with the day's, nhrc-YYYY-MM-DD;
  *   - none if that cannot be checked (a second email is worse than none).
@@ -21,42 +23,10 @@
  *   node scripts/send_notice.js --send     # send it (BUTTONDOWN_API_KEY)
  */
 'use strict';
-const fs = require('fs');
-const path = require('path');
 
 const SITE = 'https://roworno.com';
 const API = 'https://api.buttondown.com/v1/emails';
 const ZONE = 'America/New_York';
-
-/** The rowing season as daily_email.js sets it, read from its text; null if it cannot be read. */
-function readSeason(src) {
-  if (src === undefined) {
-    try { src = fs.readFileSync(path.join(__dirname, 'daily_email.js'), 'utf8'); } catch (e) { return null; }
-  }
-  const block = /const SEASON = \{([^}]*)\}/.exec(src);
-  if (!block) return null;
-  const num = (k) => { const m = new RegExp(`\\b${k}:\\s*(\\d+)\\b`).exec(block[1]); return m ? Number(m[1]) : NaN; };
-  const [startMonth, startDay, endMonth, endDay] = ['startMonth', 'startDay', 'endMonth', 'endDay'].map(num);
-  const ok = (mo, d) => mo >= 1 && mo <= 12 && d >= 1 && d <= 31;
-  return ok(startMonth, startDay) && ok(endMonth, endDay) ? { startMonth, startDay, endMonth, endDay } : null;
-}
-
-/** The boathouse's calendar date for an instant. */
-function boathouseDate(now) {
-  const p = {};
-  for (const x of new Intl.DateTimeFormat('en-US', { timeZone: ZONE, year: 'numeric', month: 'numeric', day: 'numeric' })
-    .formatToParts(now)) if (x.type !== 'literal') p[x.type] = Number(x.value);
-  return p;
-}
-
-/** As daily_email.js's isInSeason: the boathouse's date, both ends included, a range may wrap the new year. */
-function inSeason(now, season) {
-  const { month, day } = boathouseDate(now);
-  const key = month * 100 + day;
-  const start = season.startMonth * 100 + season.startDay;
-  const end = season.endMonth * 100 + season.endDay;
-  return start <= end ? (key >= start && key <= end) : (key >= start || key <= end);
-}
 
 const ymd = (now) => new Intl.DateTimeFormat('en-CA', { timeZone: ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
 /** The day's slug, as daily_email.js's dailySlug: nhrc-YYYY-MM-DD. */
@@ -118,15 +88,6 @@ async function main(argv = process.argv.slice(2), now = new Date()) {
     console.log(`Subject: ${n.subject}\nSlug: ${n.slug}\n\n${n.html}`);
     return 0;
   }
-  const season = readSeason();
-  if (!season) {
-    console.log('Could not read the rowing season from daily_email.js - no notice sent.');
-    return 1;
-  }
-  if (!inSeason(now, season)) {
-    console.log(`Outside the rowing season (${season.startMonth}/${season.startDay} - ${season.endMonth}/${season.endDay}): no report was due, so no notice.`);
-    return 0;
-  }
   const key = process.env.BUTTONDOWN_API_KEY;
   if (!key) {
     console.log('BUTTONDOWN_API_KEY is not set - no notice sent.');
@@ -150,4 +111,4 @@ if (require.main === module) {
   main().then((code) => { process.exitCode = code; }, (e) => { console.error(`send_notice failed: ${e.message}`); process.exitCode = 1; });
 }
 
-module.exports = { SITE, readSeason, boathouseDate, inSeason, daySlug, noticeSlug, notice, todaysEmail, sendNotice, main };
+module.exports = { SITE, daySlug, noticeSlug, notice, todaysEmail, sendNotice, main };
